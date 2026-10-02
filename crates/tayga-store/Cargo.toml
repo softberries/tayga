@@ -1,0 +1,18 @@
+[package]
+name = "tayga-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clickhouse.workspace = true
+hex.workspace = true
+serde.workspace = true
+tayga-model.workspace = true
+tracing.workspace = true
+xxhash-rust.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+tokio.workspace = true
