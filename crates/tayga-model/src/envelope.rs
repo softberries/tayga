@@ -90,20 +90,38 @@ pub fn write_framed<W: std::io::Write>(w: &mut W, envelopes: &[Envelope]) -> std
 
 /// Reads envelopes written by [`write_framed`] until end of input.
 pub fn read_framed<R: std::io::Read>(r: &mut R) -> std::io::Result<Vec<Envelope>> {
+    use std::io::{Error, ErrorKind, Read};
     let mut out = Vec::new();
-    let mut len = [0u8; 4];
     loop {
-        match r.read_exact(&mut len) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(out),
-            Err(e) => return Err(e),
+        let mut len = [0u8; 4];
+        // Zero bytes before the next header is a clean end; 1-3 bytes is a truncated header.
+        let mut filled = 0;
+        while filled < len.len() {
+            match r.read(&mut len[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
         }
-        let mut buf = vec![0u8; u32::from_le_bytes(len) as usize];
-        r.read_exact(&mut buf)?;
-        out.push(
-            Envelope::decode(&buf)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
-        );
+        match filled {
+            0 => return Ok(out),
+            4 => {}
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::UnexpectedEof,
+                    "truncated frame header",
+                ));
+            }
+        }
+        let len = u32::from_le_bytes(len) as usize;
+        // `take` bounds the read; memory grows only with bytes actually present.
+        let mut buf = Vec::new();
+        r.take(len as u64).read_to_end(&mut buf)?;
+        if buf.len() != len {
+            return Err(Error::new(ErrorKind::UnexpectedEof, "truncated frame body"));
+        }
+        out.push(Envelope::decode(&buf).map_err(|e| Error::new(ErrorKind::InvalidData, e))?);
     }
 }
 
@@ -180,6 +198,21 @@ mod tests {
         let mut buf = Vec::new();
         write_framed(&mut buf, &[Envelope::traces(req(), 5)]).unwrap();
         buf.pop();
+        assert!(read_framed(&mut buf.as_slice()).is_err());
+    }
+
+    #[test]
+    fn framed_huge_length_prefix_errors_without_allocating() {
+        let mut buf = 0xFFFF_FFFFu32.to_le_bytes().to_vec();
+        buf.extend_from_slice(&[1, 2, 3]);
+        assert!(read_framed(&mut buf.as_slice()).is_err());
+    }
+
+    #[test]
+    fn framed_partial_header_errors() {
+        let mut buf = Vec::new();
+        write_framed(&mut buf, &[Envelope::traces(req(), 5)]).unwrap();
+        buf.extend_from_slice(&[7, 0]);
         assert!(read_framed(&mut buf.as_slice()).is_err());
     }
 }
