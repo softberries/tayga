@@ -15,7 +15,10 @@ fn default_database() -> String {
     "tayga".to_string()
 }
 
-const MIGRATIONS: &[(u32, &str)] = &[(1, include_str!("../migrations/0001_raw_tables.sql"))];
+const MIGRATIONS: &[(u32, &str)] = &[
+    (1, include_str!("../migrations/0001_raw_tables.sql")),
+    (2, include_str!("../migrations/0002_analysis_tables.sql")),
+];
 
 pub fn split_statements(sql: &str) -> Vec<String> {
     sql.split(';')
@@ -75,5 +78,6 @@ mod tests {
     fn migrations_are_strictly_increasing() {
         assert!(MIGRATIONS.windows(2).all(|w| w[0].0 < w[1].0));
         assert_eq!(split_statements(MIGRATIONS[0].1).len(), 2);
+        assert_eq!(split_statements(MIGRATIONS[1].1).len(), 3);
     }
 }
