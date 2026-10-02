@@ -1,6 +1,6 @@
 //! OTLP/HTTP: protobuf or JSON bodies, optionally gzip-compressed.
 
-use crate::records::{log_records, now_unix_nano, trace_records};
+use crate::records::{OutRecord, log_records, now_unix_nano, trace_records};
 use crate::sink::Sink;
 use axum::Router;
 use axum::body::Bytes;
@@ -10,8 +10,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use std::io::Read;
 use std::sync::Arc;
-use tayga_model::otlp::collector::logs::v1::{ExportLogsServiceRequest, ExportLogsServiceResponse};
-use tayga_model::otlp::collector::trace::v1::{ExportTraceServiceRequest, ExportTraceServiceResponse};
+use tayga_model::otlp::collector::logs::v1::ExportLogsServiceResponse;
+use tayga_model::otlp::collector::trace::v1::ExportTraceServiceResponse;
 
 const MAX_BODY: usize = 64 << 20;
 
@@ -77,33 +77,38 @@ fn encode<T: prost::Message + serde::Serialize>(format: Format, msg: &T) -> Resp
 }
 
 async fn traces<S: Sink>(State(sink): State<Arc<S>>, headers: HeaderMap, body: Bytes) -> Response {
-    let fmt = format(&headers);
-    let req: ExportTraceServiceRequest = match body_bytes(&headers, body).and_then(|b| decode(fmt, &b)) {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
-    };
-    let records = trace_records(req, now_unix_nano());
-    if !records.is_empty()
-        && let Err(e) = sink.publish(records).await
-    {
-        return (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response();
-    }
-    encode(fmt, &ExportTraceServiceResponse::default())
+    handle(&*sink, &headers, body, trace_records, ExportTraceServiceResponse::default()).await
 }
 
 async fn logs<S: Sink>(State(sink): State<Arc<S>>, headers: HeaderMap, body: Bytes) -> Response {
-    let fmt = format(&headers);
-    let req: ExportLogsServiceRequest = match body_bytes(&headers, body).and_then(|b| decode(fmt, &b)) {
+    handle(&*sink, &headers, body, log_records, ExportLogsServiceResponse::default()).await
+}
+
+/// Shared flow: decode (400 on failure), convert to records, publish (503 on failure), encode the response.
+async fn handle<S, Req, Resp>(
+    sink: &S,
+    headers: &HeaderMap,
+    body: Bytes,
+    to_records: fn(Req, u64) -> Vec<OutRecord>,
+    response: Resp,
+) -> Response
+where
+    S: Sink,
+    Req: prost::Message + Default + serde::de::DeserializeOwned,
+    Resp: prost::Message + serde::Serialize,
+{
+    let fmt = format(headers);
+    let req: Req = match body_bytes(headers, body).and_then(|b| decode(fmt, &b)) {
         Ok(r) => r,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
-    let records = log_records(req, now_unix_nano());
+    let records = to_records(req, now_unix_nano());
     if !records.is_empty()
         && let Err(e) = sink.publish(records).await
     {
         return (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response();
     }
-    encode(fmt, &ExportLogsServiceResponse::default())
+    encode(fmt, &response)
 }
 
 #[cfg(test)]
@@ -149,6 +154,25 @@ mod tests {
         let body = enc.finish().unwrap();
         assert_eq!(post_to(sink.clone(), "/v1/traces", "application/x-protobuf", true, body).await, StatusCode::OK);
         assert_eq!(sink.published.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn http_accepts_logs_protobuf() {
+        use tayga_model::otlp::collector::logs::v1::ExportLogsServiceRequest;
+        use tayga_model::otlp::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
+        let sink = Arc::new(FakeSink::default());
+        let req = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![LogRecord { trace_id: vec![3; 16], ..Default::default() }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        let body = prost::Message::encode_to_vec(&req);
+        assert_eq!(post_to(sink.clone(), "/v1/logs", "application/x-protobuf", false, body).await, StatusCode::OK);
+        assert_eq!(sink.published.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

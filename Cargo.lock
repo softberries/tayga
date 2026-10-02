@@ -1277,6 +1277,7 @@ dependencies = [
  "tayga-model",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tower",
  "tracing",
