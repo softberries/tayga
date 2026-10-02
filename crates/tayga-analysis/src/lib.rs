@@ -1,5 +1,6 @@
 //! Pure trace analysis: no I/O, no clocks.
 
+pub mod baseline;
 pub mod critical_path;
 pub mod fingerprint;
 pub mod model;
