@@ -25,6 +25,14 @@ impl RoutingKey {
             RoutingKey::Service(name) => name.as_bytes().to_vec(),
         }
     }
+
+    /// Value of the `tayga-key` header: disambiguates a 16-byte service name from a trace id.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            RoutingKey::Trace(_) => "trace",
+            RoutingKey::Service(_) => "service",
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -430,5 +438,11 @@ mod tests {
     fn routing_key_trace_to_bytes_is_raw_bytes() {
         let key = RoutingKey::Trace(TraceId([7; 16]));
         assert_eq!(key.to_bytes(), vec![7u8; 16]);
+    }
+
+    #[test]
+    fn routing_key_kind_str() {
+        assert_eq!(RoutingKey::Trace(TraceId([7; 16])).kind_str(), "trace");
+        assert_eq!(RoutingKey::Service("ad".into()).kind_str(), "service");
     }
 }

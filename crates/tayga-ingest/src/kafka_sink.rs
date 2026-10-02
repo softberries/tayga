@@ -27,7 +27,7 @@ impl Sink for KafkaSink {
             let rec = FutureRecord::to(&self.topic)
                 .key(&r.key)
                 .payload(&r.payload)
-                .headers(tayga_kafka::headers(r.kind));
+                .headers(tayga_kafka::headers(r.kind, r.key_kind));
             // Zero queue timeout: a full local queue fails fast and becomes backpressure.
             self.producer.send(rec, Duration::ZERO)
         });

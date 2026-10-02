@@ -9,7 +9,7 @@ use rdkafka::message::{Header, OwnedHeaders};
 use rdkafka::producer::FutureProducer;
 use rdkafka::types::RDKafkaErrorCode;
 use serde::Deserialize;
-use tayga_model::envelope::{HEADER_KIND, HEADER_SCHEMA, Kind, SCHEMA_VERSION};
+use tayga_model::envelope::{HEADER_KEY_KIND, HEADER_KIND, HEADER_SCHEMA, Kind, SCHEMA_VERSION};
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct KafkaSettings {
@@ -66,10 +66,12 @@ pub async fn ensure_topic(s: &KafkaSettings) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn headers(kind: Kind) -> OwnedHeaders {
+/// `key_kind` is `RoutingKey::kind_str()`: "trace" or "service".
+pub fn headers(kind: Kind, key_kind: &str) -> OwnedHeaders {
     OwnedHeaders::new()
         .insert(Header { key: HEADER_KIND, value: Some(kind.as_str()) })
         .insert(Header { key: HEADER_SCHEMA, value: Some(SCHEMA_VERSION) })
+        .insert(Header { key: HEADER_KEY_KIND, value: Some(key_kind) })
 }
 
 #[cfg(test)]
@@ -85,10 +87,17 @@ mod tests {
     }
 
     #[test]
-    fn headers_carry_kind_and_schema() {
-        let h = headers(Kind::Logs);
+    fn headers_carry_kind_schema_and_key_kind() {
+        let h = headers(Kind::Logs, "service");
         let pairs: Vec<(String, Vec<u8>)> =
             h.iter().map(|x| (x.key.to_string(), x.value.unwrap_or_default().to_vec())).collect();
-        assert_eq!(pairs, vec![("tayga-kind".into(), b"logs".to_vec()), ("tayga-schema".into(), b"1".to_vec())]);
+        assert_eq!(
+            pairs,
+            vec![
+                ("tayga-kind".into(), b"logs".to_vec()),
+                ("tayga-schema".into(), b"1".to_vec()),
+                ("tayga-key".into(), b"service".to_vec()),
+            ]
+        );
     }
 }

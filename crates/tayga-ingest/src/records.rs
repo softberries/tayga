@@ -6,6 +6,8 @@ use tayga_model::split::{split_logs, split_traces};
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutRecord {
     pub key: Vec<u8>,
+    /// `tayga-key` header value: "trace" or "service".
+    pub key_kind: &'static str,
     pub kind: Kind,
     pub payload: Vec<u8>,
 }
@@ -22,6 +24,7 @@ pub fn trace_records(req: ExportTraceServiceRequest, now_unix_nano: u64) -> Vec<
         .into_iter()
         .map(|r| OutRecord {
             key: r.key.to_bytes(),
+            key_kind: r.key.kind_str(),
             kind: Kind::Traces,
             payload: Envelope::traces(r.request, now_unix_nano).encode(),
         })
@@ -33,6 +36,7 @@ pub fn log_records(req: ExportLogsServiceRequest, now_unix_nano: u64) -> Vec<Out
         .into_iter()
         .map(|r| OutRecord {
             key: r.key.to_bytes(),
+            key_kind: r.key.kind_str(),
             kind: Kind::Logs,
             payload: Envelope::logs(r.request, now_unix_nano).encode(),
         })
@@ -59,6 +63,7 @@ mod tests {
         let out = trace_records(req, 5);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].key, vec![1; 16]);
+        assert_eq!(out[0].key_kind, "trace");
         assert_eq!(out[0].kind, Kind::Traces);
         let env = Envelope::decode(&out[1].payload).unwrap();
         assert_eq!(env.received_at_unix_nano, 5);

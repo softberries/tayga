@@ -6,6 +6,8 @@ use crate::otlp::collector::trace::v1::ExportTraceServiceRequest;
 pub const SCHEMA_VERSION: &str = "1";
 pub const HEADER_KIND: &str = "tayga-kind";
 pub const HEADER_SCHEMA: &str = "tayga-schema";
+/// Routing key kind: `trace` (16 raw trace id bytes) or `service` (UTF-8 service name).
+pub const HEADER_KEY_KIND: &str = "tayga-key";
 
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct Envelope {
