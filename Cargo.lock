@@ -1569,6 +1569,7 @@ dependencies = [
  "config",
  "serde",
  "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 

@@ -72,6 +72,41 @@ impl Envelope {
     }
 }
 
+/// Writes envelopes as `u32` little-endian length + protobuf bytes (fixture files).
+pub fn write_framed<W: std::io::Write>(w: &mut W, envelopes: &[Envelope]) -> std::io::Result<()> {
+    for env in envelopes {
+        let bytes = env.encode();
+        let len = u32::try_from(bytes.len()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "envelope larger than 4 GiB",
+            )
+        })?;
+        w.write_all(&len.to_le_bytes())?;
+        w.write_all(&bytes)?;
+    }
+    Ok(())
+}
+
+/// Reads envelopes written by [`write_framed`] until end of input.
+pub fn read_framed<R: std::io::Read>(r: &mut R) -> std::io::Result<Vec<Envelope>> {
+    let mut out = Vec::new();
+    let mut len = [0u8; 4];
+    loop {
+        match r.read_exact(&mut len) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(out),
+            Err(e) => return Err(e),
+        }
+        let mut buf = vec![0u8; u32::from_le_bytes(len) as usize];
+        r.read_exact(&mut buf)?;
+        out.push(
+            Envelope::decode(&buf)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +151,35 @@ mod tests {
     #[test]
     fn decode_garbage_fails() {
         assert!(Envelope::decode(&[0xff, 0xff, 0xff]).is_err());
+    }
+
+    #[test]
+    fn wire_format_is_pinned() {
+        // fixed64 field 1 (tag 0x09) + 8 LE bytes, then oneof field 3 (tag 0x1a) with length 0.
+        let env = Envelope::logs(ExportLogsServiceRequest::default(), 1);
+        assert_eq!(env.encode(), vec![0x09, 1, 0, 0, 0, 0, 0, 0, 0, 0x1a, 0x00]);
+        // proto3 omits a zero fixed64; field 2 (tag 0x12) for traces.
+        let env = Envelope::traces(ExportTraceServiceRequest::default(), 0);
+        assert_eq!(env.encode(), vec![0x12, 0x00]);
+    }
+
+    #[test]
+    fn framed_roundtrip() {
+        let envs = vec![
+            Envelope::traces(req(), 5),
+            Envelope::logs(ExportLogsServiceRequest::default(), 6),
+        ];
+        let mut buf = Vec::new();
+        write_framed(&mut buf, &envs).unwrap();
+        assert_eq!(read_framed(&mut buf.as_slice()).unwrap(), envs);
+        assert!(read_framed(&mut [].as_slice()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn framed_truncated_input_errors() {
+        let mut buf = Vec::new();
+        write_framed(&mut buf, &[Envelope::traces(req(), 5)]).unwrap();
+        buf.pop();
+        assert!(read_framed(&mut buf.as_slice()).is_err());
     }
 }

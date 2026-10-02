@@ -9,4 +9,5 @@ anyhow.workspace = true
 config.workspace = true
 serde.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 tracing-subscriber.workspace = true

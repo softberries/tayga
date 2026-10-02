@@ -4,13 +4,13 @@ use rdkafka::message::{BorrowedMessage, Headers};
 use rdkafka::{Message, Offset, TopicPartitionList};
 use serde::Deserialize;
 use std::time::{Duration, Instant};
+use tayga_common::retry::retry_until;
 use tayga_kafka::KafkaSettings;
 use tayga_model::envelope::{Envelope, HEADER_SCHEMA, SCHEMA_VERSION};
 use tayga_store::ClickHouseSettings;
 use tayga_store::flatten::rows_from_envelope;
 use tayga_store::store::Store;
 use tayga_writer::batch::Batch;
-use tayga_writer::retry::retry_until;
 use tokio::sync::watch;
 
 const GROUP: &str = "tayga-writer";
@@ -78,17 +78,14 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run(settings: Settings) -> anyhow::Result<()> {
+    settings.kafka.validate()?;
     let store = Store::new(&settings.clickhouse);
     tayga_kafka::ensure_topic(&settings.kafka).await?;
     let consumer = tayga_kafka::consumer(&settings.kafka, GROUP)?;
     consumer.subscribe(&[&settings.kafka.topic])?;
     let max_age = Duration::from_millis(settings.writer.max_age_ms);
     let mut batch = Batch::default();
-    let (stop_tx, mut stop_rx) = watch::channel(false);
-    tokio::spawn(async move {
-        tayga_common::shutdown_signal().await;
-        let _ = stop_tx.send(true);
-    });
+    let mut stop_rx = tayga_common::shutdown_flag();
     tracing::info!(topic = %settings.kafka.topic, "tayga-writer consuming");
 
     // Set when shutdown interrupted a flush: nothing was committed, rows are re-read on restart.
@@ -176,7 +173,7 @@ async fn flush(
         store.insert_logs(&batch.logs).await
     };
     let stored = match shutdown {
-        Some(rx) => retry_until(insert, rx).await.is_some(),
+        Some(rx) => retry_until("clickhouse insert", insert, rx).await.is_some(),
         None => match insert().await {
             Ok(()) => true,
             Err(e) => {
