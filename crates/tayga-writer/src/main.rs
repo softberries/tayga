@@ -47,7 +47,10 @@ struct WriterSettings {
 
 impl Default for WriterSettings {
     fn default() -> Self {
-        Self { max_rows: default_max_rows(), max_age_ms: default_max_age_ms() }
+        Self {
+            max_rows: default_max_rows(),
+            max_age_ms: default_max_age_ms(),
+        }
     }
 }
 
@@ -125,7 +128,15 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
         }
         if batch.should_flush(Instant::now(), settings.writer.max_rows, max_age) {
             let pending = std::mem::take(&mut batch);
-            if !flush(&store, &consumer, &settings.kafka.topic, pending, Some(&mut stop_rx)).await? {
+            if !flush(
+                &store,
+                &consumer,
+                &settings.kafka.topic,
+                pending,
+                Some(&mut stop_rx),
+            )
+            .await?
+            {
                 interrupted = true;
                 break;
             }
@@ -175,7 +186,10 @@ async fn flush(
         },
     };
     if !stored {
-        tracing::warn!(rows = batch.rows(), "rows remain uncommitted and will be re-read on restart");
+        tracing::warn!(
+            rows = batch.rows(),
+            "rows remain uncommitted and will be re-read on restart"
+        );
         return Ok(false);
     }
     let mut tpl = TopicPartitionList::new();
@@ -186,6 +200,10 @@ async fn flush(
         // Typically a revoked partition after rebalance; its rows are re-read and deduplicated.
         tracing::warn!(error = %e, "offset commit failed");
     }
-    tracing::debug!(spans = batch.spans.len(), logs = batch.logs.len(), "flushed");
+    tracing::debug!(
+        spans = batch.spans.len(),
+        logs = batch.logs.len(),
+        "flushed"
+    );
     Ok(true)
 }

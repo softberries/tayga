@@ -13,7 +13,14 @@ pub struct Batch {
 }
 
 impl Batch {
-    pub fn add(&mut self, partition: i32, offset: i64, spans: Vec<SpanRow>, logs: Vec<LogRow>, now: Instant) {
+    pub fn add(
+        &mut self,
+        partition: i32,
+        offset: i64,
+        spans: Vec<SpanRow>,
+        logs: Vec<LogRow>,
+        now: Instant,
+    ) {
         self.spans.extend(spans);
         self.logs.extend(logs);
         let last = self.last_offsets.entry(partition).or_insert(offset);

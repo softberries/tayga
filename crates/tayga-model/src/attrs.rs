@@ -21,7 +21,11 @@ pub fn any_value_to_string(v: &AnyValue) -> String {
                 .values
                 .iter()
                 .map(|p| {
-                    let s = p.value.as_ref().map(any_value_to_string).unwrap_or_default();
+                    let s = p
+                        .value
+                        .as_ref()
+                        .map(any_value_to_string)
+                        .unwrap_or_default();
                     (p.key.clone(), serde_json::Value::String(s))
                 })
                 .collect();
@@ -35,7 +39,15 @@ pub fn any_value_to_string(v: &AnyValue) -> String {
 pub fn attrs_to_pairs(attrs: &[KeyValue]) -> Vec<(String, String)> {
     attrs
         .iter()
-        .map(|kv| (kv.key.clone(), kv.value.as_ref().map(any_value_to_string).unwrap_or_default()))
+        .map(|kv| {
+            (
+                kv.key.clone(),
+                kv.value
+                    .as_ref()
+                    .map(any_value_to_string)
+                    .unwrap_or_default(),
+            )
+        })
         .collect()
 }
 
@@ -54,16 +66,45 @@ mod tests {
     use crate::otlp::common::v1::{ArrayValue, KeyValueList};
 
     fn kv(key: &str, value: Value) -> KeyValue {
-        KeyValue { key: key.into(), value: Some(AnyValue { value: Some(value) }), ..Default::default() }
+        KeyValue {
+            key: key.into(),
+            value: Some(AnyValue { value: Some(value) }),
+            ..Default::default()
+        }
     }
 
     #[test]
     fn scalars() {
-        assert_eq!(any_value_to_string(&AnyValue { value: Some(Value::StringValue("a".into())) }), "a");
-        assert_eq!(any_value_to_string(&AnyValue { value: Some(Value::IntValue(-3)) }), "-3");
-        assert_eq!(any_value_to_string(&AnyValue { value: Some(Value::BoolValue(true)) }), "true");
-        assert_eq!(any_value_to_string(&AnyValue { value: Some(Value::DoubleValue(1.5)) }), "1.5");
-        assert_eq!(any_value_to_string(&AnyValue { value: Some(Value::BytesValue(vec![0xff])) }), "ff");
+        assert_eq!(
+            any_value_to_string(&AnyValue {
+                value: Some(Value::StringValue("a".into()))
+            }),
+            "a"
+        );
+        assert_eq!(
+            any_value_to_string(&AnyValue {
+                value: Some(Value::IntValue(-3))
+            }),
+            "-3"
+        );
+        assert_eq!(
+            any_value_to_string(&AnyValue {
+                value: Some(Value::BoolValue(true))
+            }),
+            "true"
+        );
+        assert_eq!(
+            any_value_to_string(&AnyValue {
+                value: Some(Value::DoubleValue(1.5))
+            }),
+            "1.5"
+        );
+        assert_eq!(
+            any_value_to_string(&AnyValue {
+                value: Some(Value::BytesValue(vec![0xff]))
+            }),
+            "ff"
+        );
         assert_eq!(any_value_to_string(&AnyValue { value: None }), "");
     }
 
@@ -72,21 +113,30 @@ mod tests {
         let arr = AnyValue {
             value: Some(Value::ArrayValue(ArrayValue {
                 values: vec![
-                    AnyValue { value: Some(Value::StringValue("x".into())) },
-                    AnyValue { value: Some(Value::IntValue(2)) },
+                    AnyValue {
+                        value: Some(Value::StringValue("x".into())),
+                    },
+                    AnyValue {
+                        value: Some(Value::IntValue(2)),
+                    },
                 ],
             })),
         };
         assert_eq!(any_value_to_string(&arr), r#"["x","2"]"#);
         let map = AnyValue {
-            value: Some(Value::KvlistValue(KeyValueList { values: vec![kv("k", Value::StringValue("v".into()))] })),
+            value: Some(Value::KvlistValue(KeyValueList {
+                values: vec![kv("k", Value::StringValue("v".into()))],
+            })),
         };
         assert_eq!(any_value_to_string(&map), r#"{"k":"v"}"#);
     }
 
     #[test]
     fn service_name_from_resource_or_default() {
-        let r = Resource { attributes: vec![kv("service.name", Value::StringValue("checkout".into()))], ..Default::default() };
+        let r = Resource {
+            attributes: vec![kv("service.name", Value::StringValue("checkout".into()))],
+            ..Default::default()
+        };
         assert_eq!(service_name(Some(&r)), "checkout");
         assert_eq!(service_name(Some(&Resource::default())), UNKNOWN_SERVICE);
         assert_eq!(service_name(None), UNKNOWN_SERVICE);
@@ -94,7 +144,16 @@ mod tests {
 
     #[test]
     fn pairs_keep_order() {
-        let p = attrs_to_pairs(&[kv("a", Value::IntValue(1)), kv("b", Value::StringValue("x".into()))]);
-        assert_eq!(p, vec![("a".to_string(), "1".to_string()), ("b".to_string(), "x".to_string())]);
+        let p = attrs_to_pairs(&[
+            kv("a", Value::IntValue(1)),
+            kv("b", Value::StringValue("x".into())),
+        ]);
+        assert_eq!(
+            p,
+            vec![
+                ("a".to_string(), "1".to_string()),
+                ("b".to_string(), "x".to_string())
+            ]
+        );
     }
 }

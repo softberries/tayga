@@ -9,7 +9,11 @@ pub struct Store {
 
 impl Store {
     pub fn new(s: &ClickHouseSettings) -> Self {
-        Self { client: Client::default().with_url(&s.url).with_database(&s.database) }
+        Self {
+            client: Client::default()
+                .with_url(&s.url)
+                .with_database(&s.database),
+        }
     }
 
     pub fn client(&self) -> &Client {

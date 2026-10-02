@@ -6,10 +6,10 @@ use crate::ids::TraceId;
 use crate::otlp::collector::logs::v1::ExportLogsServiceRequest;
 use crate::otlp::collector::trace::v1::ExportTraceServiceRequest;
 use crate::otlp::common::v1::InstrumentationScope;
+use crate::otlp::logs::v1::LogRecord;
 use crate::otlp::logs::v1::{ResourceLogs, ScopeLogs};
 use crate::otlp::resource::v1::Resource;
 use crate::otlp::trace::v1::{ResourceSpans, ScopeSpans, Span};
-use crate::otlp::logs::v1::LogRecord;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -53,7 +53,11 @@ fn group_for<'a, R>(
     key: RoutingKey,
 ) -> &'a mut Group<R> {
     let i = *index.entry(key.clone()).or_insert_with(|| {
-        groups.push(Group { key, resources: Vec::new(), last: None });
+        groups.push(Group {
+            key,
+            resources: Vec::new(),
+            last: None,
+        });
         groups.len() - 1
     });
     &mut groups[i]
@@ -83,16 +87,10 @@ trait SignalShape {
     ) -> (Option<InstrumentationScope>, String, Vec<Self::Item>);
 
     /// Create an empty resource shell with only resource and schema_url metadata.
-    fn new_empty_resource(
-        resource: &Option<Resource>,
-        schema_url: String,
-    ) -> Self::Resource;
+    fn new_empty_resource(resource: &Option<Resource>, schema_url: String) -> Self::Resource;
 
     /// Create an empty scope shell with only scope and schema_url metadata.
-    fn new_empty_scope(
-        scope: &Option<InstrumentationScope>,
-        schema_url: String,
-    ) -> Self::Scope;
+    fn new_empty_scope(scope: &Option<InstrumentationScope>, schema_url: String) -> Self::Scope;
 
     /// Get mutable access to the scopes vector in a resource.
     fn get_scopes_mut(resource: &mut Self::Resource) -> &mut Vec<Self::Scope>;
@@ -126,14 +124,13 @@ impl SignalShape for TracesShape {
         (resource.resource, resource.schema_url, resource.scope_spans)
     }
 
-    fn consume_items_from_scope(scope: ScopeSpans) -> (Option<InstrumentationScope>, String, Vec<Span>) {
+    fn consume_items_from_scope(
+        scope: ScopeSpans,
+    ) -> (Option<InstrumentationScope>, String, Vec<Span>) {
         (scope.scope, scope.schema_url, scope.spans)
     }
 
-    fn new_empty_resource(
-        resource: &Option<Resource>,
-        schema_url: String,
-    ) -> ResourceSpans {
+    fn new_empty_resource(resource: &Option<Resource>, schema_url: String) -> ResourceSpans {
         ResourceSpans {
             resource: resource.clone(),
             schema_url,
@@ -141,10 +138,7 @@ impl SignalShape for TracesShape {
         }
     }
 
-    fn new_empty_scope(
-        scope: &Option<InstrumentationScope>,
-        schema_url: String,
-    ) -> ScopeSpans {
+    fn new_empty_scope(scope: &Option<InstrumentationScope>, schema_url: String) -> ScopeSpans {
         ScopeSpans {
             scope: scope.clone(),
             schema_url,
@@ -161,7 +155,9 @@ impl SignalShape for TracesShape {
     }
 
     fn build_request(resources: Vec<ResourceSpans>) -> ExportTraceServiceRequest {
-        ExportTraceServiceRequest { resource_spans: resources }
+        ExportTraceServiceRequest {
+            resource_spans: resources,
+        }
     }
 }
 
@@ -187,14 +183,13 @@ impl SignalShape for LogsShape {
         (resource.resource, resource.schema_url, resource.scope_logs)
     }
 
-    fn consume_items_from_scope(scope: ScopeLogs) -> (Option<InstrumentationScope>, String, Vec<LogRecord>) {
+    fn consume_items_from_scope(
+        scope: ScopeLogs,
+    ) -> (Option<InstrumentationScope>, String, Vec<LogRecord>) {
         (scope.scope, scope.schema_url, scope.log_records)
     }
 
-    fn new_empty_resource(
-        resource: &Option<Resource>,
-        schema_url: String,
-    ) -> ResourceLogs {
+    fn new_empty_resource(resource: &Option<Resource>, schema_url: String) -> ResourceLogs {
         ResourceLogs {
             resource: resource.clone(),
             schema_url,
@@ -202,10 +197,7 @@ impl SignalShape for LogsShape {
         }
     }
 
-    fn new_empty_scope(
-        scope: &Option<InstrumentationScope>,
-        schema_url: String,
-    ) -> ScopeLogs {
+    fn new_empty_scope(scope: &Option<InstrumentationScope>, schema_url: String) -> ScopeLogs {
         ScopeLogs {
             scope: scope.clone(),
             schema_url,
@@ -222,7 +214,9 @@ impl SignalShape for LogsShape {
     }
 
     fn build_request(resources: Vec<ResourceLogs>) -> ExportLogsServiceRequest {
-        ExportLogsServiceRequest { resource_logs: resources }
+        ExportLogsServiceRequest {
+            resource_logs: resources,
+        }
     }
 }
 
@@ -234,8 +228,7 @@ fn split_impl<Shape: SignalShape>(req: Shape::Request) -> Vec<Routed<Shape::Requ
     let resources = Shape::consume_resources(req);
 
     for (ri, rs) in resources.into_iter().enumerate() {
-        let (resource_field, resource_schema_url, scopes) =
-            Shape::consume_scopes_from_resource(rs);
+        let (resource_field, resource_schema_url, scopes) = Shape::consume_scopes_from_resource(rs);
         let service = service_name(resource_field.as_ref());
 
         for (si, ss) in scopes.into_iter().enumerate() {
@@ -258,13 +251,13 @@ fn split_impl<Shape: SignalShape>(req: Shape::Request) -> Vec<Routed<Shape::Requ
                 let res = g.resources.last_mut().expect("resource pushed above");
 
                 if g.last != Some((ri, si)) {
-                    let new_scope =
-                        Shape::new_empty_scope(&scope_field, scope_schema_url.clone());
+                    let new_scope = Shape::new_empty_scope(&scope_field, scope_schema_url.clone());
                     Shape::get_scopes_mut(res).push(new_scope);
                 }
 
-                let scope =
-                    Shape::get_scopes_mut(res).last_mut().expect("scope pushed above");
+                let scope = Shape::get_scopes_mut(res)
+                    .last_mut()
+                    .expect("scope pushed above");
                 Shape::add_item_to_scope(scope, item);
 
                 g.last = Some((ri, si));
@@ -301,7 +294,9 @@ mod tests {
         Some(Resource {
             attributes: vec![KeyValue {
                 key: "service.name".into(),
-                value: Some(AnyValue { value: Some(Value::StringValue(svc.into())) }),
+                value: Some(AnyValue {
+                    value: Some(Value::StringValue(svc.into())),
+                }),
                 ..Default::default()
             }],
             ..Default::default()
@@ -309,11 +304,19 @@ mod tests {
     }
 
     fn scope(name: &str) -> Option<InstrumentationScope> {
-        Some(InstrumentationScope { name: name.into(), ..Default::default() })
+        Some(InstrumentationScope {
+            name: name.into(),
+            ..Default::default()
+        })
     }
 
     fn span(trace: u8, name: &str) -> Span {
-        Span { trace_id: vec![trace; 16], span_id: vec![trace; 8], name: name.into(), ..Default::default() }
+        Span {
+            trace_id: vec![trace; 16],
+            span_id: vec![trace; 8],
+            name: name.into(),
+            ..Default::default()
+        }
     }
 
     fn span_names(r: &ExportTraceServiceRequest) -> Vec<(String, String, String)> {
@@ -322,9 +325,15 @@ mod tests {
             .flat_map(|rs| {
                 let svc = service_name(rs.resource.as_ref());
                 rs.scope_spans.iter().flat_map(move |ss| {
-                    let sc = ss.scope.as_ref().map(|s| s.name.clone()).unwrap_or_default();
+                    let sc = ss
+                        .scope
+                        .as_ref()
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
                     let svc = svc.clone();
-                    ss.spans.iter().map(move |s| (svc.clone(), sc.clone(), s.name.clone()))
+                    ss.spans
+                        .iter()
+                        .map(move |s| (svc.clone(), sc.clone(), s.name.clone()))
                 })
             })
             .collect()
@@ -337,14 +346,26 @@ mod tests {
                 ResourceSpans {
                     resource: resource("frontend"),
                     scope_spans: vec![
-                        ScopeSpans { scope: scope("http"), spans: vec![span(1, "a"), span(2, "b")], ..Default::default() },
-                        ScopeSpans { scope: scope("grpc"), spans: vec![span(1, "c")], ..Default::default() },
+                        ScopeSpans {
+                            scope: scope("http"),
+                            spans: vec![span(1, "a"), span(2, "b")],
+                            ..Default::default()
+                        },
+                        ScopeSpans {
+                            scope: scope("grpc"),
+                            spans: vec![span(1, "c")],
+                            ..Default::default()
+                        },
                     ],
                     ..Default::default()
                 },
                 ResourceSpans {
                     resource: resource("checkout"),
-                    scope_spans: vec![ScopeSpans { scope: scope("grpc"), spans: vec![span(2, "d")], ..Default::default() }],
+                    scope_spans: vec![ScopeSpans {
+                        scope: scope("grpc"),
+                        spans: vec![span(2, "d")],
+                        ..Default::default()
+                    }],
                     ..Default::default()
                 },
             ],
@@ -377,7 +398,10 @@ mod tests {
         let req = ExportTraceServiceRequest {
             resource_spans: vec![ResourceSpans {
                 resource: resource("ad"),
-                scope_spans: vec![ScopeSpans { spans: vec![bad, span(0, "zero")], ..Default::default() }],
+                scope_spans: vec![ScopeSpans {
+                    spans: vec![bad, span(0, "zero")],
+                    ..Default::default()
+                }],
                 ..Default::default()
             }],
         };
@@ -396,12 +420,18 @@ mod tests {
 
     #[test]
     fn split_logs_by_trace_or_service() {
-        let with_trace = LogRecord { trace_id: vec![3; 16], ..Default::default() };
+        let with_trace = LogRecord {
+            trace_id: vec![3; 16],
+            ..Default::default()
+        };
         let without = LogRecord::default();
         let req = ExportLogsServiceRequest {
             resource_logs: vec![ResourceLogs {
                 resource: resource("cart"),
-                scope_logs: vec![ScopeLogs { log_records: vec![with_trace, without], ..Default::default() }],
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![with_trace, without],
+                    ..Default::default()
+                }],
                 ..Default::default()
             }],
         };
@@ -409,7 +439,12 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].key, RoutingKey::Trace(TraceId([3; 16])));
         assert_eq!(out[1].key, RoutingKey::Service("cart".into()));
-        assert_eq!(out[1].request.resource_logs[0].scope_logs[0].log_records.len(), 1);
+        assert_eq!(
+            out[1].request.resource_logs[0].scope_logs[0]
+                .log_records
+                .len(),
+            1
+        );
     }
 
     #[test]

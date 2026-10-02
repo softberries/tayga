@@ -4,7 +4,9 @@ use std::sync::Arc;
 use tayga_model::otlp::collector::logs::v1::logs_service_server::LogsService;
 use tayga_model::otlp::collector::logs::v1::{ExportLogsServiceRequest, ExportLogsServiceResponse};
 use tayga_model::otlp::collector::trace::v1::trace_service_server::TraceService;
-use tayga_model::otlp::collector::trace::v1::{ExportTraceServiceRequest, ExportTraceServiceResponse};
+use tayga_model::otlp::collector::trace::v1::{
+    ExportTraceServiceRequest, ExportTraceServiceResponse,
+};
 use tonic::{Request, Response, Status};
 
 pub struct OtlpGrpc<S> {
@@ -14,13 +16,19 @@ pub struct OtlpGrpc<S> {
 
 impl<S> OtlpGrpc<S> {
     pub fn new(sink: Arc<S>, max_record_bytes: usize) -> Self {
-        Self { sink, max_record_bytes }
+        Self {
+            sink,
+            max_record_bytes,
+        }
     }
 }
 
 impl<S> Clone for OtlpGrpc<S> {
     fn clone(&self) -> Self {
-        Self { sink: self.sink.clone(), max_record_bytes: self.max_record_bytes }
+        Self {
+            sink: self.sink.clone(),
+            max_record_bytes: self.max_record_bytes,
+        }
     }
 }
 
@@ -29,7 +37,11 @@ pub fn status_from(e: SinkError) -> Status {
     Status::unavailable(e.to_string())
 }
 
-async fn publish<S: Sink>(sink: &S, records: Vec<OutRecord>, signal: &'static str) -> Result<(), Status> {
+async fn publish<S: Sink>(
+    sink: &S,
+    records: Vec<OutRecord>,
+    signal: &'static str,
+) -> Result<(), Status> {
     if records.is_empty() {
         return Ok(());
     }
@@ -46,7 +58,8 @@ impl<S: Sink> TraceService for OtlpGrpc<S> {
         &self,
         request: Request<ExportTraceServiceRequest>,
     ) -> Result<Response<ExportTraceServiceResponse>, Status> {
-        let records = trace_records(request.into_inner(), now_unix_nano(), self.max_record_bytes).records;
+        let records =
+            trace_records(request.into_inner(), now_unix_nano(), self.max_record_bytes).records;
         publish(&*self.sink, records, "traces").await?;
         Ok(Response::new(ExportTraceServiceResponse::default()))
     }
@@ -58,7 +71,8 @@ impl<S: Sink> LogsService for OtlpGrpc<S> {
         &self,
         request: Request<ExportLogsServiceRequest>,
     ) -> Result<Response<ExportLogsServiceResponse>, Status> {
-        let records = log_records(request.into_inner(), now_unix_nano(), self.max_record_bytes).records;
+        let records =
+            log_records(request.into_inner(), now_unix_nano(), self.max_record_bytes).records;
         publish(&*self.sink, records, "logs").await?;
         Ok(Response::new(ExportLogsServiceResponse::default()))
     }
@@ -93,8 +107,14 @@ pub(crate) mod tests {
             resource_spans: vec![ResourceSpans {
                 scope_spans: vec![ScopeSpans {
                     spans: vec![
-                        Span { trace_id: vec![1; 16], ..Default::default() },
-                        Span { trace_id: vec![2; 16], ..Default::default() },
+                        Span {
+                            trace_id: vec![1; 16],
+                            ..Default::default()
+                        },
+                        Span {
+                            trace_id: vec![2; 16],
+                            ..Default::default()
+                        },
                     ],
                     ..Default::default()
                 }],
@@ -107,7 +127,9 @@ pub(crate) mod tests {
     async fn traces_are_published_per_trace() {
         let sink = Arc::new(FakeSink::default());
         let svc = OtlpGrpc::new(sink.clone(), TEST_MAX_RECORD_BYTES);
-        TraceService::export(&svc, Request::new(two_trace_request())).await.unwrap();
+        TraceService::export(&svc, Request::new(two_trace_request()))
+            .await
+            .unwrap();
         assert_eq!(sink.published.lock().unwrap().len(), 2);
     }
 
@@ -125,9 +147,14 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn sink_failure_maps_to_unavailable() {
-        let sink = Arc::new(FakeSink { fail: true, ..Default::default() });
+        let sink = Arc::new(FakeSink {
+            fail: true,
+            ..Default::default()
+        });
         let svc = OtlpGrpc::new(sink, TEST_MAX_RECORD_BYTES);
-        let err = TraceService::export(&svc, Request::new(two_trace_request())).await.unwrap_err();
+        let err = TraceService::export(&svc, Request::new(two_trace_request()))
+            .await
+            .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unavailable);
     }
 
@@ -135,7 +162,9 @@ pub(crate) mod tests {
     async fn empty_logs_export_succeeds_without_publishing() {
         let sink = Arc::new(FakeSink::default());
         let svc = OtlpGrpc::new(sink.clone(), TEST_MAX_RECORD_BYTES);
-        LogsService::export(&svc, Request::new(ExportLogsServiceRequest::default())).await.unwrap();
+        LogsService::export(&svc, Request::new(ExportLogsServiceRequest::default()))
+            .await
+            .unwrap();
         assert!(sink.published.lock().unwrap().is_empty());
     }
 }

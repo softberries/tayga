@@ -23,7 +23,9 @@ pub async fn verify_raw(
     jaeger_url: &str,
     samples: u32,
 ) -> anyhow::Result<(usize, Vec<(String, u64, usize)>)> {
-    let ch = clickhouse::Client::default().with_url(clickhouse_url).with_database("tayga");
+    let ch = clickhouse::Client::default()
+        .with_url(clickhouse_url)
+        .with_database("tayga");
     let traces: Vec<(String, u64)> = ch
         .query(
             "SELECT trace_id, uniqExact(span_id) FROM spans \
@@ -39,7 +41,9 @@ pub async fn verify_raw(
         .bind(samples)
         .fetch_all()
         .await?;
-    let http = reqwest::Client::builder().timeout(Duration::from_secs(10)).build()?;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
     let mut mismatches = Vec::new();
     for (trace_id, ours) in &traces {
         let resp: serde_json::Value = http
@@ -71,6 +75,9 @@ mod tests {
 
     #[test]
     fn missing_data_is_zero() {
-        assert_eq!(jaeger_span_count(&serde_json::json!({"errors":[{"code":404}]})), 0);
+        assert_eq!(
+            jaeger_span_count(&serde_json::json!({"errors":[{"code":404}]})),
+            0
+        );
     }
 }

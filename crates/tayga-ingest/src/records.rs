@@ -9,7 +9,7 @@ use tayga_model::otlp::collector::trace::v1::ExportTraceServiceRequest;
 use tayga_model::otlp::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
 use tayga_model::otlp::resource::v1::Resource;
 use tayga_model::otlp::trace::v1::{ResourceSpans, ScopeSpans, Span};
-use tayga_model::split::{RoutingKey, Routed, split_logs, split_traces};
+use tayga_model::split::{Routed, RoutingKey, split_logs, split_traces};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutRecord {
@@ -37,11 +37,19 @@ pub fn now_unix_nano() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn trace_records(req: ExportTraceServiceRequest, now_unix_nano: u64, max_record_bytes: usize) -> Converted {
+pub fn trace_records(
+    req: ExportTraceServiceRequest,
+    now_unix_nano: u64,
+    max_record_bytes: usize,
+) -> Converted {
     convert(split_traces(req), now_unix_nano, max_record_bytes)
 }
 
-pub fn log_records(req: ExportLogsServiceRequest, now_unix_nano: u64, max_record_bytes: usize) -> Converted {
+pub fn log_records(
+    req: ExportLogsServiceRequest,
+    now_unix_nano: u64,
+    max_record_bytes: usize,
+) -> Converted {
     convert(split_logs(req), now_unix_nano, max_record_bytes)
 }
 
@@ -52,17 +60,28 @@ fn convert<S: Signal>(routed: Vec<Routed<S>>, now: u64, max_record_bytes: usize)
             out.routed_by_service += request.item_count();
         }
         let mut payloads = Vec::new();
-        fit(request, now, max_record_bytes, &mut payloads, &mut out.dropped_oversized);
+        fit(
+            request,
+            now,
+            max_record_bytes,
+            &mut payloads,
+            &mut out.dropped_oversized,
+        );
         let key_bytes = key.to_bytes();
-        out.records.extend(payloads.into_iter().map(|payload| OutRecord {
-            key: key_bytes.clone(),
-            key_kind: key.kind_str(),
-            kind: S::KIND,
-            payload,
-        }));
+        out.records
+            .extend(payloads.into_iter().map(|payload| OutRecord {
+                key: key_bytes.clone(),
+                key_kind: key.kind_str(),
+                kind: S::KIND,
+                payload,
+            }));
     }
     if out.routed_by_service > 0 {
-        tracing::debug!(signal = S::KIND.as_str(), count = out.routed_by_service, "items without a valid trace id routed by service");
+        tracing::debug!(
+            signal = S::KIND.as_str(),
+            count = out.routed_by_service,
+            "items without a valid trace id routed by service"
+        );
     }
     out
 }
@@ -70,7 +89,13 @@ fn convert<S: Signal>(routed: Vec<Routed<S>>, now: u64, max_record_bytes: usize)
 /// Encodes `req` as one envelope if it fits the budget, otherwise halves it (keeping order and
 /// resource/scope wrappers) until every part fits. A single item that alone exceeds the budget is
 /// dropped: retrying cannot make it fit, so it must not fail the rest of the request.
-fn fit<S: Signal>(req: S, now: u64, max_record_bytes: usize, out: &mut Vec<Vec<u8>>, dropped: &mut usize) {
+fn fit<S: Signal>(
+    req: S,
+    now: u64,
+    max_record_bytes: usize,
+    out: &mut Vec<Vec<u8>>,
+    dropped: &mut usize,
+) {
     let size = envelope_len(now, req.encoded_len());
     if size <= max_record_bytes {
         out.push(req.envelope(now).encode());
@@ -98,7 +123,11 @@ fn fit<S: Signal>(req: S, now: u64, max_record_bytes: usize, out: &mut Vec<Vec<u
 
 /// Exact encoded size of `Envelope { received_at_unix_nano: now, payload: Some(req) }`.
 fn envelope_len(now: u64, request_len: usize) -> usize {
-    let header = Envelope { received_at_unix_nano: now, payload: None }.encoded_len();
+    let header = Envelope {
+        received_at_unix_nano: now,
+        payload: None,
+    }
+    .encoded_len();
     // oneof field tag (2 or 3, wire type LEN) is one byte, then the length varint.
     header + 1 + prost::encoding::encoded_len_varint(request_len as u64) + request_len
 }
@@ -227,19 +256,30 @@ impl Signal for ExportLogsServiceRequest {
 mod tests {
     use super::*;
     use tayga_model::envelope::Payload;
-    use tayga_model::otlp::common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value::Value};
+    use tayga_model::otlp::common::v1::{
+        AnyValue, InstrumentationScope, KeyValue, any_value::Value,
+    };
 
     const BIG: usize = 1 << 20;
 
     #[test]
     fn one_record_per_trace_with_decodable_envelope() {
         let spans = vec![
-            Span { trace_id: vec![1; 16], ..Default::default() },
-            Span { trace_id: vec![2; 16], ..Default::default() },
+            Span {
+                trace_id: vec![1; 16],
+                ..Default::default()
+            },
+            Span {
+                trace_id: vec![2; 16],
+                ..Default::default()
+            },
         ];
         let req = ExportTraceServiceRequest {
             resource_spans: vec![ResourceSpans {
-                scope_spans: vec![ScopeSpans { spans, ..Default::default() }],
+                scope_spans: vec![ScopeSpans {
+                    spans,
+                    ..Default::default()
+                }],
                 ..Default::default()
             }],
         };
@@ -255,14 +295,20 @@ mod tests {
 
     #[test]
     fn empty_logs_request_yields_no_records() {
-        assert!(log_records(ExportLogsServiceRequest::default(), 1, BIG).records.is_empty());
+        assert!(
+            log_records(ExportLogsServiceRequest::default(), 1, BIG)
+                .records
+                .is_empty()
+        );
     }
 
     fn resource(svc: &str) -> Option<Resource> {
         Some(Resource {
             attributes: vec![KeyValue {
                 key: "service.name".into(),
-                value: Some(AnyValue { value: Some(Value::StringValue(svc.into())) }),
+                value: Some(AnyValue {
+                    value: Some(Value::StringValue(svc.into())),
+                }),
                 ..Default::default()
             }],
             ..Default::default()
@@ -270,7 +316,12 @@ mod tests {
     }
 
     fn span(trace: u8, name: String, pad: usize) -> Span {
-        Span { trace_id: vec![trace; 16], name, trace_state: "x".repeat(pad), ..Default::default() }
+        Span {
+            trace_id: vec![trace; 16],
+            name,
+            trace_state: "x".repeat(pad),
+            ..Default::default()
+        }
     }
 
     /// (service, scope, span name) of every span in the record payload, in order.
@@ -283,9 +334,15 @@ mod tests {
             .flat_map(|rs| {
                 let svc = service_name(rs.resource.as_ref());
                 rs.scope_spans.iter().flat_map(move |ss| {
-                    let scope = ss.scope.as_ref().map(|s| s.name.clone()).unwrap_or_default();
+                    let scope = ss
+                        .scope
+                        .as_ref()
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
                     let svc = svc.clone();
-                    ss.spans.iter().map(move |s| (svc.clone(), scope.clone(), s.name.clone()))
+                    ss.spans
+                        .iter()
+                        .map(move |s| (svc.clone(), scope.clone(), s.name.clone()))
                 })
             })
             .collect()
@@ -293,7 +350,12 @@ mod tests {
 
     #[test]
     fn oversized_trace_is_chunked_under_budget_preserving_order_and_wrappers() {
-        let scope = |name: &str| Some(InstrumentationScope { name: name.into(), ..Default::default() });
+        let scope = |name: &str| {
+            Some(InstrumentationScope {
+                name: name.into(),
+                ..Default::default()
+            })
+        };
         let mut n = 0;
         let mut spans = |count: usize| {
             (0..count)
@@ -308,14 +370,26 @@ mod tests {
                 ResourceSpans {
                     resource: resource("frontend"),
                     scope_spans: vec![
-                        ScopeSpans { scope: scope("http"), spans: spans(30), ..Default::default() },
-                        ScopeSpans { scope: scope("grpc"), spans: spans(25), ..Default::default() },
+                        ScopeSpans {
+                            scope: scope("http"),
+                            spans: spans(30),
+                            ..Default::default()
+                        },
+                        ScopeSpans {
+                            scope: scope("grpc"),
+                            spans: spans(25),
+                            ..Default::default()
+                        },
                     ],
                     ..Default::default()
                 },
                 ResourceSpans {
                     resource: resource("checkout"),
-                    scope_spans: vec![ScopeSpans { scope: scope("grpc"), spans: spans(45), ..Default::default() }],
+                    scope_spans: vec![ScopeSpans {
+                        scope: scope("grpc"),
+                        spans: spans(45),
+                        ..Default::default()
+                    }],
                     ..Default::default()
                 },
             ],
@@ -325,10 +399,22 @@ mod tests {
         let budget = 4_000;
 
         let out = trace_records(req, 9, budget);
-        assert!(out.records.len() > 1, "expected chunking, got {} record(s)", out.records.len());
+        assert!(
+            out.records.len() > 1,
+            "expected chunking, got {} record(s)",
+            out.records.len()
+        );
         assert_eq!(out.dropped_oversized, 0);
-        assert!(out.records.iter().all(|r| r.payload.len() <= budget && r.key == vec![4; 16] && r.key_kind == "trace"));
-        let got: Vec<_> = out.records.iter().flat_map(|r| spans_of(&r.payload)).collect();
+        assert!(
+            out.records.iter().all(|r| r.payload.len() <= budget
+                && r.key == vec![4; 16]
+                && r.key_kind == "trace")
+        );
+        let got: Vec<_> = out
+            .records
+            .iter()
+            .flat_map(|r| spans_of(&r.payload))
+            .collect();
         assert_eq!(got, expected);
     }
 
@@ -348,18 +434,29 @@ mod tests {
         assert_eq!(out.dropped_oversized, 1);
         assert_eq!(out.records.len(), 1);
         assert_eq!(out.records[0].key, vec![2; 16]);
-        assert_eq!(spans_of(&out.records[0].payload), vec![("ad".into(), String::new(), "ok".into())]);
+        assert_eq!(
+            spans_of(&out.records[0].payload),
+            vec![("ad".into(), String::new(), "ok".into())]
+        );
     }
 
     #[test]
     fn oversized_service_routed_logs_are_chunked() {
         let logs = (0..50)
-            .map(|i| LogRecord { body: Some(AnyValue { value: Some(Value::StringValue(format!("{i:0>100}"))) }), ..Default::default() })
+            .map(|i| LogRecord {
+                body: Some(AnyValue {
+                    value: Some(Value::StringValue(format!("{i:0>100}"))),
+                }),
+                ..Default::default()
+            })
             .collect();
         let req = ExportLogsServiceRequest {
             resource_logs: vec![ResourceLogs {
                 resource: resource("cart"),
-                scope_logs: vec![ScopeLogs { log_records: logs, ..Default::default() }],
+                scope_logs: vec![ScopeLogs {
+                    log_records: logs,
+                    ..Default::default()
+                }],
                 ..Default::default()
             }],
         };
@@ -367,12 +464,21 @@ mod tests {
         assert_eq!(out.routed_by_service, 50);
         assert_eq!(out.dropped_oversized, 0);
         assert!(out.records.len() > 1);
-        assert!(out.records.iter().all(|r| r.payload.len() <= 1_000 && r.key == b"cart" && r.key_kind == "service"));
+        assert!(
+            out.records
+                .iter()
+                .all(|r| r.payload.len() <= 1_000 && r.key == b"cart" && r.key_kind == "service")
+        );
         let total: usize = out
             .records
             .iter()
             .map(|r| match Envelope::decode(&r.payload).unwrap().payload {
-                Some(Payload::Logs(l)) => l.resource_logs.iter().flat_map(|r| &r.scope_logs).map(|s| s.log_records.len()).sum(),
+                Some(Payload::Logs(l)) => l
+                    .resource_logs
+                    .iter()
+                    .flat_map(|r| &r.scope_logs)
+                    .map(|s| s.log_records.len())
+                    .sum(),
                 _ => 0,
             })
             .sum();
@@ -383,13 +489,24 @@ mod tests {
     fn envelope_len_matches_encoding() {
         let req = ExportTraceServiceRequest {
             resource_spans: vec![ResourceSpans {
-                scope_spans: vec![ScopeSpans { spans: vec![span(3, "a".into(), 300)], ..Default::default() }],
+                scope_spans: vec![ScopeSpans {
+                    spans: vec![span(3, "a".into(), 300)],
+                    ..Default::default()
+                }],
                 ..Default::default()
             }],
         };
         for now in [0, 1, u64::MAX] {
-            assert_eq!(envelope_len(now, req.encoded_len()), Envelope::traces(req.clone(), now).encode().len());
+            assert_eq!(
+                envelope_len(now, req.encoded_len()),
+                Envelope::traces(req.clone(), now).encode().len()
+            );
         }
-        assert_eq!(envelope_len(0, 0), Envelope::logs(ExportLogsServiceRequest::default(), 0).encode().len());
+        assert_eq!(
+            envelope_len(0, 0),
+            Envelope::logs(ExportLogsServiceRequest::default(), 0)
+                .encode()
+                .len()
+        );
     }
 }

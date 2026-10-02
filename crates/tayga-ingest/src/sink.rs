@@ -11,5 +11,8 @@ pub enum SinkError {
 
 /// Destination for ingest records. Resolves only when every record is durably accepted.
 pub trait Sink: Send + Sync + 'static {
-    fn publish(&self, records: Vec<OutRecord>) -> impl Future<Output = Result<(), SinkError>> + Send;
+    fn publish(
+        &self,
+        records: Vec<OutRecord>,
+    ) -> impl Future<Output = Result<(), SinkError>> + Send;
 }

@@ -42,11 +42,17 @@ impl Kind {
 
 impl Envelope {
     pub fn traces(req: ExportTraceServiceRequest, received_at_unix_nano: u64) -> Self {
-        Self { received_at_unix_nano, payload: Some(Payload::Traces(req)) }
+        Self {
+            received_at_unix_nano,
+            payload: Some(Payload::Traces(req)),
+        }
     }
 
     pub fn logs(req: ExportLogsServiceRequest, received_at_unix_nano: u64) -> Self {
-        Self { received_at_unix_nano, payload: Some(Payload::Logs(req)) }
+        Self {
+            received_at_unix_nano,
+            payload: Some(Payload::Logs(req)),
+        }
     }
 
     pub fn kind(&self) -> Option<Kind> {
@@ -75,7 +81,11 @@ mod tests {
         ExportTraceServiceRequest {
             resource_spans: vec![ResourceSpans {
                 scope_spans: vec![ScopeSpans {
-                    spans: vec![Span { trace_id: vec![7; 16], name: "GET /".into(), ..Default::default() }],
+                    spans: vec![Span {
+                        trace_id: vec![7; 16],
+                        name: "GET /".into(),
+                        ..Default::default()
+                    }],
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -95,7 +105,10 @@ mod tests {
     #[test]
     fn roundtrip_logs_kind() {
         let env = Envelope::logs(ExportLogsServiceRequest::default(), 1);
-        assert_eq!(Envelope::decode(&env.encode()).unwrap().kind(), Some(Kind::Logs));
+        assert_eq!(
+            Envelope::decode(&env.encode()).unwrap().kind(),
+            Some(Kind::Logs)
+        );
         assert_eq!(Kind::Logs.as_str(), "logs");
         assert_eq!(Kind::Traces.as_str(), "traces");
     }

@@ -38,7 +38,10 @@ async fn main() -> anyhow::Result<()> {
     tayga_common::init_logging();
     let settings: Settings = tayga_common::load_settings()?;
     tayga_kafka::ensure_topic(&settings.kafka).await?;
-    let sink = Arc::new(KafkaSink::new(tayga_kafka::producer(&settings.kafka)?, settings.kafka.topic.clone()));
+    let sink = Arc::new(KafkaSink::new(
+        tayga_kafka::producer(&settings.kafka)?,
+        settings.kafka.topic.clone(),
+    ));
 
     // Bind both listeners eagerly so a bind failure aborts startup before anything serves.
     let grpc_listener = tokio::net::TcpListener::bind(settings.grpc_addr).await?;
@@ -61,14 +64,23 @@ async fn main() -> anyhow::Result<()> {
         });
 
     let mut http_stop = stop_rx;
-    let http_server = axum::serve(http_listener, tayga_ingest::http::router(sink.clone(), settings.kafka.max_record_bytes))
-        .with_graceful_shutdown(async move {
-            let _ = http_stop.changed().await;
-        });
+    let http_server = axum::serve(
+        http_listener,
+        tayga_ingest::http::router(sink.clone(), settings.kafka.max_record_bytes),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = http_stop.changed().await;
+    });
 
     tracing::info!(grpc = %settings.grpc_addr, http = %settings.http_addr, topic = %settings.kafka.topic, "tayga-ingest listening");
 
-    let served = supervise(grpc_server, http_server.into_future(), tayga_common::shutdown_signal(), stop_tx).await;
+    let served = supervise(
+        grpc_server,
+        http_server.into_future(),
+        tayga_common::shutdown_signal(),
+        stop_tx,
+    )
+    .await;
 
     let flushed = sink.producer().flush(Duration::from_secs(10));
     match (served, flushed) {

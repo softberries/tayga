@@ -4,16 +4,22 @@ use tayga_store::rows::{LogRow, SpanRow};
 use tayga_store::store::Store;
 
 fn settings() -> ClickHouseSettings {
-    let url = std::env::var("TAYGA_IT_CLICKHOUSE").unwrap_or_else(|_| "http://localhost:18123".into());
+    let url =
+        std::env::var("TAYGA_IT_CLICKHOUSE").unwrap_or_else(|_| "http://localhost:18123".into());
     let suffix: u32 = rand::random();
-    ClickHouseSettings { url, database: format!("tayga_it_{suffix}") }
+    ClickHouseSettings {
+        url,
+        database: format!("tayga_it_{suffix}"),
+    }
 }
 
 /// Rows must be recent: the tables carry a 3-day TTL and expired parts are dropped on insert.
 fn now_ns() -> i64 {
     static NOW: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
     *NOW.get_or_init(|| {
-        let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
         i64::try_from(d.as_nanos()).unwrap()
     })
 }
@@ -71,10 +77,24 @@ async fn migrate_is_idempotent_and_rows_roundtrip() {
         .fetch_all()
         .await
         .unwrap();
-    assert_eq!(back.len(), 2, "duplicate (same sort key) collapses under FINAL");
+    assert_eq!(
+        back.len(),
+        2,
+        "duplicate (same sort key) collapses under FINAL"
+    );
     assert_eq!(back[0], span("01"));
 
-    let n: u64 = store.client().query("SELECT count() FROM logs").fetch_one().await.unwrap();
+    let n: u64 = store
+        .client()
+        .query("SELECT count() FROM logs")
+        .fetch_one()
+        .await
+        .unwrap();
     assert_eq!(n, 1);
-    store.client().query(&format!("DROP DATABASE `{}`", s.database)).execute().await.unwrap();
+    store
+        .client()
+        .query(&format!("DROP DATABASE `{}`", s.database))
+        .execute()
+        .await
+        .unwrap();
 }

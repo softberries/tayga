@@ -18,12 +18,19 @@ fn default_database() -> String {
 const MIGRATIONS: &[(u32, &str)] = &[(1, include_str!("../migrations/0001_raw_tables.sql"))];
 
 pub fn split_statements(sql: &str) -> Vec<String> {
-    sql.split(';').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect()
+    sql.split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 pub async fn migrate(s: &ClickHouseSettings) -> anyhow::Result<Vec<u32>> {
     let server = Client::default().with_url(&s.url);
-    server.query(&format!("CREATE DATABASE IF NOT EXISTS `{}`", s.database)).execute().await?;
+    server
+        .query(&format!("CREATE DATABASE IF NOT EXISTS `{}`", s.database))
+        .execute()
+        .await?;
     let db = server.clone().with_database(&s.database);
     db.query(
         "CREATE TABLE IF NOT EXISTS schema_migrations (version UInt32, applied_at DateTime DEFAULT now()) \
@@ -31,7 +38,10 @@ pub async fn migrate(s: &ClickHouseSettings) -> anyhow::Result<Vec<u32>> {
     )
     .execute()
     .await?;
-    let applied: Vec<u32> = db.query("SELECT version FROM schema_migrations").fetch_all().await?;
+    let applied: Vec<u32> = db
+        .query("SELECT version FROM schema_migrations")
+        .fetch_all()
+        .await?;
 
     let mut newly = Vec::new();
     for (version, sql) in MIGRATIONS {
@@ -41,7 +51,10 @@ pub async fn migrate(s: &ClickHouseSettings) -> anyhow::Result<Vec<u32>> {
         for stmt in split_statements(sql) {
             db.query(&stmt).execute().await?;
         }
-        db.query("INSERT INTO schema_migrations (version) VALUES (?)").bind(*version).execute().await?;
+        db.query("INSERT INTO schema_migrations (version) VALUES (?)")
+            .bind(*version)
+            .execute()
+            .await?;
         tracing::info!(version, "applied migration");
         newly.push(*version);
     }

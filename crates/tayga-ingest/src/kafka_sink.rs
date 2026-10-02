@@ -34,7 +34,9 @@ impl Sink for KafkaSink {
         for result in join_all(sends).await {
             if let Err((e, _)) = result {
                 return Err(match e {
-                    KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull) => SinkError::QueueFull,
+                    KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull) => {
+                        SinkError::QueueFull
+                    }
                     other => SinkError::Delivery(other.to_string()),
                 });
             }

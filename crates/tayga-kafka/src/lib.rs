@@ -70,8 +70,9 @@ pub fn consumer(s: &KafkaSettings, group: &str) -> KafkaResult<StreamConsumer> {
 /// Creates the topic if missing (with `max.message.bytes` matching the producer);
 /// an existing topic is left as is.
 pub async fn ensure_topic(s: &KafkaSettings) -> anyhow::Result<()> {
-    let admin: AdminClient<DefaultClientContext> =
-        ClientConfig::new().set("bootstrap.servers", &s.brokers).create()?;
+    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", &s.brokers)
+        .create()?;
     let max_message_bytes = MAX_MESSAGE_BYTES.to_string();
     let topic = NewTopic::new(&s.topic, s.partitions, TopicReplication::Fixed(1))
         .set("max.message.bytes", &max_message_bytes);
@@ -87,9 +88,18 @@ pub async fn ensure_topic(s: &KafkaSettings) -> anyhow::Result<()> {
 /// `key_kind` is `RoutingKey::kind_str()`: "trace" or "service".
 pub fn headers(kind: Kind, key_kind: &str) -> OwnedHeaders {
     OwnedHeaders::new()
-        .insert(Header { key: HEADER_KIND, value: Some(kind.as_str()) })
-        .insert(Header { key: HEADER_SCHEMA, value: Some(SCHEMA_VERSION) })
-        .insert(Header { key: HEADER_KEY_KIND, value: Some(key_kind) })
+        .insert(Header {
+            key: HEADER_KIND,
+            value: Some(kind.as_str()),
+        })
+        .insert(Header {
+            key: HEADER_SCHEMA,
+            value: Some(SCHEMA_VERSION),
+        })
+        .insert(Header {
+            key: HEADER_KEY_KIND,
+            value: Some(key_kind),
+        })
 }
 
 #[cfg(test)]
@@ -109,8 +119,10 @@ mod tests {
     #[test]
     fn headers_carry_kind_schema_and_key_kind() {
         let h = headers(Kind::Logs, "service");
-        let pairs: Vec<(String, Vec<u8>)> =
-            h.iter().map(|x| (x.key.to_string(), x.value.unwrap_or_default().to_vec())).collect();
+        let pairs: Vec<(String, Vec<u8>)> = h
+            .iter()
+            .map(|x| (x.key.to_string(), x.value.unwrap_or_default().to_vec()))
+            .collect();
         assert_eq!(
             pairs,
             vec![

@@ -2,7 +2,10 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "tayga-devtools", about = "Developer tooling for the Tayga demo environment")]
+#[command(
+    name = "tayga-devtools",
+    about = "Developer tooling for the Tayga demo environment"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -31,12 +34,21 @@ enum Cmd {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     match Cli::parse().cmd {
-        Cmd::Flag { name, variant, file } => {
+        Cmd::Flag {
+            name,
+            variant,
+            file,
+        } => {
             tayga_devtools::flags::set_flag(&file, &name, &variant)?;
             println!("{name} -> {variant}");
         }
-        Cmd::VerifyRaw { samples, clickhouse, jaeger } => {
-            let (checked, mismatches) = tayga_devtools::verify::verify_raw(&clickhouse, &jaeger, samples).await?;
+        Cmd::VerifyRaw {
+            samples,
+            clickhouse,
+            jaeger,
+        } => {
+            let (checked, mismatches) =
+                tayga_devtools::verify::verify_raw(&clickhouse, &jaeger, samples).await?;
             for (trace, ours, theirs) in &mismatches {
                 println!("MISMATCH {trace}: tayga={ours} jaeger={theirs}");
             }
