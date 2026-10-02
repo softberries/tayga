@@ -56,11 +56,10 @@ impl<'a> SpanTree<'a> {
         genuine_roots.sort_by(by_start);
         let mut cut_roots: Vec<usize> = Vec::new();
         let mut visited = vec![false; n];
-        let mut order = Vec::with_capacity(n);
 
-        // BFS from all genuine roots first
+        // First pass: mark genuine roots and their descendants as visited.
         for &r in &genuine_roots {
-            bfs(r, &children, &mut visited, &mut order);
+            bfs(r, &children, &mut visited, &mut Vec::new());
         }
 
         // Handle cycles: find and cut cycle nodes from unvisited spans.
@@ -77,10 +76,20 @@ impl<'a> SpanTree<'a> {
             }
             incomplete = true;
             cut_roots.push(cycle_node);
-            bfs(cycle_node, &children, &mut visited, &mut order);
+            // BFS from cycle node to mark it and descendants as visited.
+            // This prevents the same cycle node from being processed multiple times.
+            let mut dummy_order = Vec::new();
+            bfs(cycle_node, &children, &mut visited, &mut dummy_order);
         }
 
         // Determine root: genuine root if any, else earliest cut root.
+        let root = if !genuine_roots.is_empty() {
+            genuine_roots[0]
+        } else {
+            *cut_roots.iter().min_by(|a, b| by_start(a, b))?
+        };
+
+        // Check incomplete flag conditions.
         if genuine_roots.len() > 1 {
             incomplete = true;
         }
@@ -92,19 +101,23 @@ impl<'a> SpanTree<'a> {
             c.sort_by(by_start);
         }
 
-        let root = if !genuine_roots.is_empty() {
-            genuine_roots[0]
-        } else {
-            *cut_roots.iter().min_by(|a, b| by_start(a, b))?
-        };
+        // Build order: reset visited and BFS from root first, then other genuine roots, then cut roots.
+        // This ensures root is at order[0] and parents come before children everywhere.
+        visited.fill(false);
+        let mut order = Vec::with_capacity(n);
+        bfs(root, &children, &mut visited, &mut order);
 
-        // Reorder: put root's subtree first so order[0] == root.
-        let mut final_order = Vec::with_capacity(n);
-        let mut visited2 = vec![false; n];
-        bfs(root, &children, &mut visited2, &mut final_order);
-        for (i, &was_visited) in visited2.iter().enumerate() {
-            if !was_visited {
-                final_order.push(i);
+        // BFS from other genuine roots (not root)
+        for &r in &genuine_roots {
+            if r != root {
+                bfs(r, &children, &mut visited, &mut order);
+            }
+        }
+
+        // BFS from cut roots (not root, which may be a cut root if no genuine roots)
+        for &r in &cut_roots {
+            if r != root {
+                bfs(r, &children, &mut visited, &mut order);
             }
         }
 
@@ -118,7 +131,7 @@ impl<'a> SpanTree<'a> {
             root,
             parent,
             children,
-            order: final_order,
+            order,
             span_logs,
             incomplete,
         })
@@ -152,19 +165,18 @@ impl<'a> SpanTree<'a> {
 /// Find a node on the cycle reachable from start by following parent links.
 /// Returns the first node we revisit in the walk (which is on the cycle).
 fn find_cycle_node(start: usize, parent: &[Option<usize>]) -> usize {
-    let mut seen_in_walk = HashMap::new();
+    let n = parent.len();
+    let mut seen_in_walk = vec![false; n];
     let mut cur = start;
-    let mut step = 0;
     loop {
-        if seen_in_walk.contains_key(&cur) {
+        if seen_in_walk[cur] {
             // We've revisited cur in this walk: it's on the cycle.
             return cur;
         }
-        seen_in_walk.insert(cur, step);
+        seen_in_walk[cur] = true;
         match parent[cur] {
             Some(p) => {
                 cur = p;
-                step += 1;
             }
             None => {
                 // Reached a parentless node (shouldn't happen for unvisited spans in cycles).
@@ -373,5 +385,42 @@ mod tests {
         assert_eq!(t.parent[2], Some(0));
         assert!(t.children[0].contains(&2));
         verify_order(&t, 3);
+    }
+
+    #[test]
+    fn orphan_subtree_keeps_parent_first_order() {
+        // Orphan subtree: c (index 0, parent "x", start 5), x (index 1, parent "gone", start 4),
+        // r (index 2, no parent, start 0). Root should be r, and c's parent x should come before c.
+        let b = bundle(vec![
+            span("c", "x", "svc", "c", 5, 10),
+            span("x", "gone", "svc", "x", 4, 9),
+            span("r", "", "svc", "r", 0, 15),
+        ]);
+        let t = SpanTree::build(&b).unwrap();
+        assert_eq!(t.root, 2, "root should be r (index 2)");
+        assert!(
+            t.incomplete,
+            "should be incomplete due to x's missing parent"
+        );
+        // verify_order checks that order is a permutation and parents come before children
+        verify_order(&t, 3);
+    }
+
+    #[test]
+    fn cut_cycle_beside_genuine_root_maintains_order() {
+        // Cycle A↔B (starts 5, 6) beside genuine root R (starts 0 with child).
+        // Should maintain parent-before-child for both the root's subtree and the cycle's subtree.
+        let b = bundle(vec![
+            span("a", "b", "svc", "a", 5, 10),
+            span("b", "a", "svc", "b", 6, 9),
+            span("r", "", "svc", "r", 0, 20),
+            span("rc", "r", "svc", "rc", 1, 19),
+        ]);
+        let t = SpanTree::build(&b).unwrap();
+        assert_eq!(t.root, 2, "root should be r (the genuine root)");
+        assert_eq!(t.order[0], 2, "order[0] should be root");
+        assert!(t.incomplete);
+        // verify_order ensures both r's subtree and the cut cycle's subtree maintain parent-child order
+        verify_order(&t, 4);
     }
 }
