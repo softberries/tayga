@@ -1,10 +1,11 @@
 use clap::{Parser, Subcommand};
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
+use rdkafka::message::{BorrowedMessage, Headers};
 use rdkafka::{Message, Offset, TopicPartitionList};
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 use tayga_kafka::KafkaSettings;
-use tayga_model::envelope::Envelope;
+use tayga_model::envelope::{Envelope, HEADER_SCHEMA, SCHEMA_VERSION};
 use tayga_store::ClickHouseSettings;
 use tayga_store::flatten::rows_from_envelope;
 use tayga_store::store::Store;
@@ -75,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run(settings: Settings) -> anyhow::Result<()> {
     let store = Store::new(&settings.clickhouse);
+    tayga_kafka::ensure_topic(&settings.kafka).await?;
     let consumer = tayga_kafka::consumer(&settings.kafka, GROUP)?;
     consumer.subscribe(&[&settings.kafka.topic])?;
     let max_age = Duration::from_millis(settings.writer.max_age_ms);
@@ -94,8 +96,14 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
             _ = main_stop.wait_for(|stop| *stop) => break,
             next = tokio::time::timeout(Duration::from_millis(200), consumer.recv()) => match next {
                 Ok(Ok(msg)) => {
+                    warn_on_unknown_schema(&msg);
                     let (spans, logs) = match msg.payload().map(Envelope::decode) {
-                        Some(Ok(env)) => rows_from_envelope(&env),
+                        Some(Ok(env)) => {
+                            if env.payload.is_none() {
+                                tracing::warn!(partition = msg.partition(), offset = msg.offset(), "skipping envelope without payload");
+                            }
+                            rows_from_envelope(&env)
+                        }
                         Some(Err(e)) => {
                             tracing::warn!(partition = msg.partition(), offset = msg.offset(), error = %e, "skipping undecodable envelope");
                             (Vec::new(), Vec::new())
@@ -129,6 +137,17 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     }
     tracing::info!("tayga-writer stopped");
     Ok(())
+}
+
+/// The record is still decoded and its offset committed: a newer producer must not wedge the writer.
+fn warn_on_unknown_schema(msg: &BorrowedMessage<'_>) {
+    let Some(headers) = msg.headers() else { return };
+    if let Some(h) = headers.iter().find(|h| h.key == HEADER_SCHEMA)
+        && h.value != Some(SCHEMA_VERSION.as_bytes())
+    {
+        let schema = String::from_utf8_lossy(h.value.unwrap_or_default());
+        tracing::warn!(partition = msg.partition(), offset = msg.offset(), %schema, "unknown tayga-schema header");
+    }
 }
 
 /// Inserts, then commits. Offsets are never committed for rows not yet stored.
