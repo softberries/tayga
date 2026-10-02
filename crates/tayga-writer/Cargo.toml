@@ -1,0 +1,17 @@
+[package]
+name = "tayga-writer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+rdkafka.workspace = true
+serde.workspace = true
+tayga-common.workspace = true
+tayga-kafka.workspace = true
+tayga-model.workspace = true
+tayga-store.workspace = true
+tokio.workspace = true
+tracing.workspace = true

@@ -1,0 +1,53 @@
+# Layered after the OTel demo compose files. Paths use ${TAYGA_ROOT}
+# (exported by the Makefile) because the project directory is the demo.
+x-tayga-env: &tayga-env
+  RUST_LOG: info
+  TAYGA__KAFKA__BROKERS: redpanda:9092
+  TAYGA__CLICKHOUSE__URL: http://clickhouse:8123
+
+services:
+  tayga-migrate:
+    build:
+      context: ${TAYGA_ROOT}
+      dockerfile: docker/Dockerfile
+    image: tayga:dev
+    command: ["tayga-writer", "migrate"]
+    environment: *tayga-env
+    restart: "no"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  tayga-ingest:
+    image: tayga:dev
+    container_name: tayga-ingest
+    command: ["tayga-ingest"]
+    environment: *tayga-env
+    restart: unless-stopped
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  tayga-writer:
+    image: tayga:dev
+    container_name: tayga-writer
+    command: ["tayga-writer"]
+    environment: *tayga-env
+    restart: unless-stopped
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      tayga-migrate:
+        condition: service_completed_successfully
+
+  otel-collector:
+    depends_on:
+      tayga-ingest:
+        condition: service_started
+
+  flagd:
+    volumes:
+      - ${TAYGA_ROOT}/deploy/flagd:/etc/flagd
+  flagd-ui:
+    volumes:
+      - ${TAYGA_ROOT}/deploy/flagd:/app/data
