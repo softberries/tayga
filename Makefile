@@ -16,6 +16,7 @@ INFRA := docker compose -p tayga-it -f $(TAYGA_ROOT)/deploy/compose.infra.yaml
 
 up:
 	git submodule update --init
+	$(COMPOSE) build tayga-migrate
 	$(COMPOSE) up -d
 
 down:
