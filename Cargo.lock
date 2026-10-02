@@ -1684,8 +1684,13 @@ dependencies = [
  "anyhow",
  "clap",
  "clickhouse",
+ "flate2",
+ "rand 0.10.3",
+ "rdkafka",
  "reqwest",
  "serde_json",
+ "tayga-analysis",
+ "tayga-model",
  "tokio",
 ]
 

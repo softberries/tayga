@@ -29,6 +29,24 @@ enum Cmd {
         #[arg(long, default_value = "http://localhost:8080/jaeger/ui")]
         jaeger: String,
     },
+    /// Capture complete traces from tayga.signals into a gzip fixture file.
+    Capture {
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 60)]
+        seconds: u64,
+        #[arg(long, default_value_t = 200)]
+        max_traces: usize,
+        #[arg(long)]
+        only_errors: bool,
+        /// Keep only traces with at least one span from this service.
+        #[arg(long)]
+        require_service: Option<String>,
+        #[arg(long, default_value = "localhost:19092")]
+        brokers: String,
+        #[arg(long, default_value = "tayga.signals")]
+        topic: String,
+    },
 }
 
 #[tokio::main]
@@ -55,6 +73,30 @@ async fn main() -> anyhow::Result<()> {
             println!("checked {checked} traces, {} mismatches", mismatches.len());
             anyhow::ensure!(checked > 0, "no traces sampled; is the stack running?");
             anyhow::ensure!(mismatches.is_empty(), "span counts differ");
+        }
+        Cmd::Capture {
+            out,
+            seconds,
+            max_traces,
+            only_errors,
+            require_service,
+            brokers,
+            topic,
+        } => {
+            let envelopes = tayga_devtools::capture::capture(
+                &brokers,
+                &topic,
+                seconds,
+                max_traces,
+                only_errors,
+                require_service.as_deref(),
+            )
+            .await?;
+            let file = std::fs::File::create(&out)?;
+            let mut gz = flate2::write::GzEncoder::new(file, flate2::Compression::best());
+            tayga_model::envelope::write_framed(&mut gz, &envelopes)?;
+            gz.finish()?;
+            println!("wrote {} envelopes to {}", envelopes.len(), out.display());
         }
     }
     Ok(())
