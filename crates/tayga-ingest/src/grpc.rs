@@ -1,4 +1,4 @@
-use crate::records::{log_records, now_unix_nano, trace_records};
+use crate::records::{OutRecord, log_records, now_unix_nano, trace_records};
 use crate::sink::{Sink, SinkError};
 use std::sync::Arc;
 use tayga_model::otlp::collector::logs::v1::logs_service_server::LogsService;
@@ -29,6 +29,17 @@ pub fn status_from(e: SinkError) -> Status {
     Status::unavailable(e.to_string())
 }
 
+async fn publish<S: Sink>(sink: &S, records: Vec<OutRecord>, signal: &'static str) -> Result<(), Status> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let count = records.len();
+    sink.publish(records).await.map_err(|e| {
+        tracing::warn!(signal, records = count, error = %e, "otlp/grpc export failed: kafka publish");
+        status_from(e)
+    })
+}
+
 #[tonic::async_trait]
 impl<S: Sink> TraceService for OtlpGrpc<S> {
     async fn export(
@@ -36,9 +47,7 @@ impl<S: Sink> TraceService for OtlpGrpc<S> {
         request: Request<ExportTraceServiceRequest>,
     ) -> Result<Response<ExportTraceServiceResponse>, Status> {
         let records = trace_records(request.into_inner(), now_unix_nano(), self.max_record_bytes).records;
-        if !records.is_empty() {
-            self.sink.publish(records).await.map_err(status_from)?;
-        }
+        publish(&*self.sink, records, "traces").await?;
         Ok(Response::new(ExportTraceServiceResponse::default()))
     }
 }
@@ -50,9 +59,7 @@ impl<S: Sink> LogsService for OtlpGrpc<S> {
         request: Request<ExportLogsServiceRequest>,
     ) -> Result<Response<ExportLogsServiceResponse>, Status> {
         let records = log_records(request.into_inner(), now_unix_nano(), self.max_record_bytes).records;
-        if !records.is_empty() {
-            self.sink.publish(records).await.map_err(status_from)?;
-        }
+        publish(&*self.sink, records, "logs").await?;
         Ok(Response::new(ExportLogsServiceResponse::default()))
     }
 }
@@ -60,7 +67,6 @@ impl<S: Sink> LogsService for OtlpGrpc<S> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::records::OutRecord;
     use std::sync::Mutex;
     use tayga_model::otlp::trace::v1::{ResourceSpans, ScopeSpans, Span};
 

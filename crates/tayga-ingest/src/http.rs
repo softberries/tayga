@@ -111,12 +111,17 @@ where
     let fmt = format(headers);
     let req: Req = match body_bytes(headers, body).and_then(|b| decode(fmt, &b)) {
         Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "otlp/http rejected undecodable body");
+            return (StatusCode::BAD_REQUEST, e).into_response();
+        }
     };
     let records = to_records(req, now_unix_nano(), ingest.max_record_bytes).records;
-    if !records.is_empty()
+    let count = records.len();
+    if count > 0
         && let Err(e) = ingest.sink.publish(records).await
     {
+        tracing::warn!(records = count, error = %e, "otlp/http export failed: kafka publish");
         return (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response();
     }
     encode(fmt, &response)
