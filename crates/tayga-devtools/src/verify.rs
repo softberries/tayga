@@ -1,6 +1,8 @@
 //! Compares per-trace span counts in ClickHouse with the demo's Jaeger.
 
+use anyhow::Context;
 use std::collections::HashSet;
+use std::time::Duration;
 
 /// Distinct span ids across all traces in a Jaeger `/api/traces/{id}` response.
 pub fn jaeger_span_count(resp: &serde_json::Value) -> usize {
@@ -25,18 +27,31 @@ pub async fn verify_raw(
     let traces: Vec<(String, u64)> = ch
         .query(
             "SELECT trace_id, uniqExact(span_id) FROM spans \
-             WHERE trace_id != '' AND start_ts BETWEEN now() - INTERVAL 10 MINUTE AND now() - INTERVAL 60 SECOND \
-             GROUP BY trace_id HAVING max(start_ts) < now() - INTERVAL 60 SECOND \
+             WHERE start_ts >= now() - INTERVAL 30 MINUTE \
+               AND trace_id IN ( \
+                 SELECT DISTINCT trace_id FROM spans \
+                 WHERE trace_id != '' \
+                   AND start_ts BETWEEN now() - INTERVAL 10 MINUTE AND now() - INTERVAL 60 SECOND) \
+             GROUP BY trace_id \
+             HAVING min(start_ts) >= now() - INTERVAL 30 MINUTE \
+                AND max(start_ts) < now() - INTERVAL 60 SECOND \
              ORDER BY cityHash64(trace_id) LIMIT ?",
         )
         .bind(samples)
         .fetch_all()
         .await?;
-    let http = reqwest::Client::new();
+    let http = reqwest::Client::builder().timeout(Duration::from_secs(10)).build()?;
     let mut mismatches = Vec::new();
     for (trace_id, ours) in &traces {
-        let resp: serde_json::Value =
-            http.get(format!("{jaeger_url}/api/traces/{trace_id}")).send().await?.json().await?;
+        let resp: serde_json::Value = http
+            .get(format!("{jaeger_url}/api/traces/{trace_id}"))
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .with_context(|| format!("jaeger trace {trace_id}"))?
+            .json()
+            .await
+            .with_context(|| format!("jaeger trace {trace_id}: invalid JSON"))?;
         let theirs = jaeger_span_count(&resp);
         if *ours as usize != theirs {
             mismatches.push((trace_id.clone(), *ours, theirs));
