@@ -134,6 +134,11 @@ async fn analysis_tables_roundtrip_and_baseline_queries() {
         .insert_rows("trace_summaries", &summaries)
         .await
         .unwrap();
+    // Replay the non-error summaries as a separate part: FINAL must dedupe them.
+    store
+        .insert_rows("trace_summaries", &summaries[..60])
+        .await
+        .unwrap();
     let minute = (now_ns() / 1_000_000_000 / 60 * 60) as u32;
     let edge = ServiceEdgeRow {
         minute,
