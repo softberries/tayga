@@ -196,9 +196,74 @@ mod tests {
 
     #[test]
     fn envelope_dispatches_by_payload() {
-        let (s, l) = rows_from_envelope(&Envelope::logs(ExportLogsServiceRequest::default(), 0));
-        assert!(s.is_empty() && l.is_empty());
-        let (s, l) = rows_from_envelope(&Envelope { received_at_unix_nano: 0, payload: None });
-        assert!(s.is_empty() && l.is_empty());
+        // Traces dispatch to span_rows
+        let span = Span {
+            trace_id: vec![1; 16],
+            span_id: vec![2; 8],
+            ..Default::default()
+        };
+        let trace_req = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: res(),
+                scope_spans: vec![ScopeSpans { spans: vec![span], ..Default::default() }],
+                ..Default::default()
+            }],
+        };
+        let (spans, logs) = rows_from_envelope(&Envelope::traces(trace_req, 0));
+        assert_eq!(spans.len(), 1, "Traces envelope should yield 1 span row");
+        assert_eq!(logs.len(), 0, "Traces envelope should yield 0 log rows");
+
+        // Logs dispatch to log_rows
+        let log_rec = LogRecord {
+            observed_time_unix_nano: 100,
+            severity_number: 1,
+            body: Some(AnyValue { value: Some(Value::StringValue("test".into())) }),
+            ..Default::default()
+        };
+        let log_req = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: res(),
+                scope_logs: vec![ScopeLogs { log_records: vec![log_rec], ..Default::default() }],
+                ..Default::default()
+            }],
+        };
+        let (spans, logs) = rows_from_envelope(&Envelope::logs(log_req, 0));
+        assert_eq!(spans.len(), 0, "Logs envelope should yield 0 span rows");
+        assert_eq!(logs.len(), 1, "Logs envelope should yield 1 log row");
+
+        // None payload yields empty
+        let (spans, logs) = rows_from_envelope(&Envelope { received_at_unix_nano: 0, payload: None });
+        assert_eq!(spans.len(), 0, "None payload should yield 0 span rows");
+        assert_eq!(logs.len(), 0, "None payload should yield 0 log rows");
+    }
+
+    #[test]
+    fn log_id_differs_when_body_differs() {
+        let rec1 = LogRecord {
+            observed_time_unix_nano: 100,
+            trace_id: vec![1; 16],
+            span_id: vec![2; 8],
+            body: Some(AnyValue { value: Some(Value::StringValue("body1".into())) }),
+            ..Default::default()
+        };
+        let rec2 = LogRecord {
+            observed_time_unix_nano: 100,
+            trace_id: vec![1; 16],
+            span_id: vec![2; 8],
+            body: Some(AnyValue { value: Some(Value::StringValue("body2".into())) }),
+            ..Default::default()
+        };
+        let req = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: res(),
+                scope_logs: vec![ScopeLogs { log_records: vec![rec1, rec2], ..Default::default() }],
+                ..Default::default()
+            }],
+        };
+        let rows = log_rows(&req);
+        assert_eq!(rows.len(), 2);
+        assert_ne!(rows[0].log_id, rows[1].log_id, "different bodies should produce different log_ids");
+        assert_eq!(rows[0].body, "body1");
+        assert_eq!(rows[1].body, "body2");
     }
 }
