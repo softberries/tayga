@@ -1,0 +1,9 @@
+# Layered after the OTel demo compose files. Paths use ${TAYGA_ROOT}
+# (exported by the Makefile) because the project directory is the demo.
+services:
+  flagd:
+    volumes:
+      - ${TAYGA_ROOT}/deploy/flagd:/etc/flagd
+  flagd-ui:
+    volumes:
+      - ${TAYGA_ROOT}/deploy/flagd:/app/data

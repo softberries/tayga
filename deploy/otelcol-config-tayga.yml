@@ -1,0 +1,21 @@
+# Loaded last by the demo collector (OTEL_COLLECTOR_CONFIG_EXTRAS).
+# Collector config merge REPLACES arrays: the upstream exporters
+# (debug, otlp_grpc/jaeger, span_metrics, opensearch) must be repeated.
+exporters:
+  otlp_grpc/tayga:
+    endpoint: tayga-ingest:4317
+    tls:
+      insecure: true
+    compression: gzip
+    sending_queue:
+      enabled: true
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 300s
+
+service:
+  pipelines:
+    traces:
+      exporters: [debug, otlp_grpc/jaeger, span_metrics, otlp_grpc/tayga]
+    logs:
+      exporters: [debug, opensearch, otlp_grpc/tayga]
