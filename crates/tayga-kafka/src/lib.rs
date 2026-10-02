@@ -18,7 +18,14 @@ pub struct KafkaSettings {
     pub topic: String,
     #[serde(default = "default_partitions")]
     pub partitions: i32,
+    /// Byte budget for one record value; ingest splits larger groups. Must stay below
+    /// `MAX_MESSAGE_BYTES` to leave room for the key, headers and record overhead.
+    #[serde(default = "default_max_record_bytes")]
+    pub max_record_bytes: usize,
 }
+
+/// Producer `message.max.bytes` and topic `max.message.bytes` (Redpanda's default batch limit).
+pub const MAX_MESSAGE_BYTES: usize = 1_048_576;
 
 fn default_topic() -> String {
     "tayga.signals".to_string()
@@ -26,6 +33,10 @@ fn default_topic() -> String {
 
 fn default_partitions() -> i32 {
     12
+}
+
+fn default_max_record_bytes() -> usize {
+    900_000
 }
 
 pub fn producer(s: &KafkaSettings) -> KafkaResult<FutureProducer> {
@@ -36,6 +47,7 @@ pub fn producer(s: &KafkaSettings) -> KafkaResult<FutureProducer> {
         .set("compression.type", "lz4")
         .set("linger.ms", "5")
         .set("queue.buffering.max.messages", "200000")
+        .set("message.max.bytes", MAX_MESSAGE_BYTES.to_string())
         .create()
 }
 
@@ -52,11 +64,14 @@ pub fn consumer(s: &KafkaSettings, group: &str) -> KafkaResult<StreamConsumer> {
         .create()
 }
 
-/// Creates the topic if missing; an existing topic is left as is.
+/// Creates the topic if missing (with `max.message.bytes` matching the producer);
+/// an existing topic is left as is.
 pub async fn ensure_topic(s: &KafkaSettings) -> anyhow::Result<()> {
     let admin: AdminClient<DefaultClientContext> =
         ClientConfig::new().set("bootstrap.servers", &s.brokers).create()?;
-    let topic = NewTopic::new(&s.topic, s.partitions, TopicReplication::Fixed(1));
+    let max_message_bytes = MAX_MESSAGE_BYTES.to_string();
+    let topic = NewTopic::new(&s.topic, s.partitions, TopicReplication::Fixed(1))
+        .set("max.message.bytes", &max_message_bytes);
     for result in admin.create_topics(&[topic], &AdminOptions::new()).await? {
         match result {
             Ok(_) | Err((_, RDKafkaErrorCode::TopicAlreadyExists)) => {}
@@ -84,6 +99,8 @@ mod tests {
         let s: KafkaSettings = serde_json::from_str(r#"{"brokers":"b:1"}"#).unwrap();
         assert_eq!(s.topic, "tayga.signals");
         assert_eq!(s.partitions, 12);
+        assert_eq!(s.max_record_bytes, 900_000);
+        assert!(s.max_record_bytes < MAX_MESSAGE_BYTES);
     }
 
     #[test]

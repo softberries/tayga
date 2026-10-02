@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
     let http_listener = tokio::net::TcpListener::bind(settings.http_addr).await?;
 
     let (stop_tx, stop_rx) = watch::channel(());
-    let grpc = OtlpGrpc::new(sink.clone());
+    let grpc = OtlpGrpc::new(sink.clone(), settings.kafka.max_record_bytes);
     let traces = TraceServiceServer::new(grpc.clone())
         .accept_compressed(CompressionEncoding::Gzip)
         .max_decoding_message_size(MAX_GRPC_MESSAGE);
@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
         });
 
     let mut http_stop = stop_rx;
-    let http_server = axum::serve(http_listener, tayga_ingest::http::router(sink.clone()))
+    let http_server = axum::serve(http_listener, tayga_ingest::http::router(sink.clone(), settings.kafka.max_record_bytes))
         .with_graceful_shutdown(async move {
             let _ = http_stop.changed().await;
         });

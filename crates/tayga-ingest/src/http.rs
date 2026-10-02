@@ -1,6 +1,6 @@
 //! OTLP/HTTP: protobuf or JSON bodies, optionally gzip-compressed.
 
-use crate::records::{OutRecord, log_records, now_unix_nano, trace_records};
+use crate::records::{Converted, log_records, now_unix_nano, trace_records};
 use crate::sink::Sink;
 use axum::Router;
 use axum::body::Bytes;
@@ -15,12 +15,23 @@ use tayga_model::otlp::collector::trace::v1::ExportTraceServiceResponse;
 
 const MAX_BODY: usize = 64 << 20;
 
-pub fn router<S: Sink>(sink: Arc<S>) -> Router {
+pub fn router<S: Sink>(sink: Arc<S>, max_record_bytes: usize) -> Router {
     Router::new()
         .route("/v1/traces", post(traces::<S>))
         .route("/v1/logs", post(logs::<S>))
         .layer(DefaultBodyLimit::max(MAX_BODY))
-        .with_state(sink)
+        .with_state(Ingest { sink, max_record_bytes })
+}
+
+struct Ingest<S> {
+    sink: Arc<S>,
+    max_record_bytes: usize,
+}
+
+impl<S> Clone for Ingest<S> {
+    fn clone(&self) -> Self {
+        Self { sink: self.sink.clone(), max_record_bytes: self.max_record_bytes }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -76,20 +87,20 @@ fn encode<T: prost::Message + serde::Serialize>(format: Format, msg: &T) -> Resp
     }
 }
 
-async fn traces<S: Sink>(State(sink): State<Arc<S>>, headers: HeaderMap, body: Bytes) -> Response {
-    handle(&*sink, &headers, body, trace_records, ExportTraceServiceResponse::default()).await
+async fn traces<S: Sink>(State(ingest): State<Ingest<S>>, headers: HeaderMap, body: Bytes) -> Response {
+    handle(&ingest, &headers, body, trace_records, ExportTraceServiceResponse::default()).await
 }
 
-async fn logs<S: Sink>(State(sink): State<Arc<S>>, headers: HeaderMap, body: Bytes) -> Response {
-    handle(&*sink, &headers, body, log_records, ExportLogsServiceResponse::default()).await
+async fn logs<S: Sink>(State(ingest): State<Ingest<S>>, headers: HeaderMap, body: Bytes) -> Response {
+    handle(&ingest, &headers, body, log_records, ExportLogsServiceResponse::default()).await
 }
 
 /// Shared flow: decode (400 on failure), convert to records, publish (503 on failure), encode the response.
 async fn handle<S, Req, Resp>(
-    sink: &S,
+    ingest: &Ingest<S>,
     headers: &HeaderMap,
     body: Bytes,
-    to_records: fn(Req, u64) -> Vec<OutRecord>,
+    to_records: fn(Req, u64, usize) -> Converted,
     response: Resp,
 ) -> Response
 where
@@ -102,9 +113,9 @@ where
         Ok(r) => r,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
-    let records = to_records(req, now_unix_nano());
+    let records = to_records(req, now_unix_nano(), ingest.max_record_bytes).records;
     if !records.is_empty()
-        && let Err(e) = sink.publish(records).await
+        && let Err(e) = ingest.sink.publish(records).await
     {
         return (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response();
     }
@@ -114,7 +125,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grpc::tests::{FakeSink, two_trace_request};
+    use crate::grpc::tests::{FakeSink, TEST_MAX_RECORD_BYTES, two_trace_request};
     use axum::body::Body;
     use axum::http::Request;
     use flate2::Compression;
@@ -127,7 +138,7 @@ mod tests {
         if gzip {
             req = req.header(header::CONTENT_ENCODING, "gzip");
         }
-        router(sink).oneshot(req.body(Body::from(body)).unwrap()).await.unwrap().status()
+        router(sink, TEST_MAX_RECORD_BYTES).oneshot(req.body(Body::from(body)).unwrap()).await.unwrap().status()
     }
 
     #[tokio::test]

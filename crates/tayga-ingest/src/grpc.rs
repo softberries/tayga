@@ -9,17 +9,18 @@ use tonic::{Request, Response, Status};
 
 pub struct OtlpGrpc<S> {
     sink: Arc<S>,
+    max_record_bytes: usize,
 }
 
 impl<S> OtlpGrpc<S> {
-    pub fn new(sink: Arc<S>) -> Self {
-        Self { sink }
+    pub fn new(sink: Arc<S>, max_record_bytes: usize) -> Self {
+        Self { sink, max_record_bytes }
     }
 }
 
 impl<S> Clone for OtlpGrpc<S> {
     fn clone(&self) -> Self {
-        Self { sink: self.sink.clone() }
+        Self { sink: self.sink.clone(), max_record_bytes: self.max_record_bytes }
     }
 }
 
@@ -34,7 +35,7 @@ impl<S: Sink> TraceService for OtlpGrpc<S> {
         &self,
         request: Request<ExportTraceServiceRequest>,
     ) -> Result<Response<ExportTraceServiceResponse>, Status> {
-        let records = trace_records(request.into_inner(), now_unix_nano());
+        let records = trace_records(request.into_inner(), now_unix_nano(), self.max_record_bytes).records;
         if !records.is_empty() {
             self.sink.publish(records).await.map_err(status_from)?;
         }
@@ -48,7 +49,7 @@ impl<S: Sink> LogsService for OtlpGrpc<S> {
         &self,
         request: Request<ExportLogsServiceRequest>,
     ) -> Result<Response<ExportLogsServiceResponse>, Status> {
-        let records = log_records(request.into_inner(), now_unix_nano());
+        let records = log_records(request.into_inner(), now_unix_nano(), self.max_record_bytes).records;
         if !records.is_empty() {
             self.sink.publish(records).await.map_err(status_from)?;
         }
@@ -62,6 +63,8 @@ pub(crate) mod tests {
     use crate::records::OutRecord;
     use std::sync::Mutex;
     use tayga_model::otlp::trace::v1::{ResourceSpans, ScopeSpans, Span};
+
+    pub(crate) const TEST_MAX_RECORD_BYTES: usize = 1 << 20;
 
     #[derive(Default)]
     pub(crate) struct FakeSink {
@@ -97,15 +100,27 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn traces_are_published_per_trace() {
         let sink = Arc::new(FakeSink::default());
-        let svc = OtlpGrpc::new(sink.clone());
+        let svc = OtlpGrpc::new(sink.clone(), TEST_MAX_RECORD_BYTES);
         TraceService::export(&svc, Request::new(two_trace_request())).await.unwrap();
         assert_eq!(sink.published.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
+    async fn oversized_span_is_dropped_without_failing_the_request() {
+        let sink = Arc::new(FakeSink::default());
+        let svc = OtlpGrpc::new(sink.clone(), 2_000);
+        let mut req = two_trace_request();
+        req.resource_spans[0].scope_spans[0].spans[0].name = "x".repeat(10_000);
+        TraceService::export(&svc, Request::new(req)).await.unwrap();
+        let published = sink.published.lock().unwrap();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].key, vec![2; 16]);
+    }
+
+    #[tokio::test]
     async fn sink_failure_maps_to_unavailable() {
         let sink = Arc::new(FakeSink { fail: true, ..Default::default() });
-        let svc = OtlpGrpc::new(sink);
+        let svc = OtlpGrpc::new(sink, TEST_MAX_RECORD_BYTES);
         let err = TraceService::export(&svc, Request::new(two_trace_request())).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unavailable);
     }
@@ -113,7 +128,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn empty_logs_export_succeeds_without_publishing() {
         let sink = Arc::new(FakeSink::default());
-        let svc = OtlpGrpc::new(sink.clone());
+        let svc = OtlpGrpc::new(sink.clone(), TEST_MAX_RECORD_BYTES);
         LogsService::export(&svc, Request::new(ExportLogsServiceRequest::default())).await.unwrap();
         assert!(sink.published.lock().unwrap().is_empty());
     }

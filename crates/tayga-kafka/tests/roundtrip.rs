@@ -9,7 +9,7 @@ use tayga_model::envelope::Kind;
 fn settings() -> KafkaSettings {
     let brokers = std::env::var("TAYGA_IT_KAFKA").unwrap_or_else(|_| "localhost:19092".into());
     let suffix: u32 = rand::random();
-    KafkaSettings { brokers, topic: format!("tayga-it-{suffix}"), partitions: 3 }
+    KafkaSettings { brokers, topic: format!("tayga-it-{suffix}"), partitions: 3, max_record_bytes: 900_000 }
 }
 
 #[tokio::test]
