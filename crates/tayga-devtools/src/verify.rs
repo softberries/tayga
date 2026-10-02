@@ -27,15 +27,14 @@ pub async fn verify_raw(
     let traces: Vec<(String, u64)> = ch
         .query(
             "SELECT trace_id, uniqExact(span_id) FROM spans \
-             WHERE start_ts >= now() - INTERVAL 30 MINUTE \
-               AND trace_id IN ( \
-                 SELECT DISTINCT trace_id FROM spans \
+             WHERE trace_id IN ( \
+                 SELECT trace_id FROM spans \
                  WHERE trace_id != '' \
-                   AND start_ts BETWEEN now() - INTERVAL 10 MINUTE AND now() - INTERVAL 60 SECOND) \
+                   AND start_ts BETWEEN now() - INTERVAL 10 MINUTE AND now() - INTERVAL 60 SECOND \
+                 GROUP BY trace_id ORDER BY cityHash64(trace_id) LIMIT ?) \
              GROUP BY trace_id \
-             HAVING min(start_ts) >= now() - INTERVAL 30 MINUTE \
-                AND max(start_ts) < now() - INTERVAL 60 SECOND \
-             ORDER BY cityHash64(trace_id) LIMIT ?",
+             HAVING max(start_ts) < now() - INTERVAL 60 SECOND \
+             ORDER BY trace_id",
         )
         .bind(samples)
         .fetch_all()
