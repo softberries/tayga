@@ -1594,6 +1594,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tayga-writer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rdkafka",
+ "serde",
+ "tayga-common",
+ "tayga-kafka",
+ "tayga-model",
+ "tayga-store",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "thiserror"
 version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
