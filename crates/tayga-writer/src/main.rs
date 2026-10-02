@@ -9,6 +9,8 @@ use tayga_store::ClickHouseSettings;
 use tayga_store::flatten::rows_from_envelope;
 use tayga_store::store::Store;
 use tayga_writer::batch::Batch;
+use tayga_writer::retry::retry_until;
+use tokio::sync::watch;
 
 const GROUP: &str = "tayga-writer";
 
@@ -77,13 +79,19 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     consumer.subscribe(&[&settings.kafka.topic])?;
     let max_age = Duration::from_millis(settings.writer.max_age_ms);
     let mut batch = Batch::default();
-    let shutdown = tayga_common::shutdown_signal();
-    tokio::pin!(shutdown);
+    let (stop_tx, mut stop_rx) = watch::channel(false);
+    tokio::spawn(async move {
+        tayga_common::shutdown_signal().await;
+        let _ = stop_tx.send(true);
+    });
     tracing::info!(topic = %settings.kafka.topic, "tayga-writer consuming");
 
+    // Set when shutdown interrupted a flush: nothing was committed, rows are re-read on restart.
+    let mut interrupted = false;
+    let mut main_stop = stop_rx.clone();
     loop {
         tokio::select! {
-            _ = &mut shutdown => break,
+            _ = main_stop.wait_for(|stop| *stop) => break,
             next = tokio::time::timeout(Duration::from_millis(200), consumer.recv()) => match next {
                 Ok(Ok(msg)) => {
                     let (spans, logs) = match msg.payload().map(Envelope::decode) {
@@ -96,38 +104,60 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
                     };
                     batch.add(msg.partition(), msg.offset(), spans, logs, Instant::now());
                 }
-                Ok(Err(e)) => tracing::warn!(error = %e, "kafka receive error"),
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "kafka receive error");
+                    let mut backoff_stop = stop_rx.clone();
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                        _ = backoff_stop.wait_for(|stop| *stop) => break,
+                    }
+                }
                 Err(_) => {}
             },
         }
         if batch.should_flush(Instant::now(), settings.writer.max_rows, max_age) {
-            flush(&store, &consumer, &settings.kafka.topic, std::mem::take(&mut batch)).await?;
+            let pending = std::mem::take(&mut batch);
+            if !flush(&store, &consumer, &settings.kafka.topic, pending, Some(&mut stop_rx)).await? {
+                interrupted = true;
+                break;
+            }
         }
     }
-    if !batch.commit_offsets().is_empty() {
-        flush(&store, &consumer, &settings.kafka.topic, batch).await?;
+    if !interrupted && !batch.commit_offsets().is_empty() {
+        // Single attempt: on failure exit without committing.
+        flush(&store, &consumer, &settings.kafka.topic, batch, None).await?;
     }
     tracing::info!("tayga-writer stopped");
     Ok(())
 }
 
-/// Inserts with retry, then commits. Offsets are never committed for rows not yet stored.
-async fn flush(store: &Store, consumer: &StreamConsumer, topic: &str, batch: Batch) -> anyhow::Result<()> {
-    let mut backoff = Duration::from_millis(100);
-    loop {
-        let result = async {
-            store.insert_spans(&batch.spans).await?;
-            store.insert_logs(&batch.logs).await
-        }
-        .await;
-        match result {
-            Ok(()) => break,
+/// Inserts, then commits. Offsets are never committed for rows not yet stored.
+/// With `shutdown` it retries until the insert succeeds or shutdown fires; without it, one attempt.
+/// Returns `Ok(true)` if the batch was stored and committed, `Ok(false)` if it was not stored.
+async fn flush(
+    store: &Store,
+    consumer: &StreamConsumer,
+    topic: &str,
+    batch: Batch,
+    shutdown: Option<&mut watch::Receiver<bool>>,
+) -> anyhow::Result<bool> {
+    let insert = || async {
+        store.insert_spans(&batch.spans).await?;
+        store.insert_logs(&batch.logs).await
+    };
+    let stored = match shutdown {
+        Some(rx) => retry_until(insert, rx).await.is_some(),
+        None => match insert().await {
+            Ok(()) => true,
             Err(e) => {
-                tracing::warn!(error = %e, retry_in_ms = backoff.as_millis() as u64, "clickhouse insert failed");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(30));
+                tracing::warn!(error = %e, "final clickhouse insert failed");
+                false
             }
-        }
+        },
+    };
+    if !stored {
+        tracing::warn!(rows = batch.rows(), "rows remain uncommitted and will be re-read on restart");
+        return Ok(false);
     }
     let mut tpl = TopicPartitionList::new();
     for (partition, offset) in batch.commit_offsets() {
@@ -138,5 +168,5 @@ async fn flush(store: &Store, consumer: &StreamConsumer, topic: &str, batch: Bat
         tracing::warn!(error = %e, "offset commit failed");
     }
     tracing::debug!(spans = batch.spans.len(), logs = batch.logs.len(), "flushed");
-    Ok(())
+    Ok(true)
 }
