@@ -48,6 +48,9 @@ pub fn producer(s: &KafkaSettings) -> KafkaResult<FutureProducer> {
         .set("linger.ms", "5")
         .set("queue.buffering.max.messages", "200000")
         .set("message.max.bytes", MAX_MESSAGE_BYTES.to_string())
+        // Fail deliveries before the collector's 30 s export timeout, so a broker outage
+        // surfaces as UNAVAILABLE instead of a client-side timeout plus a late duplicate.
+        .set("message.timeout.ms", "25000")
         .create()
 }
 

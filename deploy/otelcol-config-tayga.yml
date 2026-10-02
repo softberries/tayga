@@ -7,6 +7,8 @@ exporters:
     tls:
       insecure: true
     compression: gzip
+    # Above tayga-ingest's 25 s Kafka delivery timeout: ingest answers before the exporter gives up.
+    timeout: 30s
     sending_queue:
       enabled: true
     retry_on_failure:
