@@ -5,6 +5,7 @@ pub mod critical_path;
 pub mod fingerprint;
 pub mod model;
 pub mod rootcause;
+pub mod story;
 pub mod summary;
 pub mod tree;
 
