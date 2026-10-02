@@ -1648,6 +1648,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tayga-assembler"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "rdkafka",
+ "serde",
+ "serde_json",
+ "tayga-analysis",
+ "tayga-common",
+ "tayga-kafka",
+ "tayga-model",
+ "tayga-store",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tayga-common"
 version = "0.1.0"
 dependencies = [
