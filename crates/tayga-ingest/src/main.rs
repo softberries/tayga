@@ -1,10 +1,12 @@
 use rdkafka::producer::Producer;
 use serde::Deserialize;
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tayga_ingest::grpc::OtlpGrpc;
 use tayga_ingest::kafka_sink::KafkaSink;
+use tayga_ingest::supervise::supervise;
 use tayga_kafka::KafkaSettings;
 use tayga_model::otlp::collector::logs::v1::logs_service_server::LogsServiceServer;
 use tayga_model::otlp::collector::trace::v1::trace_service_server::TraceServiceServer;
@@ -66,25 +68,17 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(grpc = %settings.grpc_addr, http = %settings.http_addr, topic = %settings.kafka.topic, "tayga-ingest listening");
 
-    // Whichever finishes first (signal, error, or exit) stops the other; the first error wins.
-    let grpc_task = async {
-        let r = grpc_server.await.map_err(anyhow::Error::from);
-        let _ = stop_tx.send(());
-        r
-    };
-    let http_task = async {
-        let r = http_server.await.map_err(anyhow::Error::from);
-        let _ = stop_tx.send(());
-        r
-    };
-    let signal_task = async {
-        tayga_common::shutdown_signal().await;
-        let _ = stop_tx.send(());
-    };
-    let (g, h, ()) = tokio::join!(grpc_task, http_task, signal_task);
+    let served = supervise(grpc_server, http_server.into_future(), tayga_common::shutdown_signal(), stop_tx).await;
 
-    sink.producer().flush(Duration::from_secs(10))?;
-    g.and(h)?;
+    let flushed = sink.producer().flush(Duration::from_secs(10));
+    match (served, flushed) {
+        (Err(e), Err(f)) => {
+            tracing::error!(error = %f, "producer flush failed");
+            return Err(e);
+        }
+        (Err(e), Ok(())) => return Err(e),
+        (Ok(()), flushed) => flushed?,
+    }
     tracing::info!("tayga-ingest stopped");
     Ok(())
 }
