@@ -1,0 +1,15 @@
+[package]
+name = "tayga-analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+regex.workspace = true
+serde.workspace = true
+tayga-model.workspace = true
+xxhash-rust.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true
+proptest.workspace = true
