@@ -12,7 +12,7 @@ COMPOSE := docker compose --project-directory $(DEMO_DIR) \
 	-f $(TAYGA_ROOT)/deploy/compose.tayga.yaml
 INFRA := docker compose -p tayga-it -f $(TAYGA_ROOT)/deploy/compose.infra.yaml
 
-.PHONY: up down ps logs infra-up infra-down it flags-reset
+.PHONY: up down ps logs infra-up infra-down it flags-reset flag
 
 up:
 	git submodule update --init
@@ -39,3 +39,6 @@ it: infra-up
 
 flags-reset:
 	cp $(DEMO_DIR)/src/flagd/demo.flagd.json $(TAYGA_ROOT)/deploy/flagd/demo.flagd.json
+
+flag:
+	cargo run -q -p tayga-devtools -- flag $(NAME) $(VARIANT)
