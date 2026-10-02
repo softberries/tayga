@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 5e09f77359697cbd1a0e0f4a409c811c2137bfe16b34659d376bb1d4bc1b4323 # shrinks to raw = [(0, 0, 0)]
+cc c7bc3aed867798aec352f135227d0f3ac7e7eaebd1b974631e2441efceb2fcc2 # shrinks to raw = [(0, 0, 0), (0, 1, 0)]

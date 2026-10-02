@@ -5,6 +5,12 @@ use crate::tree::SpanTree;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 
+/// A child may end this much after its parent and still count as part of the parent's work:
+/// spans from different hosts carry independently read clocks (observed: a server span ending
+/// 57 us after its client span in the demo), and excluding such a child would credit its whole
+/// duration to the parent. Children ending later than this are treated as asynchronous.
+const CLOCK_SKEW_TOLERANCE_NS: u64 = 5_000_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Segment {
     pub span: usize,
@@ -24,6 +30,7 @@ pub fn critical_path(tree: &SpanTree) -> CriticalPath {
     struct Frame {
         span: usize,
         lo: u64,
+        hi: u64,
         cursor: u64,
         kids: Vec<usize>,
         next: usize,
@@ -36,13 +43,16 @@ pub fn critical_path(tree: &SpanTree) -> CriticalPath {
             .copied()
             .filter(|&c| {
                 let s = tree.span(c);
-                s.end_ns <= hi && s.end_ns > lo
+                s.end_ns <= hi.saturating_add(CLOCK_SKEW_TOLERANCE_NS)
+                    && s.end_ns > lo
+                    && s.start_ns < hi
             })
             .collect();
-        kids.sort_by_key(|&c| Reverse((tree.span(c).end_ns, c)));
+        kids.sort_by_key(|&c| Reverse((tree.span(c).end_ns.min(hi), c)));
         Frame {
             span,
             lo,
+            hi,
             cursor: hi,
             kids,
             next: 0,
@@ -56,19 +66,20 @@ pub fn critical_path(tree: &SpanTree) -> CriticalPath {
             let c = top.kids[top.next];
             top.next += 1;
             let child = tree.span(c);
-            if child.end_ns > top.cursor {
+            let child_hi = child.end_ns.min(top.hi); // clamp skew overshoot
+            if child_hi > top.cursor {
                 continue; // overlaps a later child already on the path
             }
-            if top.cursor > child.end_ns {
+            if top.cursor > child_hi {
                 reversed.push(Segment {
                     span: top.span,
-                    start_ns: child.end_ns,
+                    start_ns: child_hi,
                     end_ns: top.cursor,
                 });
             }
             let child_lo = child.start_ns.max(top.lo);
             top.cursor = child_lo;
-            stack.push(frame(c, child_lo, child.end_ns));
+            stack.push(frame(c, child_lo, child_hi));
         } else {
             if top.cursor > top.lo {
                 reversed.push(Segment {
@@ -134,11 +145,26 @@ mod tests {
     #[test]
     fn child_ending_after_parent_is_excluded() {
         let b = bundle(vec![
-            span("r", "", "fe", "root", 0, 100),
-            span("a", "r", "x", "async", 50, 150),
+            span("r", "", "fe", "root", 0, 100_000_000),
+            span("a", "r", "x", "async", 50_000_000, 150_000_000),
         ]);
         let t = SpanTree::build(&b).unwrap();
-        assert_eq!(critical_path(&t).segments, vec![seg(0, 0, 100)]);
+        assert_eq!(critical_path(&t).segments, vec![seg(0, 0, 100_000_000)]);
+    }
+
+    #[test]
+    fn child_ending_slightly_after_parent_is_clamped_not_excluded() {
+        // Cross-host clock skew: server span ends 57 us after its client span.
+        let b = bundle(vec![
+            span("r", "", "fe", "root", 0, 5_000_000_000),
+            span("c", "r", "checkout", "POST", 1_000, 5_000_000_000),
+            span("s", "c", "shipping", "ship", 1_200, 5_000_057_000),
+        ]);
+        let t = SpanTree::build(&b).unwrap();
+        let cp = critical_path(&t);
+        assert_eq!(cp.self_time[0].0, 2, "shipping span owns the path");
+        let total: u64 = cp.segments.iter().map(|s| s.end_ns - s.start_ns).sum();
+        assert_eq!(total, 5_000_000_000);
     }
 
     #[test]
