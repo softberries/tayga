@@ -30,7 +30,7 @@ Workspace crates (`crates/`): `tayga-ingest`, `tayga-writer`, `tayga-assembler`,
 Requires Docker with Compose, `make`, and a Rust toolchain (for the dev commands).
 
 ```sh
-git clone --recurse-submodules <repo-url> tayga
+git clone --recurse-submodules git@github.com:softberries/tayga.git tayga
 cd tayga
 make up
 ```
@@ -64,7 +64,7 @@ Other targets: `make ps`, `make logs SERVICE=<name>`, `make down`.
 
 ## Ports
 
-All published ports are bound to 127.0.0.1, except the demo's 8080.
+Tayga's own published ports (8090, 3001, 19090, 19092, 18123) are bound to 127.0.0.1. The upstream OpenTelemetry demo is not: it publishes 8080 (frontend proxy), 9090 (the demo's Prometheus), 10000 (Envoy admin) and 26 other container ports (on ephemeral host ports, counted on demo 3.1.0) on all interfaces, so they are reachable from your network. Run the stack only on a trusted network, or firewall those ports.
 
 | Port | Service | Defined in |
 |---|---|---|
@@ -115,6 +115,7 @@ Checked 2026-10-03 on branch `feat/plan-3-api-ui-e2e`, with the stack running.
 | Port 19090 = Prometheus | `ports` in `deploy/compose.tayga.yaml`; live `curl localhost:19090/-/ready` returned "Prometheus Server is Ready." | verified |
 | Port 18123 = ClickHouse HTTP | `ports` in `deploy/compose.infra.yaml`; live `curl localhost:18123/ping` returned `Ok.` | verified |
 | Port 19092 = Redpanda Kafka API | `ports` in `deploy/compose.infra.yaml`; `docker ps` shows `127.0.0.1:19092->19092/tcp` | verified (port mapping only; no Kafka client connection made) |
+| Tayga's ports bind 127.0.0.1; the demo publishes 8080, 9090, 10000 and ephemeral service ports on all interfaces | `lsof -nP -iTCP -sTCP:LISTEN` showed `127.0.0.1:8090`, `:3001`, `:19090`, `:19092`, `:18123` and `*:8080`, `*:9090`, `*:10000`, `*:574xx`, `*:627xx`, `*:648xx`; `docker ps` mapped the `*` listeners to containers of compose project `opentelemetry-demo` (frontend-proxy, prometheus, otel-collector, flagd and the demo services) | verified live 2026-10-03 |
 | Port 8080 = demo frontend proxy | `docker ps` shows `frontend-proxy` on 8080; `curl localhost:8080/` returned HTTP 200; the compose definition is in the submodule, not read | verified live, definition not read |
 | Jaeger UI at `/jaeger/ui` on 8080 | default `jaeger_url` in `crates/tayga-api/src/main.rs` and `TAYGA__JAEGER_URL` in compose | verified in config only, URL not fetched |
 | Grafana anonymous Viewer, admin password `admin` | `GF_AUTH_ANONYMOUS_*`, `GF_SECURITY_ADMIN_PASSWORD` in `deploy/compose.tayga.yaml` | verified in config; login not tried |
