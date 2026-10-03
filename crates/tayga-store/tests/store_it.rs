@@ -48,7 +48,7 @@ fn span(id: &str) -> SpanRow {
 #[ignore = "requires ClickHouse: make it"]
 async fn migrate_is_idempotent_and_rows_roundtrip() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3]);
     assert!(migrate(&s).await.unwrap().is_empty());
 
     let store = Store::new(&s);
@@ -114,6 +114,35 @@ fn summary_row(i: u64, op_present: bool) -> TraceSummaryRow {
         duration_ns: 1_000 + i,
         is_error: 0,
         op_durations: ops,
+        span_count: 2,
+    }
+}
+
+fn story_row(id: &str) -> StoryRow {
+    StoryRow {
+        story_id: id.into(),
+        fingerprint: 42,
+        kind: 1,
+        ts: now_ns(),
+        trace_id: id.into(),
+        endpoint_service: "frontend".into(),
+        endpoint_name: "GET /".into(),
+        rc_service: "payment".into(),
+        rc_span_name: "Charge".into(),
+        rc_span_kind: "server".into(),
+        rc_message: "Invalid token".into(),
+        rc_exception_type: String::new(),
+        summary: "payment Charge failed: Invalid token".into(),
+        duration_ns: 100,
+        path_services: vec!["frontend".into(), "payment".into()],
+        path_spans: "[]".into(),
+        critical_path: "{}".into(),
+        baseline_diff: String::new(),
+        logs: "[]".into(),
+        also_failed: "[]".into(),
+        span_count: 3,
+        flags: vec!["incomplete".into()],
+        rc_span_id: "00f067aa0ba902b7".into(),
     }
 }
 
@@ -121,7 +150,7 @@ fn summary_row(i: u64, op_present: bool) -> TraceSummaryRow {
 #[ignore = "requires ClickHouse: run against the live stack"]
 async fn analysis_tables_roundtrip_and_baseline_queries() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3]);
     let store = Store::new(&s);
 
     let mut summaries: Vec<TraceSummaryRow> = (0..60).map(|i| summary_row(i, i % 2 == 0)).collect();
@@ -152,30 +181,7 @@ async fn analysis_tables_roundtrip_and_baseline_queries() {
         .insert_rows("service_edges", &[edge.clone(), edge])
         .await
         .unwrap();
-    let story = StoryRow {
-        story_id: "t1".into(),
-        fingerprint: 42,
-        kind: 1,
-        ts: now_ns(),
-        trace_id: "t1".into(),
-        endpoint_service: "frontend".into(),
-        endpoint_name: "GET /".into(),
-        rc_service: "payment".into(),
-        rc_span_name: "Charge".into(),
-        rc_span_kind: "server".into(),
-        rc_message: "Invalid token".into(),
-        rc_exception_type: String::new(),
-        summary: "payment Charge failed: Invalid token".into(),
-        duration_ns: 100,
-        path_services: vec!["frontend".into(), "payment".into()],
-        path_spans: "[]".into(),
-        critical_path: "{}".into(),
-        baseline_diff: String::new(),
-        logs: "[]".into(),
-        also_failed: "[]".into(),
-        span_count: 3,
-        flags: vec!["incomplete".into()],
-    };
+    let story = story_row("t1");
     store
         .insert_rows("error_stories", &[story.clone(), story.clone()])
         .await
@@ -201,6 +207,79 @@ async fn analysis_tables_roundtrip_and_baseline_queries() {
         .await
         .unwrap();
     assert_eq!(calls, 4);
+    store
+        .client()
+        .query(&format!("DROP DATABASE `{}`", s.database))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Re-assembling a trace may pick another root: endpoint, ts and fingerprint change. Rows must
+/// still collapse per trace, keeping the most complete version.
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn replayed_trace_collapses_to_most_complete_row() {
+    let s = settings();
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3]);
+    let store = Store::new(&s);
+
+    let full = TraceSummaryRow {
+        endpoint_name: "GET /api/cart".into(),
+        span_count: 5,
+        ..summary_row(7, true)
+    };
+    let partial = TraceSummaryRow {
+        ts: now_ns() + 1_000,
+        endpoint_service: "cart".into(),
+        endpoint_name: "GetCart".into(),
+        span_count: 3,
+        ..summary_row(7, false)
+    };
+    // Separate inserts = separate parts; the more complete row arrives first.
+    store
+        .insert_rows("trace_summaries", std::slice::from_ref(&full))
+        .await
+        .unwrap();
+    store
+        .insert_rows("trace_summaries", std::slice::from_ref(&partial))
+        .await
+        .unwrap();
+    let back: Vec<TraceSummaryRow> = store
+        .client()
+        .query("SELECT ?fields FROM trace_summaries FINAL WHERE trace_id = 't7'")
+        .fetch_all()
+        .await
+        .unwrap();
+    assert_eq!(back, vec![full]);
+
+    let full_story = StoryRow {
+        span_count: 5,
+        ..story_row("t7")
+    };
+    let partial_story = StoryRow {
+        fingerprint: 43,
+        ts: now_ns() + 1_000,
+        endpoint_service: "cart".into(),
+        endpoint_name: "GetCart".into(),
+        span_count: 3,
+        ..story_row("t7")
+    };
+    store
+        .insert_rows("error_stories", std::slice::from_ref(&full_story))
+        .await
+        .unwrap();
+    store
+        .insert_rows("error_stories", std::slice::from_ref(&partial_story))
+        .await
+        .unwrap();
+    let back: Vec<StoryRow> = store
+        .client()
+        .query("SELECT ?fields FROM error_stories FINAL WHERE story_id = 't7'")
+        .fetch_all()
+        .await
+        .unwrap();
+    assert_eq!(back, vec![full_story]);
     store
         .client()
         .query(&format!("DROP DATABASE `{}`", s.database))

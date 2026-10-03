@@ -147,8 +147,10 @@ mod tests {
         ];
         let out = process(&traces, &HashMap::new(), &Thresholds::default());
         assert_eq!(out.summaries.len(), 2);
+        assert!(out.summaries.iter().all(|s| s.span_count == 2));
         assert_eq!(out.stories.len(), 1);
         assert_eq!(out.stories[0].rc_service, "cart");
+        assert_eq!(out.stories[0].rc_span_id, "b");
         assert_eq!(out.stories[0].kind, 1);
         assert_eq!(out.story_messages.len(), 1);
         assert_eq!(

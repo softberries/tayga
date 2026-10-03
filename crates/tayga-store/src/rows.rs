@@ -51,6 +51,8 @@ pub struct TraceSummaryRow {
     pub duration_ns: u64,
     pub is_error: u8,
     pub op_durations: Vec<(String, u64)>,
+    /// Version column: replays of a trace collapse to the row with the most spans.
+    pub span_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
@@ -90,6 +92,7 @@ pub struct StoryRow {
     pub also_failed: String,
     pub span_count: u32,
     pub flags: Vec<String>,
+    pub rc_span_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Deserialize)]

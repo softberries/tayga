@@ -15,6 +15,7 @@ pub struct TraceSummary {
     pub is_error: bool,
     /// `service:span_name` → longest duration in this trace, sorted by op.
     pub op_durations: Vec<(String, u64)>,
+    pub span_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +41,7 @@ pub fn trace_summary(tree: &SpanTree, is_error: bool) -> TraceSummary {
         duration_ns: root.duration_ns(),
         is_error,
         op_durations: ops.into_iter().collect(),
+        span_count: u32::try_from(tree.bundle.spans.len()).unwrap_or(u32::MAX),
     }
 }
 
@@ -80,6 +82,7 @@ mod tests {
         assert_eq!(s.trace_id, "t1");
         assert_eq!(s.ts_ns, 100);
         assert_eq!(s.duration_ns, 300);
+        assert_eq!(s.span_count, 3);
         assert!(s.is_error);
         assert_eq!(
             s.endpoint,

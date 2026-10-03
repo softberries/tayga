@@ -17,6 +17,7 @@ pub fn summary_row(s: &TraceSummary) -> TraceSummaryRow {
         duration_ns: s.duration_ns,
         is_error: u8::from(s.is_error),
         op_durations: s.op_durations.clone(),
+        span_count: s.span_count,
     }
 }
 
@@ -53,5 +54,6 @@ pub fn story_row(s: &Story) -> serde_json::Result<StoryRow> {
         also_failed: serde_json::to_string(&s.also_failed)?,
         span_count: s.span_count,
         flags: s.flags.clone(),
+        rc_span_id: s.root_cause.span.span_id.clone(),
     })
 }

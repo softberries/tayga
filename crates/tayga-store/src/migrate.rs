@@ -18,6 +18,10 @@ fn default_database() -> String {
 const MIGRATIONS: &[(u32, &str)] = &[
     (1, include_str!("../migrations/0001_raw_tables.sql")),
     (2, include_str!("../migrations/0002_analysis_tables.sql")),
+    (
+        3,
+        include_str!("../migrations/0003_replay_safe_analysis.sql"),
+    ),
 ];
 
 pub fn split_statements(sql: &str) -> Vec<String> {
@@ -79,5 +83,6 @@ mod tests {
         assert!(MIGRATIONS.windows(2).all(|w| w[0].0 < w[1].0));
         assert_eq!(split_statements(MIGRATIONS[0].1).len(), 2);
         assert_eq!(split_statements(MIGRATIONS[1].1).len(), 3);
+        assert_eq!(split_statements(MIGRATIONS[2].1).len(), 3);
     }
 }

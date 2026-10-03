@@ -184,6 +184,7 @@ mod tests {
                 .iter()
                 .map(|(o, d)| (o.to_string(), d * 1_000_000))
                 .collect(),
+            span_count: 1,
         }
     }
 
