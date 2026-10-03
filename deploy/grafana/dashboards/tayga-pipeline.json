@@ -154,17 +154,6 @@
           "legendFormat": "buffered bytes",
           "range": true,
           "instant": false
-        },
-        {
-          "refId": "C",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "tayga-prometheus"
-          },
-          "expr": "tayga_assembler_late_items",
-          "legendFormat": "late items",
-          "range": true,
-          "instant": false
         }
       ],
       "gridPos": {
@@ -331,6 +320,39 @@
         "defaults": {
           "unit": "s"
         },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 8,
+      "title": "Late spans/logs per second",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tayga-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "rate(tayga_assembler_late_items_total[5m])",
+          "legendFormat": "late items/s",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {},
         "overrides": []
       },
       "options": {}

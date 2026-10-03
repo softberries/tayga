@@ -159,6 +159,7 @@ async fn main() -> anyhow::Result<()> {
     refresh.tick().await; // the first tick fires immediately; baselines were just loaded
     let mut pending: Vec<ClosedTrace> = Vec::new();
     let mut ticks: u64 = 0;
+    let mut late_items_reported: u64 = 0;
     tracing::info!(topic = %settings.kafka.topic, stories = %a.stories_topic, "tayga-assembler consuming");
 
     loop {
@@ -188,7 +189,7 @@ async fn main() -> anyhow::Result<()> {
                 commit(&consumer, &settings.kafka.topic, &mut windows, &mut pending, CommitMode::Async);
                 metrics.open_traces.set(windows.open_traces() as i64);
                 metrics.buffered_bytes.set(windows.buffered_bytes() as i64);
-                metrics.late_items.set(windows.late_items() as i64);
+                metrics.record_late_items(&mut late_items_reported, windows.late_items());
                 ticks += 1;
                 if ticks.is_multiple_of(STATS_EVERY_TICKS) {
                     tracing::info!(

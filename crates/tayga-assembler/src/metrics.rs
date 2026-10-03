@@ -14,7 +14,8 @@ pub struct AssemblerMetrics {
     pub write_failures: Counter,
     pub open_traces: Gauge,
     pub buffered_bytes: Gauge,
-    pub late_items: Gauge,
+    /// Exported as `tayga_assembler_late_items_total`.
+    pub late_items: Counter,
     pub baseline_endpoints: Gauge,
 }
 
@@ -67,5 +68,37 @@ impl AssemblerMetrics {
             m.baseline_endpoints.clone(),
         );
         m
+    }
+
+    /// Advances `late_items` to the cumulative `total` reported by the window, given the
+    /// total seen at the previous call in `last`. A total that went down (a new window) is
+    /// taken as the new starting point.
+    pub fn record_late_items(&self, last: &mut u64, total: u64) {
+        self.late_items.inc_by(total.saturating_sub(*last));
+        *last = total;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn late_items_counter_increments_by_delta() {
+        let mut registry = Registry::default();
+        let m = AssemblerMetrics::register(&mut registry);
+        let mut last = 0;
+        m.record_late_items(&mut last, 3);
+        m.record_late_items(&mut last, 3);
+        m.record_late_items(&mut last, 5);
+        assert_eq!(m.late_items.get(), 5);
+        m.record_late_items(&mut last, 1);
+        assert_eq!(m.late_items.get(), 5, "a reset total does not decrement");
+        m.record_late_items(&mut last, 2);
+        assert_eq!(m.late_items.get(), 6);
+        let mut out = String::new();
+        prometheus_client::encoding::text::encode(&mut out, &registry).unwrap();
+        assert!(out.contains("# TYPE tayga_assembler_late_items counter"));
+        assert!(out.contains("tayga_assembler_late_items_total 6"));
     }
 }
