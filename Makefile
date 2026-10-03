@@ -50,5 +50,5 @@ verify-raw:
 capture:
 	cargo run -q -p tayga-devtools -- capture --out fixtures/$(NAME).pb.gz $(ARGS)
 
-e2e:
+e2e: flags-reset
 	cargo test -p tayga-e2e -- --ignored --test-threads=1 --nocapture

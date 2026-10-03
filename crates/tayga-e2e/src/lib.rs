@@ -1,6 +1,7 @@
 //! Black-box helpers for end-to-end tests against the running demo stack.
 
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -30,6 +31,7 @@ pub struct FlagGuard {
 impl FlagGuard {
     pub fn set(name: &str, variant: &str) -> anyhow::Result<Self> {
         let root = repo_root();
+        // Built before any mutation so Drop restores the flags even if a step below fails.
         let guard = Self {
             live: root.join("deploy/flagd/demo.flagd.json"),
             upstream: root.join("vendor/opentelemetry-demo/src/flagd/demo.flagd.json"),
@@ -98,32 +100,74 @@ impl Api {
     }
 }
 
-/// Polls story groups until one seen after `after_ns` satisfies `pred`; returns it and the wait.
+fn story_count(g: &Value) -> u64 {
+    g["stories"].as_u64().unwrap_or(0)
+}
+
+/// Story counts per fingerprint for `query`; take it just before flipping the flag.
+pub async fn snapshot(api: &Api, query: &str) -> anyhow::Result<HashMap<String, u64>> {
+    let groups = api.groups(query).await?;
+    Ok(groups
+        .iter()
+        .map(|g| {
+            (
+                g["fingerprint"].as_str().unwrap_or_default().to_string(),
+                story_count(g),
+            )
+        })
+        .collect())
+}
+
+/// Polls story groups until one seen after `after_ns` satisfies `pred` and has gained at least
+/// `min_new` stories since `before` (a group absent from `before` counts from 0). Returns it and the wait.
 pub async fn wait_for_group(
     api: &Api,
     query: &str,
+    before: &HashMap<String, u64>,
     after_ns: i64,
+    min_new: u64,
     timeout: Duration,
     pred: impl Fn(&Value) -> bool,
 ) -> anyhow::Result<(Value, Duration)> {
     let start = Instant::now();
     let mut last_seen: Vec<String> = Vec::new();
+    let mut last_err: Option<String> = None;
     while start.elapsed() < timeout {
-        let groups = api.groups(query).await?;
-        last_seen = groups
-            .iter()
-            .map(|g| format!("{} | {}", g["rc_service"], g["summary"]))
-            .collect();
-        if let Some(g) = groups
-            .into_iter()
-            .find(|g| g["last_seen_ns"].as_i64().unwrap_or(0) > after_ns && pred(g))
-        {
-            return Ok((g, start.elapsed()));
+        match api.groups(query).await {
+            Ok(groups) => {
+                last_seen = groups
+                    .iter()
+                    .map(|g| {
+                        format!(
+                            "{} | {} | stories={}",
+                            g["rc_service"],
+                            g["summary"],
+                            story_count(g)
+                        )
+                    })
+                    .collect();
+                let found = groups.into_iter().find(|g| {
+                    let prior = before
+                        .get(g["fingerprint"].as_str().unwrap_or_default())
+                        .copied()
+                        .unwrap_or(0);
+                    g["last_seen_ns"].as_i64().unwrap_or(0) > after_ns
+                        && story_count(g).saturating_sub(prior) >= min_new
+                        && pred(g)
+                });
+                if let Some(g) = found {
+                    return Ok((g, start.elapsed()));
+                }
+            }
+            Err(e) => {
+                eprintln!("[e2e] poll error (continuing): {e}");
+                last_err = Some(e.to_string());
+            }
         }
         tokio::time::sleep(POLL_EVERY).await;
     }
     anyhow::bail!(
-        "no matching story group within {timeout:?}; last groups seen:\n{}",
+        "no matching story group within {timeout:?} (last poll error: {last_err:?}); last groups seen:\n{}",
         last_seen.join("\n")
     )
 }
