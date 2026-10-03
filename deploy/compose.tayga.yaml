@@ -52,6 +52,31 @@ services:
       tayga-migrate:
         condition: service_completed_successfully
 
+  tayga-api:
+    image: tayga:dev
+    container_name: tayga-api
+    command: ["tayga-api"]
+    environment:
+      <<: *tayga-env
+      TAYGA__JAEGER_URL: http://localhost:8080/jaeger/ui
+      TAYGA__GRAFANA_URL: http://localhost:3001
+    ports:
+      - "127.0.0.1:8090:8090"
+    restart: unless-stopped
+    depends_on:
+      tayga-migrate:
+        condition: service_completed_successfully
+
+  tayga-prometheus:
+    image: quay.io/prometheus/prometheus:v3.13.3
+    container_name: tayga-prometheus
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d"]
+    volumes:
+      - ${TAYGA_ROOT}/deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:19090:9090"
+    restart: unless-stopped
+
   otel-collector:
     depends_on:
       tayga-ingest:
