@@ -203,12 +203,17 @@ async fn flush(
     shutdown: Option<&mut watch::Receiver<bool>>,
 ) -> anyhow::Result<bool> {
     let insert = || async {
+        let started = Instant::now();
         let result = async {
             store.insert_spans(&batch.spans).await?;
             store.insert_logs(&batch.logs).await
         }
         .await;
-        if result.is_err() {
+        if result.is_ok() {
+            metrics
+                .batch_seconds
+                .observe(started.elapsed().as_secs_f64());
+        } else {
             metrics.insert_failures.inc();
         }
         result
