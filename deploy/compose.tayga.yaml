@@ -40,6 +40,18 @@ services:
       tayga-migrate:
         condition: service_completed_successfully
 
+  tayga-assembler:
+    image: tayga:dev
+    container_name: tayga-assembler
+    command: ["tayga-assembler"]
+    environment: *tayga-env
+    restart: unless-stopped
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      tayga-migrate:
+        condition: service_completed_successfully
+
   otel-collector:
     depends_on:
       tayga-ingest:
