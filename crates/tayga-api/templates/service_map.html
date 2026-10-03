@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Service map · Tayga{% endblock %}
+{% block content %}
+<p>Calls between services in the last {{ since }}. <a href="{{ grafana_link }}">Open the node graph in Grafana</a>.</p>
+{% if edges.is_empty() %}<div class="empty">No traffic in this window.</div>{% else %}
+<table>
+<tr><th>Caller</th><th>Callee</th><th>Calls</th><th>Errors</th><th>Error rate</th><th>Avg latency</th></tr>
+{% for e in edges %}
+<tr><td>{{ e.parent }}</td><td>{{ e.child }}</td><td>{{ e.calls }}</td><td>{{ e.errors }}</td><td>{{ e.error_rate }}</td><td>{{ e.avg_ms }} ms</td></tr>
+{% endfor %}
+</table>
+{% endif %}
+{% endblock %}

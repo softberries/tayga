@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Group · Tayga{% endblock %}
+{% block content %}
+<p><span class="badge {{ kind }}">{{ kind }}</span> <strong>{{ summary }}</strong></p>
+<p class="muted">Fingerprint <span class="mono">{{ fingerprint }}</span> · {{ stories }} stories · root cause in {{ rc_service }} · endpoint <span class="mono">{{ endpoint }}</span></p>
+<p>{{ spark|safe }}</p>
+<h3>Recent stories</h3>
+<table>
+<tr><th>Time</th><th>Duration</th><th>Summary</th></tr>
+{% for e in examples %}
+<tr><td class="muted">{{ e.time }}</td><td>{{ e.duration_ms }} ms</td><td><a href="/stories/{{ e.story_id }}">{{ e.summary }}</a></td></tr>
+{% endfor %}
+</table>
+{% endblock %}

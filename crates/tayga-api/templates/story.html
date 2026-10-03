@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Story · Tayga{% endblock %}
+{% block content %}
+<p><span class="badge {{ kind }}">{{ kind }}</span> <strong>{{ summary }}</strong></p>
+<p class="path">{{ path }}</p>
+<p class="muted">{{ time }} · {{ duration_ms }} ms · {{ span_count }} spans{% for f in flags %} · {{ f }}{% endfor %} ·
+  <a href="{{ jaeger_link }}">open in Jaeger</a> · <a href="/groups/{{ fingerprint }}">group</a></p>
+<h3>Waterfall</h3>
+<p class="muted">Blue = critical path, red = error span, highlighted row = root cause.</p>
+<table>
+<tr><th style="width:38%">Span</th><th>Timeline</th><th style="width:80px">ms</th></tr>
+{% for r in rows %}
+<tr{% if r.root_cause %} class="rc"{% endif %}>
+  <td style="padding-left:{{ r.depth * 14 + 8 }}px"><span class="muted">{{ r.service }}</span> {{ r.name }}</td>
+  <td><div class="wf"><div class="bar{% if r.error %} err{% else %}{% if r.critical %} crit{% endif %}{% endif %}" style="left:{{ r.left }}%;width:{{ r.width }}%"></div></div></td>
+  <td>{{ r.duration_ms }}</td>
+</tr>
+{% endfor %}
+</table>
+{% if !diff_lines.is_empty() %}
+<h3>Compared with normal</h3>
+<ul>{% for d in diff_lines %}<li>{{ d }}</li>{% endfor %}</ul>
+{% endif %}
+<h3>Logs</h3>
+{% if logs.is_empty() %}<div class="empty">No logs attached to this trace.</div>{% else %}
+<table>
+<tr><th>Time</th><th>Service</th><th>Severity</th><th>Body</th></tr>
+{% for l in logs %}
+<tr><td class="muted">{{ l.time }}</td><td>{{ l.service }}</td><td>{{ l.severity }}</td><td class="mono">{{ l.body }}</td></tr>
+{% endfor %}
+</table>
+{% endif %}
+{% endblock %}
