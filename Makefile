@@ -12,7 +12,7 @@ COMPOSE := docker compose --project-directory $(DEMO_DIR) \
 	-f $(TAYGA_ROOT)/deploy/compose.tayga.yaml
 INFRA := docker compose -p tayga-it -f $(TAYGA_ROOT)/deploy/compose.infra.yaml
 
-.PHONY: up down ps logs infra-up infra-down it flags-reset flag verify-raw capture
+.PHONY: up down ps logs infra-up infra-down it flags-reset flag verify-raw capture e2e
 
 up:
 	git submodule update --init
@@ -49,3 +49,6 @@ verify-raw:
 
 capture:
 	cargo run -q -p tayga-devtools -- capture --out fixtures/$(NAME).pb.gz $(ARGS)
+
+e2e:
+	cargo test -p tayga-e2e -- --ignored --test-threads=1 --nocapture
