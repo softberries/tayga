@@ -1,5 +1,5 @@
 //! Run with `make e2e` (stack up, flags at defaults). Each test flips one flag and restores it.
-//! A scenario passes only when its group gains new stories after the flip (see `wait_for_group`).
+//! A scenario passes only when its group has new stories after the flip (see `wait_for_group`).
 
 use serde_json::Value;
 use tayga_e2e::*;
@@ -14,11 +14,10 @@ macro_rules! scenario {
         #[ignore = "end-to-end: requires `make up`"]
         async fn $name() -> anyhow::Result<()> {
             let api = Api::new(API);
-            let before = snapshot(&api, $q).await?;
             let flipped = now_ns();
             let _flag = FlagGuard::set($flag, $variant)?;
             let (_g, waited) =
-                wait_for_group(&api, $q, &before, flipped, $min, SCENARIO_TIMEOUT, $pred).await?;
+                wait_for_group(&api, $q, flipped, $min, SCENARIO_TIMEOUT, $pred).await?;
             report($label, waited);
             Ok(())
         }
@@ -29,11 +28,10 @@ macro_rules! scenario {
 #[ignore = "end-to-end: requires `make up`"]
 async fn payment_failure_blames_payment() -> anyhow::Result<()> {
     let api = Api::new(API);
-    let q = "since=10m&kind=error&service=payment";
-    let before = snapshot(&api, q).await?;
+    let q = "kind=error&service=payment";
     let flipped = now_ns();
     let _flag = FlagGuard::set("paymentFailure", "100%")?;
-    let (g, waited) = wait_for_group(&api, q, &before, flipped, 3, SCENARIO_TIMEOUT, |g| {
+    let (g, waited) = wait_for_group(&api, q, flipped, 3, SCENARIO_TIMEOUT, |g| {
         s(g, "rc_span_name").to_lowercase().contains("charge")
     })
     .await?;
@@ -52,21 +50,37 @@ async fn payment_failure_blames_payment() -> anyhow::Result<()> {
     Ok(())
 }
 
-scenario!(
-    payment_unreachable_blames_checkout_client,
-    "paymentUnreachable",
-    "on",
-    "since=10m&kind=error&service=checkout",
-    3,
-    "paymentUnreachable",
-    |g| s(g, "summary").contains("could not reach oteldemo.PaymentService")
-);
+/// Spec §14: the root cause is the checkout client span calling payment.
+#[tokio::test]
+#[ignore = "end-to-end: requires `make up`"]
+async fn payment_unreachable_blames_checkout_client() -> anyhow::Result<()> {
+    let api = Api::new(API);
+    let flipped = now_ns();
+    let _flag = FlagGuard::set("paymentUnreachable", "on")?;
+    let (g, waited) = wait_for_group(
+        &api,
+        "kind=error&service=checkout",
+        flipped,
+        3,
+        SCENARIO_TIMEOUT,
+        |g| s(g, "summary").contains("could not reach oteldemo.PaymentService"),
+    )
+    .await?;
+    report("paymentUnreachable", waited);
+    let story = api.story(&s(&g, "sample_story_id")).await?;
+    assert_eq!(
+        story["root_cause"]["span_kind"], "client",
+        "root cause: {}",
+        story["root_cause"]
+    );
+    Ok(())
+}
 
 scenario!(
     product_catalog_failure_blames_product_catalog,
     "productCatalogFailure",
     "on",
-    "since=10m&kind=error&service=product-catalog",
+    "kind=error&service=product-catalog",
     3,
     "productCatalogFailure",
     |g| s(g, "summary").contains("Product Catalog Fail Feature Flag Enabled")
@@ -76,21 +90,39 @@ scenario!(
     ad_failure_blames_ad,
     "adFailure",
     "on",
-    "since=10m&kind=error&service=ad",
+    "kind=error&service=ad",
     3,
     "adFailure",
     |g| s(g, "summary").contains("GetAds failed")
 );
 
-scenario!(
-    shipping_slowdown_produces_slow_story_blaming_shipping,
-    "intlShippingSlowdown",
-    "5sec",
-    "since=10m&kind=slow&service=shipping",
-    1,
-    "intlShippingSlowdown",
-    |g| s(g, "rc_service") == "shipping"
-);
+/// The flag only delays international orders, which are rare in the load generator's traffic,
+/// so this waits up to `SHIPPING_TIMEOUT` (600 s) rather than `SCENARIO_TIMEOUT`. The sample
+/// story must carry the injected 5 s delay, which rules out a spontaneous shipping slow story.
+#[tokio::test]
+#[ignore = "end-to-end: requires `make up`"]
+async fn shipping_slowdown_produces_slow_story_blaming_shipping() -> anyhow::Result<()> {
+    let api = Api::new(API);
+    let flipped = now_ns();
+    let _flag = FlagGuard::set("intlShippingSlowdown", "5sec")?;
+    let (g, waited) = wait_for_group(
+        &api,
+        "kind=slow&service=shipping",
+        flipped,
+        1,
+        SHIPPING_TIMEOUT,
+        |g| s(g, "rc_service") == "shipping",
+    )
+    .await?;
+    report("intlShippingSlowdown", waited);
+    let story = api.story(&s(&g, "sample_story_id")).await?;
+    let duration_ns = story["duration_ns"].as_u64().unwrap_or(0);
+    assert!(
+        duration_ns >= 4_500_000_000,
+        "sample story lasted {duration_ns} ns; the flag adds 5 s"
+    );
+    Ok(())
+}
 
 #[tokio::test]
 #[ignore = "end-to-end: requires `make up`"]

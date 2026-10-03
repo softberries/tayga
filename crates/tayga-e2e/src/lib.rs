@@ -1,12 +1,16 @@
 //! Black-box helpers for end-to-end tests against the running demo stack.
 
 use serde_json::Value;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 pub const API: &str = "http://localhost:8090";
 pub const SCENARIO_TIMEOUT: Duration = Duration::from_secs(180);
+/// `intlShippingSlowdown` only delays orders shipped outside the US, a small share of the
+/// load generator's ~3 orders/min (15 of 286 orders in earlier flag-on periods), so the first
+/// slow story can take several minutes. One clean-baseline run saw 10 orders, none
+/// international, in 180 s.
+pub const SHIPPING_TIMEOUT: Duration = Duration::from_secs(600);
 pub const POLL_EVERY: Duration = Duration::from_secs(5);
 /// Spec §15 target for flag-to-story latency; reported, not asserted.
 pub const TARGET_LATENCY: Duration = Duration::from_secs(60);
@@ -16,10 +20,10 @@ fn repo_root() -> PathBuf {
 }
 
 pub fn now_ns() -> i64 {
-    std::time::SystemTime::now()
+    let d = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as i64)
-        .unwrap_or(0)
+        .expect("system clock is after the Unix epoch");
+    i64::try_from(d.as_nanos()).expect("nanoseconds since epoch fit in i64")
 }
 
 /// Sets a demo flag; restores the upstream flag file when dropped (also on panic).
@@ -104,26 +108,18 @@ fn story_count(g: &Value) -> u64 {
     g["stories"].as_u64().unwrap_or(0)
 }
 
-/// Story counts per fingerprint for `query`; take it just before flipping the flag.
-pub async fn snapshot(api: &Api, query: &str) -> anyhow::Result<HashMap<String, u64>> {
-    let groups = api.groups(query).await?;
-    Ok(groups
-        .iter()
-        .map(|g| {
-            (
-                g["fingerprint"].as_str().unwrap_or_default().to_string(),
-                story_count(g),
-            )
-        })
-        .collect())
+/// `since` covering only the time after `after_ns` (whole seconds, rounded up, at least 1 s), so
+/// stories from before the flip, such as an earlier run of the same scenario, are not counted.
+pub fn since_flip(after_ns: i64) -> String {
+    let elapsed_ns = now_ns().saturating_sub(after_ns).max(0) as u64;
+    format!("{}s", elapsed_ns.div_ceil(1_000_000_000).max(1))
 }
 
-/// Polls story groups until one seen after `after_ns` satisfies `pred` and has gained at least
-/// `min_new` stories since `before` (a group absent from `before` counts from 0). Returns it and the wait.
+/// Polls story groups matching `filter` (query string without `since`) until one seen after
+/// `after_ns` satisfies `pred` and has at least `min_new` stories since the flip. Returns it and the wait.
 pub async fn wait_for_group(
     api: &Api,
-    query: &str,
-    before: &HashMap<String, u64>,
+    filter: &str,
     after_ns: i64,
     min_new: u64,
     timeout: Duration,
@@ -133,7 +129,8 @@ pub async fn wait_for_group(
     let mut last_seen: Vec<String> = Vec::new();
     let mut last_err: Option<String> = None;
     while start.elapsed() < timeout {
-        match api.groups(query).await {
+        let query = format!("since={}&{filter}", since_flip(after_ns));
+        match api.groups(&query).await {
             Ok(groups) => {
                 last_seen = groups
                     .iter()
@@ -147,12 +144,8 @@ pub async fn wait_for_group(
                     })
                     .collect();
                 let found = groups.into_iter().find(|g| {
-                    let prior = before
-                        .get(g["fingerprint"].as_str().unwrap_or_default())
-                        .copied()
-                        .unwrap_or(0);
                     g["last_seen_ns"].as_i64().unwrap_or(0) > after_ns
-                        && story_count(g).saturating_sub(prior) >= min_new
+                        && story_count(g) >= min_new
                         && pred(g)
                 });
                 if let Some(g) = found {
@@ -182,4 +175,17 @@ pub fn report(name: &str, waited: Duration) {
         "[e2e] {name}: first matching story after {:.0}s ({verdict} the 60s target)",
         waited.as_secs_f64()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn since_flip_covers_only_the_time_after_the_flip() {
+        assert_eq!(since_flip(now_ns()), "1s");
+        assert_eq!(since_flip(now_ns() + 5_000_000_000), "1s", "future flip");
+        let s = since_flip(now_ns() - 90_500_000_000);
+        assert!(s == "91s" || s == "92s", "{s}");
+    }
 }
