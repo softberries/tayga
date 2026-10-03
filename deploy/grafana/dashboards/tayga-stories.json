@@ -79,7 +79,7 @@
           "links": [
             {
               "title": "Open group",
-              "url": "http://localhost:8090/groups/${__data.fields.fingerprint}",
+              "url": "http://localhost:8090/groups/${__data.fields.fingerprint}?since=7d",
               "targetBlank": true
             }
           ]
