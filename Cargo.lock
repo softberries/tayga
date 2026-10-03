@@ -1831,6 +1831,7 @@ dependencies = [
  "axum",
  "clickhouse",
  "prometheus-client",
+ "rand 0.10.3",
  "serde",
  "serde_json",
  "tayga-common",

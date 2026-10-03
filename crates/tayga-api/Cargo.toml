@@ -19,4 +19,5 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+rand.workspace = true
 tower.workspace = true

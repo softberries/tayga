@@ -36,7 +36,7 @@ infra-down:
 
 it: infra-up
 	TAYGA_IT_KAFKA=localhost:19092 TAYGA_IT_CLICKHOUSE=http://localhost:18123 \
-		cargo test --workspace -- --ignored --test-threads=1
+		cargo test --workspace --exclude tayga-e2e -- --ignored --test-threads=1
 
 flags-reset:
 	cp $(DEMO_DIR)/src/flagd/demo.flagd.json $(TAYGA_ROOT)/deploy/flagd/demo.flagd.json

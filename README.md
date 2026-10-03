@@ -56,7 +56,7 @@ Other targets: `make ps`, `make logs SERVICE=<name>`, `make down`.
 | Command | What it does |
 |---|---|
 | `cargo test --workspace` | Unit tests (integration and e2e tests are `#[ignore]`d) |
-| `make it` | Starts Redpanda + ClickHouse standalone (compose project `tayga-it`) and runs ignored integration tests. Run it with the full stack down: both use the same host ports 19092 and 18123 |
+| `make it` | Starts Redpanda + ClickHouse standalone (compose project `tayga-it`) and runs the ignored integration tests (all crates except `tayga-e2e`; the ClickHouse tests each seed a uniquely named database). Run it with the full stack down: both use the same host ports 19092 and 18123 |
 | `make infra-down` | Stops the standalone infra and removes its volumes |
 | `make e2e` | Resets flags, then runs the flag-driven end-to-end tests against the live stack (`make up` first) |
 | `make verify-raw` | Compares per-trace span counts in ClickHouse with the demo's Jaeger |
