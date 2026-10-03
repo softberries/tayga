@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: tayga
+    folder: Tayga
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

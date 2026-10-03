@@ -287,3 +287,47 @@ async fn replayed_trace_collapses_to_most_complete_row() {
         .await
         .unwrap();
 }
+
+/// A trace that produced a slow story must leave both baseline queries, so the endpoint trace
+/// count and every op's presence count shrink together. Error-kind stories do not exclude.
+#[tokio::test]
+#[ignore = "requires ClickHouse: make it"]
+async fn slow_story_traces_are_excluded_from_baselines() {
+    let s = settings();
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3]);
+    let store = Store::new(&s);
+
+    let summaries: Vec<TraceSummaryRow> = (0..60).map(|i| summary_row(i, i % 2 == 0)).collect();
+    store
+        .insert_rows("trace_summaries", &summaries)
+        .await
+        .unwrap();
+    // t2 carries the cart op and produced a slow story; t3 produced only an error story.
+    let slow = StoryRow {
+        kind: 2,
+        ..story_row("t2")
+    };
+    let error_only = story_row("t3");
+    store
+        .insert_rows("error_stories", &[slow, error_only])
+        .await
+        .unwrap();
+
+    let eps = store.endpoint_stats(60).await.unwrap();
+    assert_eq!(eps.len(), 1);
+    assert_eq!(eps[0].traces, 59, "slow-story trace excluded");
+    let ops = store.op_stats(60).await.unwrap();
+    let root = ops.iter().find(|o| o.op == "frontend:GET").unwrap();
+    assert_eq!(root.present, 59, "presence denominator matches traces");
+    let cart = ops.iter().find(|o| o.op == "cart:GetCart").unwrap();
+    assert_eq!(
+        cart.present, 29,
+        "slow-story trace excluded from op presence"
+    );
+    store
+        .client()
+        .query(&format!("DROP DATABASE `{}`", s.database))
+        .execute()
+        .await
+        .unwrap();
+}

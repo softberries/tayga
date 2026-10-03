@@ -1,0 +1,367 @@
+{
+  "uid": "tayga-pipeline",
+  "title": "Tayga \u00b7 Pipeline health",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": true,
+  "tags": [
+    "tayga"
+  ],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "timezone": "browser",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Ingest records/s",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tayga-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "sum by (kind) (rate(tayga_ingest_records_published_total[1m]))",
+          "legendFormat": "{{kind}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 2,
+      "title": "Writer rows/s",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tayga-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "sum by (kind) (rate(tayga_writer_rows_inserted_total[1m]))",
+          "legendFormat": "{{kind}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 3,
+      "title": "Assembler throughput",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tayga-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "rate(tayga_assembler_closed_traces_total[1m])",
+          "legendFormat": "closed traces/s",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "sum by (kind) (rate(tayga_assembler_stories_total[1m]))",
+          "legendFormat": "stories {{kind}}/s",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 4,
+      "title": "Window state",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tayga-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "tayga_assembler_open_traces",
+          "legendFormat": "open traces",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "tayga_assembler_buffered_bytes",
+          "legendFormat": "buffered bytes",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 5,
+      "title": "Consumer lag per group",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tayga-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "sum(redpanda_kafka_max_offset{redpanda_topic=\"tayga.signals\"}) - on() group_right sum by (redpanda_group) (redpanda_kafka_consumer_group_committed_offset{redpanda_topic=\"tayga.signals\"})",
+          "legendFormat": "{{redpanda_group}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 6,
+      "title": "Error counters (5m)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tayga-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "increase(tayga_ingest_publish_failures_total[5m])",
+          "legendFormat": "ingest publish failures",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "increase(tayga_writer_insert_failures_total[5m])",
+          "legendFormat": "writer insert failures",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "increase(tayga_assembler_write_failures_total[5m])",
+          "legendFormat": "assembler write failures",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "increase(tayga_assembler_analysis_panics_total[5m])",
+          "legendFormat": "analysis panics",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "increase(tayga_api_repo_errors_total[5m])",
+          "legendFormat": "api repo errors",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 7,
+      "title": "Writer batch latency",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tayga-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(tayga_writer_batch_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(tayga_writer_batch_seconds_bucket[5m])))",
+          "legendFormat": "p99",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 8,
+      "title": "Late spans/logs per second",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tayga-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "rate(tayga_assembler_late_items_total[5m])",
+          "legendFormat": "late items/s",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  }
+}

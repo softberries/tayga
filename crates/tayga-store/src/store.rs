@@ -2,6 +2,10 @@ use crate::migrate::ClickHouseSettings;
 use crate::rows::{EndpointStatsRow, LogRow, OpStatsRow, SpanRow};
 use clickhouse::{Client, RowOwned, RowWrite};
 
+/// Slow stories are looked up over the baseline window plus this slack, so a trace near the
+/// window edge whose story landed slightly earlier is still excluded.
+const SLOW_STORY_LOOKBACK_SLACK_MIN: u32 = 10;
+
 #[derive(Clone)]
 pub struct Store {
     client: Client,
@@ -42,7 +46,8 @@ impl Store {
         self.insert_rows("logs", rows).await
     }
 
-    /// Root-duration quantiles per endpoint over non-error traces in the window.
+    /// Root-duration quantiles per endpoint over non-error traces in the window that did not
+    /// produce a slow story (so a sustained slowdown does not raise its own baseline).
     pub async fn endpoint_stats(
         &self,
         window_minutes: u32,
@@ -53,14 +58,18 @@ impl Store {
                  quantile(0.5)(duration_ns) AS p50, quantile(0.95)(duration_ns) AS p95, \
                  quantile(0.99)(duration_ns) AS p99 \
                  FROM trace_summaries FINAL WHERE ts > now() - INTERVAL ? MINUTE AND is_error = 0 \
+                 AND trace_id NOT IN (SELECT trace_id FROM error_stories \
+                 WHERE kind = 'slow' AND ts > now() - INTERVAL ? MINUTE) \
                  GROUP BY endpoint_service, endpoint_name",
             )
             .bind(window_minutes)
+            .bind(window_minutes.saturating_add(SLOW_STORY_LOOKBACK_SLACK_MIN))
             .fetch_all()
             .await
     }
 
-    /// Per endpoint and op: traces containing the op and its p95 duration.
+    /// Per endpoint and op: traces containing the op and its p95 duration. Uses the same trace
+    /// set as `endpoint_stats`, so presence ratios stay within 0..=1.
     pub async fn op_stats(
         &self,
         window_minutes: u32,
@@ -70,9 +79,12 @@ impl Store {
                 "SELECT endpoint_service, endpoint_name, op, count() AS present, quantile(0.95)(d) AS p95 \
                  FROM trace_summaries FINAL ARRAY JOIN mapKeys(op_durations) AS op, mapValues(op_durations) AS d \
                  WHERE ts > now() - INTERVAL ? MINUTE AND is_error = 0 \
+                 AND trace_id NOT IN (SELECT trace_id FROM error_stories \
+                 WHERE kind = 'slow' AND ts > now() - INTERVAL ? MINUTE) \
                  GROUP BY endpoint_service, endpoint_name, op",
             )
             .bind(window_minutes)
+            .bind(window_minutes.saturating_add(SLOW_STORY_LOOKBACK_SLACK_MIN))
             .fetch_all()
             .await
     }

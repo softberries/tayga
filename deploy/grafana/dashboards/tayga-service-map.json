@@ -1,0 +1,101 @@
+{
+  "uid": "tayga-service-map",
+  "title": "Tayga \u00b7 Service map",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": true,
+  "tags": [
+    "tayga"
+  ],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "timezone": "browser",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Service map",
+      "type": "nodeGraph",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "tayga-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "nodes",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "tayga-clickhouse"
+          },
+          "editorType": "sql",
+          "rawSql": "SELECT service AS id, service AS title, sum(calls) AS mainstat FROM (SELECT parent_service AS service, calls FROM tayga.service_edges WHERE $__timeFilter(minute) UNION ALL SELECT child_service AS service, calls FROM tayga.service_edges WHERE $__timeFilter(minute)) GROUP BY service",
+          "queryType": "table",
+          "format": 1
+        },
+        {
+          "refId": "edges",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "tayga-clickhouse"
+          },
+          "editorType": "sql",
+          "rawSql": "SELECT concat(parent_service, '->', child_service) AS id, parent_service AS source, child_service AS target, sum(calls) AS mainstat, sum(errors) AS secondarystat FROM tayga.service_edges WHERE $__timeFilter(minute) GROUP BY parent_service, child_service",
+          "queryType": "table",
+          "format": 1
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 14
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 2,
+      "title": "Edges",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "tayga-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "tayga-clickhouse"
+          },
+          "editorType": "sql",
+          "rawSql": "SELECT concat(parent_service, '->', child_service) AS id, parent_service AS source, child_service AS target, sum(calls) AS total_calls, sum(errors) AS total_errors, round(sum(errors) / sum(calls) * 100, 2) AS error_pct, round(sum(duration_ns_sum) / sum(calls) / 1e6, 1) AS avg_ms FROM tayga.service_edges WHERE $__timeFilter(minute) GROUP BY parent_service, child_service ORDER BY total_calls DESC",
+          "queryType": "table",
+          "format": 1
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  }
+}

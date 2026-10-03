@@ -1,5 +1,6 @@
 //! OTLP/HTTP: protobuf or JSON bodies, optionally gzip-compressed.
 
+use crate::metrics::IngestMetrics;
 use crate::records::{Converted, log_records, now_unix_nano, trace_records};
 use crate::sink::Sink;
 use axum::Router;
@@ -8,6 +9,7 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use prometheus_client::registry::Registry;
 use std::io::Read;
 use std::sync::Arc;
 use tayga_model::otlp::collector::logs::v1::ExportLogsServiceResponse;
@@ -15,20 +17,28 @@ use tayga_model::otlp::collector::trace::v1::ExportTraceServiceResponse;
 
 const MAX_BODY: usize = 64 << 20;
 
-pub fn router<S: Sink>(sink: Arc<S>, max_record_bytes: usize) -> Router {
-    Router::new()
+pub fn router<S: Sink>(
+    sink: Arc<S>,
+    max_record_bytes: usize,
+    metrics: IngestMetrics,
+    registry: Arc<Registry>,
+) -> Router {
+    let ingest = Router::new()
         .route("/v1/traces", post(traces::<S>))
         .route("/v1/logs", post(logs::<S>))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(Ingest {
             sink,
             max_record_bytes,
-        })
+            metrics,
+        });
+    ingest.merge(tayga_common::metrics::router(registry))
 }
 
 struct Ingest<S> {
     sink: Arc<S>,
     max_record_bytes: usize,
+    metrics: IngestMetrics,
 }
 
 impl<S> Clone for Ingest<S> {
@@ -36,6 +46,7 @@ impl<S> Clone for Ingest<S> {
         Self {
             sink: self.sink.clone(),
             max_record_bytes: self.max_record_bytes,
+            metrics: self.metrics.clone(),
         }
     }
 }
@@ -111,6 +122,7 @@ async fn traces<S: Sink>(
         &ingest,
         &headers,
         body,
+        "traces",
         trace_records,
         ExportTraceServiceResponse::default(),
     )
@@ -126,6 +138,7 @@ async fn logs<S: Sink>(
         &ingest,
         &headers,
         body,
+        "logs",
         log_records,
         ExportLogsServiceResponse::default(),
     )
@@ -137,6 +150,7 @@ async fn handle<S, Req, Resp>(
     ingest: &Ingest<S>,
     headers: &HeaderMap,
     body: Bytes,
+    kind: &'static str,
     to_records: fn(Req, u64, usize) -> Converted,
     response: Resp,
 ) -> Response
@@ -149,17 +163,22 @@ where
     let req: Req = match body_bytes(headers, body).and_then(|b| decode(fmt, &b)) {
         Ok(r) => r,
         Err(e) => {
+            ingest.metrics.rejected_requests.inc();
             tracing::warn!(error = %e, "otlp/http rejected undecodable body");
             return (StatusCode::BAD_REQUEST, e).into_response();
         }
     };
-    let records = to_records(req, now_unix_nano(), ingest.max_record_bytes).records;
+    let converted = to_records(req, now_unix_nano(), ingest.max_record_bytes);
+    ingest.metrics.record_conversion(&converted);
+    let records = converted.records;
     let count = records.len();
-    if count > 0
-        && let Err(e) = ingest.sink.publish(records).await
-    {
-        tracing::warn!(records = count, error = %e, "otlp/http export failed: kafka publish");
-        return (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response();
+    if count > 0 {
+        if let Err(e) = ingest.sink.publish(records).await {
+            ingest.metrics.publish_failures.inc();
+            tracing::warn!(records = count, error = %e, "otlp/http export failed: kafka publish");
+            return (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response();
+        }
+        ingest.metrics.record_published(kind, count);
     }
     encode(fmt, &response)
 }
@@ -186,11 +205,16 @@ mod tests {
         if gzip {
             req = req.header(header::CONTENT_ENCODING, "gzip");
         }
-        router(sink, TEST_MAX_RECORD_BYTES)
-            .oneshot(req.body(Body::from(body)).unwrap())
-            .await
-            .unwrap()
-            .status()
+        router(
+            sink,
+            TEST_MAX_RECORD_BYTES,
+            IngestMetrics::default(),
+            Arc::new(Registry::default()),
+        )
+        .oneshot(req.body(Body::from(body)).unwrap())
+        .await
+        .unwrap()
+        .status()
     }
 
     #[tokio::test]
@@ -287,6 +311,58 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_counts_published_and_rejected() {
+        use tayga_common::metrics::KindLabel;
+        let mut registry = Registry::default();
+        let metrics = IngestMetrics::register(&mut registry);
+        let app = router(
+            Arc::new(FakeSink::default()),
+            TEST_MAX_RECORD_BYTES,
+            metrics.clone(),
+            Arc::new(registry),
+        );
+        let post = |body: Vec<u8>| {
+            Request::post("/v1/traces")
+                .header(header::CONTENT_TYPE, "application/x-protobuf")
+                .body(Body::from(body))
+                .unwrap()
+        };
+        let ok = app
+            .clone()
+            .oneshot(post(prost::Message::encode_to_vec(&two_trace_request())))
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let bad = app
+            .clone()
+            .oneshot(post(vec![0xff, 0xff, 0xff]))
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+        let published = metrics
+            .records_published
+            .get_or_create(&KindLabel::new("traces"))
+            .get();
+        assert_eq!(published, 2);
+        assert_eq!(metrics.rejected_requests.get(), 1);
+
+        let resp = app
+            .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let text = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(text.to_vec()).unwrap();
+        assert!(
+            text.contains("tayga_ingest_records_published_total"),
+            "{text}"
+        );
     }
 
     #[tokio::test]

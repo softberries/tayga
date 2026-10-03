@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Story groups · Tayga{% endblock %}
+{% block content %}
+<form class="filters" method="get" action="/">
+  <label>Since <input name="since" value="{{ since }}" size="4"></label>
+  <label>Kind <select name="kind">
+    <option value="" {% if kind.is_empty() %}selected{% endif %}>all</option>
+    <option value="error" {% if kind == "error" %}selected{% endif %}>error</option>
+    <option value="slow" {% if kind == "slow" %}selected{% endif %}>slow</option>
+  </select></label>
+  <label>Root-cause service <input name="service" value="{{ service }}" size="16"></label>
+  <button type="submit">Apply</button>
+</form>
+{% if rows.is_empty() %}
+<div class="empty">No stories in this window.</div>
+{% else %}
+<table>
+<tr><th>Kind</th><th>Story</th><th>Root cause</th><th>Endpoint</th><th>Count</th><th>Trend</th><th>Last seen</th></tr>
+{% for r in rows %}
+<tr>
+  <td><span class="badge {{ r.kind }}">{{ r.kind }}</span></td>
+  <td><a href="/groups/{{ r.fingerprint }}?since={{ since }}">{{ r.summary }}</a></td>
+  <td>{{ r.rc_service }}</td>
+  <td class="mono">{{ r.endpoint }}</td>
+  <td>{{ r.stories }}</td>
+  <td>{{ r.spark|safe }}</td>
+  <td class="muted">{{ r.last_seen }}</td>
+</tr>
+{% endfor %}
+</table>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,131 @@
+{
+  "uid": "tayga-stories",
+  "title": "Tayga \u00b7 Stories",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": true,
+  "tags": [
+    "tayga"
+  ],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "timezone": "browser",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Stories per minute by kind",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "tayga-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "tayga-clickhouse"
+          },
+          "editorType": "sql",
+          "rawSql": "SELECT toStartOfMinute(ts) AS time, toString(kind) AS kind, count() AS stories FROM tayga.error_stories FINAL WHERE $__timeFilter(ts) GROUP BY time, kind ORDER BY time",
+          "queryType": "timeseries",
+          "format": 0
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 2,
+      "title": "Top story groups",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "tayga-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "tayga-clickhouse"
+          },
+          "editorType": "sql",
+          "rawSql": "SELECT toString(fingerprint) AS fingerprint, toString(any(kind)) AS kind, argMax(summary, ts) AS summary, any(rc_service) AS root_cause_service, count() AS stories, max(ts) AS last_seen FROM tayga.error_stories FINAL WHERE $__timeFilter(ts) GROUP BY fingerprint ORDER BY stories DESC LIMIT 20",
+          "queryType": "table",
+          "format": 1
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "links": [
+            {
+              "title": "Open group",
+              "url": "http://localhost:8090/groups/${__data.fields.fingerprint}?since=7d",
+              "targetBlank": true
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 3,
+      "title": "Root-cause services",
+      "type": "barchart",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "tayga-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "tayga-clickhouse"
+          },
+          "editorType": "sql",
+          "rawSql": "SELECT rc_service, count() AS stories FROM tayga.error_stories FINAL WHERE $__timeFilter(ts) GROUP BY rc_service ORDER BY stories DESC LIMIT 15",
+          "queryType": "table",
+          "format": 1
+        }
+      ],
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  }
+}
