@@ -1,7 +1,9 @@
 //! Server-rendered pages (spec §10). No JavaScript.
 
 use crate::model::{GroupView, StoryView, TraceLogRow};
-use crate::params::{bucket_secs, group_filter, parse_fingerprint, parse_hex_id, parse_since};
+use crate::params::{
+    bucket_secs, group_filter, parse_fingerprint, parse_hex_id, parse_since, since_or,
+};
 use crate::repo::Repo;
 use crate::routes::{ApiMetrics, AppState, GroupsQuery, SinceQuery};
 use crate::svg::{WaterfallRow, sparkline, waterfall};
@@ -173,7 +175,7 @@ async fn groups_page<R: Repo>(
     let window = SparkWindow::new(f.since_secs);
     match s.app.repo.story_groups(&f).await {
         Ok(groups) => GroupsPage {
-            since: q.since.as_deref().map_or("1h", str::trim).to_string(),
+            since: since_or(q.since.as_deref(), "1h").to_string(),
             kind: f.kind.clone().unwrap_or_default(),
             service: f.service.clone().unwrap_or_default(),
             rows: groups.iter().map(|g| row_view(g, window)).collect(),
@@ -217,7 +219,7 @@ async fn group_page<R: Repo>(
     };
     let (Ok(fp), Ok(since)) = (
         parse_fingerprint(&fingerprint),
-        parse_since(q.since.as_deref().unwrap_or("24h")),
+        parse_since(since_or(q.since.as_deref(), "24h")),
     ) else {
         return error_page(StatusCode::BAD_REQUEST, "invalid fingerprint or since");
     };
@@ -392,7 +394,7 @@ async fn map_page<R: Repo>(
         Ok(q) => q,
         Err(r) => return error_page(StatusCode::BAD_REQUEST, r.body_text()),
     };
-    let since_raw = q.since.as_deref().map_or("1h", str::trim).to_string();
+    let since_raw = since_or(q.since.as_deref(), "1h").to_string();
     let Ok(since) = parse_since(&since_raw) else {
         return error_page(StatusCode::BAD_REQUEST, "invalid since");
     };
@@ -513,6 +515,19 @@ mod tests {
                 && body.contains("<svg")
                 && body.contains("/groups/42?since=15m")
         );
+    }
+
+    #[tokio::test]
+    async fn empty_since_renders_the_default_window() {
+        let (status, body) = html(FakeRepo::default(), "/?since=&kind=&service=").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("name=\"since\" value=\"1h\""), "{body}");
+        let (status, body) = html(FakeRepo::default(), "/service-map?since=").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("in the last 1h"));
+        // No such group in the fake: 404 proves `since=` was accepted rather than a 400.
+        let (status, _) = html(FakeRepo::default(), "/groups/42?since=").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

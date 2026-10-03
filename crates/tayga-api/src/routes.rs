@@ -1,6 +1,6 @@
 //! JSON API (spec §10).
 
-use crate::params::{group_filter, parse_fingerprint, parse_hex_id, parse_since};
+use crate::params::{group_filter, parse_fingerprint, parse_hex_id, parse_since, since_or};
 use crate::repo::Repo;
 use axum::Json;
 use axum::Router;
@@ -118,7 +118,7 @@ async fn group<R: Repo>(
 ) -> Result<Response, ApiError> {
     let Query(q) = q.map_err(|r| ApiError::BadRequest(r.body_text()))?;
     let fp = parse_fingerprint(&fingerprint).map_err(ApiError::BadRequest)?;
-    let since = parse_since(q.since.as_deref().unwrap_or("24h")).map_err(ApiError::BadRequest)?;
+    let since = parse_since(since_or(q.since.as_deref(), "24h")).map_err(ApiError::BadRequest)?;
     match s
         .repo
         .story_group(&fp, since)
@@ -158,7 +158,7 @@ async fn service_map<R: Repo>(
     q: Result<Query<SinceQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let Query(q) = q.map_err(|r| ApiError::BadRequest(r.body_text()))?;
-    let since = parse_since(q.since.as_deref().unwrap_or("1h")).map_err(ApiError::BadRequest)?;
+    let since = parse_since(since_or(q.since.as_deref(), "1h")).map_err(ApiError::BadRequest)?;
     let edges = s
         .repo
         .service_map(since)
@@ -267,6 +267,39 @@ mod tests {
         assert_eq!(
             get(FakeRepo::default(), &long).await.0,
             StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_since_uses_the_default() {
+        let repo = Arc::new(FakeRepo::default());
+        let (status, _) = get_with(
+            repo.clone(),
+            ApiMetrics::default(),
+            "/api/v1/story-groups?since=&kind=&service=",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            repo.last_filter
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|f| f.since_secs),
+            Some(3600)
+        );
+        // No such group in the fake: 404 proves `since=` was accepted rather than a 400.
+        assert_eq!(
+            get(FakeRepo::default(), "/api/v1/story-groups/42?since=")
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            get(FakeRepo::default(), "/api/v1/service-map?since=%20")
+                .await
+                .0,
+            StatusCode::OK
         );
     }
 

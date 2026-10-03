@@ -18,6 +18,14 @@ pub fn bucket_secs(since_secs: u32) -> u32 {
     since_secs.div_ceil(SPARK_BUCKETS).div_ceil(60).max(1) * 60
 }
 
+/// The trimmed `since` value, or `default` when it is absent, empty or whitespace (a cleared
+/// form field submits `since=`).
+pub fn since_or<'a>(raw: Option<&'a str>, default: &'a str) -> &'a str {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default)
+}
+
 /// `<n>[smhd]`, between 1 second and 7 days.
 pub fn parse_since(raw: &str) -> Result<u32, String> {
     let raw = raw.trim();
@@ -65,7 +73,7 @@ pub fn group_filter(
     kind: Option<&str>,
     service: Option<&str>,
 ) -> Result<GroupFilter, String> {
-    let since_secs = parse_since(since.unwrap_or("1h"))?;
+    let since_secs = parse_since(since_or(since, "1h"))?;
     let kind = kind.filter(|k| !k.is_empty()).map(str::to_string);
     if let Some(k) = &kind
         && k != "error"
@@ -142,6 +150,13 @@ mod tests {
             }
         );
         assert!(group_filter(Some("1h"), Some("bogus"), None).is_err());
+        assert_eq!(group_filter(Some(""), None, None).unwrap().since_secs, 3600);
+        assert_eq!(
+            group_filter(Some("  "), None, None).unwrap().since_secs,
+            3600
+        );
+        assert_eq!(since_or(Some(" 7d "), "1h"), "7d");
+        assert_eq!(since_or(None, "24h"), "24h");
         assert_eq!(
             group_filter(Some("5m"), Some("slow"), Some("payment"))
                 .unwrap()
