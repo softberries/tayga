@@ -275,10 +275,7 @@ mod tests {
         for row in &rows {
             let left: f64 = row.left.parse().expect("left should parse as f64");
             let width: f64 = row.width.parse().expect("width should parse as f64");
-            assert!(
-                (0.0..=100.0).contains(&left),
-                "left {left} out of bounds"
-            );
+            assert!((0.0..=100.0).contains(&left), "left {left} out of bounds");
             assert!(
                 (0.0..=100.0).contains(&width),
                 "width {width} out of bounds"
