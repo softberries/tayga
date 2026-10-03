@@ -122,8 +122,7 @@ fn window_minutes(since_secs: u32) -> (u32, u32) {
     (to.saturating_sub(since_secs) / 60 * 60, to)
 }
 
-fn row_view(g: &GroupView, since_secs: u32) -> GroupRowView {
-    let (from, to) = window_minutes(since_secs);
+fn row_view(g: &GroupView, (from, to): (u32, u32)) -> GroupRowView {
     GroupRowView {
         kind: g.group.kind.clone(),
         fingerprint: g.group.fingerprint.clone(),
@@ -148,12 +147,13 @@ async fn groups_page<R: Repo>(
         Ok(f) => f,
         Err(e) => return error_page(StatusCode::BAD_REQUEST, e),
     };
+    let window = window_minutes(f.since_secs);
     match s.app.repo.story_groups(&f).await {
         Ok(groups) => GroupsPage {
-            since: q.since.unwrap_or_else(|| "1h".into()),
+            since: q.since.as_deref().map_or("1h", str::trim).to_string(),
             kind: f.kind.clone().unwrap_or_default(),
             service: f.service.clone().unwrap_or_default(),
-            rows: groups.iter().map(|g| row_view(g, f.since_secs)).collect(),
+            rows: groups.iter().map(|g| row_view(g, window)).collect(),
         }
         .into_response(),
         Err(e) => {
@@ -200,8 +200,8 @@ async fn group_page<R: Repo>(
     };
     match s.app.repo.story_group(&fp, since).await {
         Ok(Some(d)) => {
-            let row = row_view(&d.group, since);
             let (from, to) = window_minutes(since);
+            let row = row_view(&d.group, (from, to));
             GroupPage {
                 kind: row.kind,
                 summary: row.summary,
@@ -369,7 +369,7 @@ async fn map_page<R: Repo>(
         Ok(q) => q,
         Err(r) => return error_page(StatusCode::BAD_REQUEST, r.body_text()),
     };
-    let since_raw = q.since.unwrap_or_else(|| "1h".into());
+    let since_raw = q.since.as_deref().map_or("1h", str::trim).to_string();
     let Ok(since) = parse_since(&since_raw) else {
         return error_page(StatusCode::BAD_REQUEST, "invalid since");
     };
@@ -575,5 +575,67 @@ mod tests {
                 && body.contains("10.0%")
                 && body.contains("http://localhost:3001/d/tayga-service-map")
         );
+    }
+
+    #[tokio::test]
+    async fn storage_failure_renders_503_and_counts() {
+        let metrics = ApiMetrics::default();
+        let repo = FakeRepo {
+            fail: true,
+            ..Default::default()
+        };
+        let app = ui_router(Arc::new(repo), metrics.clone(), links());
+        let res = app
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(metrics.repo_errors.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn group_page_renders_examples_and_404s() {
+        let id = "cd".repeat(16);
+        let detail = GroupDetail {
+            group: GroupView {
+                group: StoryGroupRow {
+                    fingerprint: "42".into(),
+                    kind: "error".into(),
+                    summary: "payment charge failed".into(),
+                    rc_service: "payment".into(),
+                    rc_span_name: "charge".into(),
+                    endpoint_service: "load-generator".into(),
+                    endpoint_name: "checkout".into(),
+                    stories: 1,
+                    first_seen_ns: 0,
+                    last_seen_ns: 0,
+                    sample_story_id: id.clone(),
+                },
+                per_minute: vec![],
+            },
+            examples: vec![StorySummaryRow {
+                story_id: id.clone(),
+                ts_ns: 0,
+                trace_id: "ab".repeat(16),
+                duration_ns: 1_000_000,
+                summary: "payment charge failed".into(),
+            }],
+        };
+        let repo = FakeRepo {
+            detail: Some(detail),
+            ..Default::default()
+        };
+        let (status, body) = html(repo, "/groups/42").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(&format!("/stories/{id}")));
+        let (status, _) = html(FakeRepo::default(), "/groups/42").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn filter_values_are_attribute_escaped() {
+        let (status, body) = html(FakeRepo::default(), "/?service=%22%3E%3Cscript%3E").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("\"><script>"));
     }
 }
