@@ -4,6 +4,7 @@ use crate::params::{group_filter, parse_fingerprint, parse_hex_id, parse_since};
 use crate::repo::Repo;
 use axum::Json;
 use axum::Router;
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -41,9 +42,9 @@ impl IntoResponse for ApiError {
         let (status, message) = match self {
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
-            ApiError::Unavailable(e) => (
+            ApiError::Unavailable(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                format!("storage unavailable: {e}"),
+                "storage unavailable".to_string(),
             ),
         };
         (status, Json(serde_json::json!({ "error": message }))).into_response()
@@ -97,8 +98,9 @@ pub fn api_router<R: Repo>(repo: Arc<R>, metrics: ApiMetrics) -> Router {
 
 async fn groups<R: Repo>(
     State(s): State<AppState<R>>,
-    Query(q): Query<GroupsQuery>,
+    q: Result<Query<GroupsQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
+    let Query(q) = q.map_err(|r| ApiError::BadRequest(r.body_text()))?;
     let f = group_filter(q.since.as_deref(), q.kind.as_deref(), q.service.as_deref())
         .map_err(ApiError::BadRequest)?;
     let groups = s
@@ -112,8 +114,9 @@ async fn groups<R: Repo>(
 async fn group<R: Repo>(
     State(s): State<AppState<R>>,
     Path(fingerprint): Path<String>,
-    Query(q): Query<SinceQuery>,
+    q: Result<Query<SinceQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
+    let Query(q) = q.map_err(|r| ApiError::BadRequest(r.body_text()))?;
     let fp = parse_fingerprint(&fingerprint).map_err(ApiError::BadRequest)?;
     let since = parse_since(q.since.as_deref().unwrap_or("24h")).map_err(ApiError::BadRequest)?;
     match s
@@ -152,8 +155,9 @@ async fn trace<R: Repo>(
 
 async fn service_map<R: Repo>(
     State(s): State<AppState<R>>,
-    Query(q): Query<SinceQuery>,
+    q: Result<Query<SinceQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
+    let Query(q) = q.map_err(|r| ApiError::BadRequest(r.body_text()))?;
     let since = parse_since(q.since.as_deref().unwrap_or("1h")).map_err(ApiError::BadRequest)?;
     let edges = s
         .repo
@@ -193,7 +197,15 @@ mod tests {
     }
 
     async fn get(repo: FakeRepo, uri: &str) -> (StatusCode, serde_json::Value) {
-        let app = api_router(Arc::new(repo), ApiMetrics::default());
+        get_with(Arc::new(repo), ApiMetrics::default(), uri).await
+    }
+
+    async fn get_with(
+        repo: Arc<FakeRepo>,
+        metrics: ApiMetrics,
+        uri: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let app = api_router(repo, metrics);
         let res = app
             .oneshot(Request::get(uri).body(Body::empty()).unwrap())
             .await
@@ -214,8 +226,10 @@ mod tests {
             groups: vec![group_view()],
             ..Default::default()
         };
-        let (status, json) = get(
-            repo,
+        let repo = Arc::new(repo);
+        let (status, json) = get_with(
+            repo.clone(),
+            ApiMetrics::default(),
             "/api/v1/story-groups?since=15m&kind=error&service=payment",
         )
         .await;
@@ -223,6 +237,14 @@ mod tests {
         assert_eq!(json[0]["fingerprint"], "17393964261140422938");
         assert_eq!(json[0]["per_minute"][0][1], 4);
         assert_eq!(json[0]["rc_service"], "payment");
+        assert_eq!(
+            repo.last_filter.lock().unwrap().clone(),
+            Some(crate::params::GroupFilter {
+                since_secs: 900,
+                kind: Some("error".into()),
+                service: Some("payment".into()),
+            })
+        );
     }
 
     #[tokio::test]
@@ -266,16 +288,23 @@ mod tests {
 
     #[tokio::test]
     async fn repo_failure_is_503() {
-        let (status, json) = get(
-            FakeRepo {
-                fail: true,
-                ..Default::default()
-            },
-            "/api/v1/service-map",
-        )
-        .await;
+        let metrics = ApiMetrics::default();
+        let repo = FakeRepo {
+            fail: true,
+            ..Default::default()
+        };
+        let (status, json) = get_with(Arc::new(repo), metrics.clone(), "/api/v1/service-map").await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert!(json["error"].as_str().unwrap().contains("clickhouse down"));
+        assert_eq!(json["error"], "storage unavailable");
+        assert_eq!(metrics.repo_errors.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn malformed_query_is_json_400() {
+        let (status, json) =
+            get(FakeRepo::default(), "/api/v1/service-map?since=1h&since=2h").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().is_some());
     }
 
     #[tokio::test]
