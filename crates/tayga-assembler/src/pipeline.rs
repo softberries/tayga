@@ -160,6 +160,10 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&out.story_messages[0].1).unwrap();
         assert_eq!(json["root_cause"]["span"]["service"], "cart");
         assert_eq!(json["kind"], "error");
+        assert_eq!(
+            json["fingerprint"],
+            serde_json::Value::String(out.stories[0].fingerprint.to_string())
+        );
         assert_eq!(out.edges.len(), 1);
         let e = &out.edges[0];
         assert_eq!(

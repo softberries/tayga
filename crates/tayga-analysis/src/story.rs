@@ -75,10 +75,16 @@ pub struct StoryLog {
     pub body: String,
 }
 
+fn as_decimal_string<S: serde::Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&v.to_string())
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Story {
     /// The trace id: one story per trace, so replays overwrite instead of duplicating.
     pub story_id: String,
+    /// Serialized as a decimal string: JSON consumers (JavaScript) lose precision above 2^53.
+    #[serde(serialize_with = "as_decimal_string")]
     pub fingerprint: u64,
     pub kind: StoryKind,
     pub ts_ns: u64,
