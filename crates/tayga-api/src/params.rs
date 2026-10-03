@@ -12,7 +12,12 @@ pub struct GroupFilter {
 /// `<n>[smhd]`, between 1 second and 7 days.
 pub fn parse_since(raw: &str) -> Result<u32, String> {
     let raw = raw.trim();
-    let (digits, unit) = raw.split_at(raw.len().saturating_sub(1));
+    let last_char_pos = raw
+        .char_indices()
+        .next_back()
+        .map(|(i, _)| i)
+        .ok_or_else(|| format!("invalid since {raw:?}: expected e.g. 15m, 1h, 7d"))?;
+    let (digits, unit) = raw.split_at(last_char_pos);
     let n: u64 = digits
         .parse()
         .map_err(|_| format!("invalid since {raw:?}: expected e.g. 15m, 1h, 7d"))?;
@@ -86,6 +91,11 @@ mod tests {
         assert!(parse_since("1w").is_err());
         assert!(parse_since("").is_err());
         assert!(parse_since("h").is_err());
+        // Regression: Unicode inputs must not panic
+        assert!(parse_since("5é").is_err());
+        assert!(parse_since("é").is_err());
+        assert!(parse_since("５m").is_err()); // full-width digit
+        assert!(parse_since("1h\u{0301}").is_err()); // combining accent
     }
 
     #[test]
