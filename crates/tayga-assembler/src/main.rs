@@ -5,7 +5,7 @@ use rdkafka::message::{BorrowedMessage, Headers};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::{ClientContext, Message, Offset, TopicPartitionList};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tayga_analysis::baseline::{Baseline, Thresholds};
@@ -146,7 +146,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             _ = main_stop.wait_for(|s| *s) => break,
             _ = tick.tick() => {
-                windows.revoke(&revoked.take());
+                drop_partitions(&mut windows, &mut pending, &revoked.take());
                 pending.extend(windows.close_due(Instant::now()));
                 let started = Instant::now();
                 let outputs = process(&pending, &baselines, &settings.thresholds);
@@ -157,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
                     break; // shutdown during retries: nothing committed, records are re-read on restart
                 }
                 pending.clear();
-                commit(&consumer, &settings.kafka.topic, &windows.commit_offsets());
+                commit(&consumer, &settings.kafka.topic, &mut windows, &mut pending);
                 ticks += 1;
                 if ticks.is_multiple_of(STATS_EVERY_TICKS) {
                     tracing::info!(
@@ -179,7 +179,7 @@ async fn main() -> anyhow::Result<()> {
             }
             msg = consumer.recv() => match msg {
                 Ok(m) => {
-                    windows.revoke(&revoked.take());
+                    drop_partitions(&mut windows, &mut pending, &revoked.take());
                     pending.extend(ingest(&mut windows, &m));
                 }
                 Err(e) => {
@@ -288,12 +288,50 @@ async fn write_outputs(
     retry_until("story publish", publish, stop).await.is_some()
 }
 
-fn commit(consumer: &StreamConsumer<Ctx>, topic: &str, offsets: &[(i32, i64)]) {
+/// Drops all state of partitions this consumer no longer owns, including closed traces not yet
+/// written: the new owner re-reads them from the last committed offset.
+fn drop_partitions(windows: &mut Windows, pending: &mut Vec<ClosedTrace>, partitions: &[i32]) {
+    if partitions.is_empty() {
+        return;
+    }
+    windows.revoke(partitions);
+    pending.retain(|t| !partitions.contains(&t.partition));
+}
+
+/// Commits the windows' offsets for partitions still assigned; state of partitions that are
+/// held but no longer assigned (a missed revoke) is dropped instead.
+fn commit(
+    consumer: &StreamConsumer<Ctx>,
+    topic: &str,
+    windows: &mut Windows,
+    pending: &mut Vec<ClosedTrace>,
+) {
+    let assigned: HashSet<i32> = match consumer.assignment() {
+        Ok(tpl) => tpl
+            .elements()
+            .iter()
+            .filter(|e| e.topic() == topic)
+            .map(|e| e.partition())
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot read assignment; skipping commit");
+            return;
+        }
+    };
+    let (offsets, stale): (Vec<_>, Vec<_>) = windows
+        .commit_offsets()
+        .into_iter()
+        .partition(|(p, _)| assigned.contains(p));
+    if !stale.is_empty() {
+        let stale: Vec<i32> = stale.into_iter().map(|(p, _)| p).collect();
+        tracing::info!(partitions = ?stale, "dropping state of unassigned partitions");
+        drop_partitions(windows, pending, &stale);
+    }
     if offsets.is_empty() {
         return;
     }
     let mut tpl = TopicPartitionList::new();
-    for &(partition, offset) in offsets {
+    for &(partition, offset) in &offsets {
         if let Err(e) = tpl.add_partition_offset(topic, partition, Offset::Offset(offset)) {
             tracing::warn!(error = %e, partition, "cannot build commit list");
             return;
