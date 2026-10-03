@@ -18,6 +18,8 @@ pub struct Outputs {
     pub story_messages: Vec<(String, String)>,
     /// Traces whose analysis panicked.
     pub failed: usize,
+    /// Stories dropped because their row or JSON could not be serialized.
+    pub serialization_failures: usize,
 }
 
 impl Outputs {
@@ -63,6 +65,7 @@ pub fn process(
                         .push((story.fingerprint.to_string(), json));
                 }
                 (Err(e), _) | (_, Err(e)) => {
+                    out.serialization_failures += 1;
                     tracing::error!(error = %e, trace_id = %story.trace_id, "story serialization failed")
                 }
             }
@@ -177,6 +180,7 @@ mod tests {
         );
         assert_eq!(e.minute as u64, base / 1_000_000_000);
         assert_eq!(out.failed, 0);
+        assert_eq!(out.serialization_failures, 0);
     }
 
     #[test]

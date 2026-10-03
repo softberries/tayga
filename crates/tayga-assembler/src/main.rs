@@ -1,3 +1,4 @@
+use prometheus_client::registry::Registry;
 use rdkafka::consumer::{
     BaseConsumer, CommitMode, Consumer, ConsumerContext, Rebalance, StreamConsumer,
 };
@@ -6,12 +7,15 @@ use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::{ClientContext, Message, Offset, TopicPartitionList};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tayga_analysis::baseline::{Baseline, Thresholds};
 use tayga_analysis::model::Endpoint;
+use tayga_assembler::metrics::AssemblerMetrics;
 use tayga_assembler::pipeline::{Outputs, process};
 use tayga_assembler::window::{ClosedTrace, WindowConfig, Windows};
+use tayga_common::metrics::KindLabel;
 use tayga_common::retry::retry_until;
 use tayga_kafka::KafkaSettings;
 use tayga_model::envelope::{Envelope, HEADER_KEY_KIND};
@@ -47,6 +51,7 @@ struct AssemblerSettings {
     recent_per_partition: usize,
     baseline_window_minutes: u32,
     baseline_refresh_secs: u64,
+    metrics_addr: SocketAddr,
 }
 
 impl Default for AssemblerSettings {
@@ -61,6 +66,7 @@ impl Default for AssemblerSettings {
             recent_per_partition: 100_000,
             baseline_window_minutes: 60,
             baseline_refresh_secs: 60,
+            metrics_addr: SocketAddr::from(([0, 0, 0, 0], 9100)),
         }
     }
 }
@@ -131,8 +137,20 @@ async fn main() -> anyhow::Result<()> {
         max_bytes: a.max_buffer_bytes,
         recent_per_partition: a.recent_per_partition,
     });
-    let mut baselines = load_baselines(&store, a.baseline_window_minutes, HashMap::new()).await;
+    let mut registry = Registry::default();
+    let metrics = AssemblerMetrics::register(&mut registry);
     let mut stop = tayga_common::shutdown_flag();
+    let metrics_addr = a.metrics_addr;
+    let metrics_stop = stop.clone();
+    tokio::spawn(async move {
+        if let Err(e) =
+            tayga_common::metrics::serve(metrics_addr, Arc::new(registry), metrics_stop).await
+        {
+            tracing::warn!(error = %e, "metrics server stopped");
+        }
+    });
+    let mut baselines = load_baselines(&store, a.baseline_window_minutes, HashMap::new()).await;
+    metrics.baseline_endpoints.set(baselines.len() as i64);
     let mut main_stop = stop.clone();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -151,14 +169,26 @@ async fn main() -> anyhow::Result<()> {
                 pending.extend(windows.close_due(Instant::now()));
                 let started = Instant::now();
                 let outputs = process(&pending, &baselines, &settings.thresholds);
-                let written = write_outputs(&store, &producer, &a.stories_topic, &outputs, &mut stop).await;
+                let written = write_outputs(
+                    &store,
+                    &producer,
+                    &a.stories_topic,
+                    &outputs,
+                    &metrics,
+                    &mut stop,
+                )
+                .await;
                 // Records were not read while analysing and writing; that time is not trace inactivity.
                 windows.shift(started.elapsed());
                 if !written {
                     break; // shutdown during retries: nothing committed, records are re-read on restart
                 }
+                record_outputs(&metrics, pending.len(), &outputs);
                 pending.clear();
                 commit(&consumer, &settings.kafka.topic, &mut windows, &mut pending, CommitMode::Async);
+                metrics.open_traces.set(windows.open_traces() as i64);
+                metrics.buffered_bytes.set(windows.buffered_bytes() as i64);
+                metrics.late_items.set(windows.late_items() as i64);
                 ticks += 1;
                 if ticks.is_multiple_of(STATS_EVERY_TICKS) {
                     tracing::info!(
@@ -176,6 +206,7 @@ async fn main() -> anyhow::Result<()> {
             _ = refresh.tick() => {
                 let started = Instant::now();
                 baselines = load_baselines(&store, a.baseline_window_minutes, baselines).await;
+                metrics.baseline_endpoints.set(baselines.len() as i64);
                 windows.shift(started.elapsed());
             }
             msg = consumer.recv() => match msg {
@@ -196,7 +227,7 @@ async fn main() -> anyhow::Result<()> {
     }
     if !pending.is_empty() {
         let outputs = process(&pending, &baselines, &settings.thresholds);
-        let write = write_once(&store, &producer, &a.stories_topic, &outputs);
+        let write = write_once(&store, &producer, &a.stories_topic, &outputs, &metrics);
         match tokio::time::timeout(FINAL_WRITE_TIMEOUT, write).await {
             Ok(Ok(())) => {
                 tracing::info!(traces = pending.len(), "wrote closed traces at shutdown");
@@ -276,6 +307,26 @@ fn ingest(windows: &mut Windows, m: &BorrowedMessage<'_>) -> Vec<ClosedTrace> {
     }
 }
 
+/// Story kind as stored in `error_stories.kind`: 1 = error, 2 = slow.
+fn kind_label(kind: i8) -> &'static str {
+    if kind == 1 { "error" } else { "slow" }
+}
+
+/// Counters for one successfully written tick.
+fn record_outputs(metrics: &AssemblerMetrics, closed: usize, outputs: &Outputs) {
+    metrics.closed_traces.inc_by(closed as u64);
+    for story in &outputs.stories {
+        metrics
+            .stories
+            .get_or_create(&KindLabel::new(kind_label(story.kind)))
+            .inc();
+    }
+    metrics.analysis_panics.inc_by(outputs.failed as u64);
+    metrics
+        .serialization_failures
+        .inc_by(outputs.serialization_failures as u64);
+}
+
 /// Inserts the analysis rows. Edges go last: they are aggregated by a SummingMergeTree, so a
 /// retry after a failed summary/story insert must not have inserted them already.
 async fn insert_outputs(store: &Store, out: &Outputs) -> anyhow::Result<()> {
@@ -308,24 +359,31 @@ async fn write_outputs(
     producer: &FutureProducer,
     topic: &str,
     out: &Outputs,
+    metrics: &AssemblerMetrics,
     stop: &mut watch::Receiver<bool>,
 ) -> bool {
     if out.is_empty() {
         return true;
     }
-    if retry_until("clickhouse insert", || insert_outputs(store, out), stop)
+    let insert = || async {
+        insert_outputs(store, out).await.inspect_err(|_| {
+            metrics.write_failures.inc();
+        })
+    };
+    if retry_until("clickhouse insert", insert, stop)
         .await
         .is_none()
     {
         return false;
     }
-    retry_until(
-        "story publish",
-        || publish_stories(producer, topic, out),
-        stop,
-    )
-    .await
-    .is_some()
+    let publish = || async {
+        publish_stories(producer, topic, out)
+            .await
+            .inspect_err(|_| {
+                metrics.write_failures.inc();
+            })
+    };
+    retry_until("story publish", publish, stop).await.is_some()
 }
 
 /// One write attempt for traces closed but not yet written at shutdown.
@@ -334,10 +392,18 @@ async fn write_once(
     producer: &FutureProducer,
     topic: &str,
     out: &Outputs,
+    metrics: &AssemblerMetrics,
 ) -> anyhow::Result<()> {
-    insert_outputs(store, out).await?;
-    publish_stories(producer, topic, out).await?;
-    Ok(())
+    let result = async {
+        insert_outputs(store, out).await?;
+        publish_stories(producer, topic, out).await?;
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        metrics.write_failures.inc();
+    }
+    result
 }
 
 /// Drops all state of partitions this consumer no longer owns, including closed traces not yet

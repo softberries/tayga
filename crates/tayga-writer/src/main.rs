@@ -1,9 +1,13 @@
 use clap::{Parser, Subcommand};
+use prometheus_client::registry::Registry;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
 use rdkafka::message::{BorrowedMessage, Headers};
 use rdkafka::{Message, Offset, TopicPartitionList};
 use serde::Deserialize;
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tayga_common::metrics::KindLabel;
 use tayga_common::retry::retry_until;
 use tayga_kafka::KafkaSettings;
 use tayga_model::envelope::{Envelope, HEADER_SCHEMA, SCHEMA_VERSION};
@@ -11,6 +15,7 @@ use tayga_store::ClickHouseSettings;
 use tayga_store::flatten::rows_from_envelope;
 use tayga_store::store::Store;
 use tayga_writer::batch::Batch;
+use tayga_writer::metrics::WriterMetrics;
 use tokio::sync::watch;
 
 const GROUP: &str = "tayga-writer";
@@ -43,6 +48,8 @@ struct WriterSettings {
     max_rows: usize,
     #[serde(default = "default_max_age_ms")]
     max_age_ms: u64,
+    #[serde(default = "default_metrics_addr")]
+    metrics_addr: SocketAddr,
 }
 
 impl Default for WriterSettings {
@@ -50,6 +57,7 @@ impl Default for WriterSettings {
         Self {
             max_rows: default_max_rows(),
             max_age_ms: default_max_age_ms(),
+            metrics_addr: default_metrics_addr(),
         }
     }
 }
@@ -60,6 +68,10 @@ fn default_max_rows() -> usize {
 
 fn default_max_age_ms() -> u64 {
     1_000
+}
+
+fn default_metrics_addr() -> SocketAddr {
+    SocketAddr::from(([0, 0, 0, 0], 9100))
 }
 
 #[tokio::main]
@@ -86,6 +98,17 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     let max_age = Duration::from_millis(settings.writer.max_age_ms);
     let mut batch = Batch::default();
     let mut stop_rx = tayga_common::shutdown_flag();
+    let mut registry = Registry::default();
+    let metrics = WriterMetrics::register(&mut registry);
+    let metrics_addr = settings.writer.metrics_addr;
+    let metrics_stop = stop_rx.clone();
+    tokio::spawn(async move {
+        if let Err(e) =
+            tayga_common::metrics::serve(metrics_addr, Arc::new(registry), metrics_stop).await
+        {
+            tracing::warn!(error = %e, "metrics server stopped");
+        }
+    });
     tracing::info!(topic = %settings.kafka.topic, "tayga-writer consuming");
 
     // Set when shutdown interrupted a flush: nothing was committed, rows are re-read on restart.
@@ -106,6 +129,7 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
                         }
                         Some(Err(e)) => {
                             tracing::warn!(partition = msg.partition(), offset = msg.offset(), error = %e, "skipping undecodable envelope");
+                            metrics.undecodable_records.inc();
                             (Vec::new(), Vec::new())
                         }
                         None => (Vec::new(), Vec::new()),
@@ -130,6 +154,7 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
                 &consumer,
                 &settings.kafka.topic,
                 pending,
+                &metrics,
                 Some(&mut stop_rx),
             )
             .await?
@@ -141,7 +166,15 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     }
     if !interrupted && !batch.commit_offsets().is_empty() {
         // Single attempt: on failure exit without committing.
-        flush(&store, &consumer, &settings.kafka.topic, batch, None).await?;
+        flush(
+            &store,
+            &consumer,
+            &settings.kafka.topic,
+            batch,
+            &metrics,
+            None,
+        )
+        .await?;
     }
     tracing::info!("tayga-writer stopped");
     Ok(())
@@ -166,11 +199,19 @@ async fn flush(
     consumer: &StreamConsumer,
     topic: &str,
     batch: Batch,
+    metrics: &WriterMetrics,
     shutdown: Option<&mut watch::Receiver<bool>>,
 ) -> anyhow::Result<bool> {
     let insert = || async {
-        store.insert_spans(&batch.spans).await?;
-        store.insert_logs(&batch.logs).await
+        let result = async {
+            store.insert_spans(&batch.spans).await?;
+            store.insert_logs(&batch.logs).await
+        }
+        .await;
+        if result.is_err() {
+            metrics.insert_failures.inc();
+        }
+        result
     };
     let stored = match shutdown {
         Some(rx) => retry_until("clickhouse insert", insert, rx).await.is_some(),
@@ -196,7 +237,18 @@ async fn flush(
     if let Err(e) = consumer.commit(&tpl, CommitMode::Sync) {
         // Typically a revoked partition after rebalance; its rows are re-read and deduplicated.
         tracing::warn!(error = %e, "offset commit failed");
+        metrics.commit_failures.inc();
+    } else {
+        metrics.batches_committed.inc();
     }
+    metrics
+        .rows_inserted
+        .get_or_create(&KindLabel::new("spans"))
+        .inc_by(batch.spans.len() as u64);
+    metrics
+        .rows_inserted
+        .get_or_create(&KindLabel::new("logs"))
+        .inc_by(batch.logs.len() as u64);
     tracing::debug!(
         spans = batch.spans.len(),
         logs = batch.logs.len(),

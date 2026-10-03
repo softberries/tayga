@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+axum.workspace = true
+prometheus-client.workspace = true
 config.workspace = true
 serde.workspace = true
 tokio.workspace = true

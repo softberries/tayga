@@ -3,6 +3,7 @@
 use serde::de::DeserializeOwned;
 use tracing_subscriber::EnvFilter;
 
+pub mod metrics;
 pub mod retry;
 
 /// A flag that flips to `true` on SIGINT/SIGTERM. Must be called inside a tokio runtime;
