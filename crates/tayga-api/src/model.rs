@@ -18,9 +18,10 @@ pub struct StoryGroupRow {
 }
 
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
-pub struct GroupMinuteRow {
+pub struct GroupBucketRow {
     pub fingerprint: String,
-    pub minute: u32,
+    /// Unix seconds at the bucket start (epoch-aligned to the bucket width).
+    pub bucket: u32,
     pub stories: u64,
 }
 
@@ -28,8 +29,10 @@ pub struct GroupMinuteRow {
 pub struct GroupView {
     #[serde(flatten)]
     pub group: StoryGroupRow,
-    /// (unix minute start in seconds, stories)
-    pub per_minute: Vec<(u32, u64)>,
+    /// Width of each entry in `buckets`, in seconds (see `params::bucket_secs`).
+    pub bucket_secs: u32,
+    /// (bucket start in unix seconds, stories), ascending; empty buckets are omitted.
+    pub buckets: Vec<(u32, u64)>,
 }
 
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]

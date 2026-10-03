@@ -4,38 +4,39 @@
 use crate::model::TraceSpanRow;
 use std::collections::{HashMap, HashSet};
 
-/// One point per minute in `[from_minute, to_minute]` (unix seconds at minute starts), missing minutes = 0.
-/// Capped at 7 days of minute resolution (10081 points).
+/// One point per `step_secs` bucket in `[from, to]` (unix seconds at bucket starts); points are
+/// summed into the bucket they fall in, missing buckets = 0. Capped at 10081 points.
 pub fn sparkline(
     points: &[(u32, u64)],
-    from_minute: u32,
-    to_minute: u32,
+    from: u32,
+    to: u32,
+    step_secs: u32,
     width: u32,
     height: u32,
 ) -> String {
+    let step_secs = step_secs.max(1);
     // Handle reversed or invalid window: treat as single point at zero
-    if from_minute > to_minute {
+    if from > to {
         let y = height.saturating_sub(1);
         return format!(
             "<svg class=\"spark\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\"><polyline fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" points=\"0.0,{y} {}.0,{y}\"/></svg>",
             width,
         );
     }
-    // Cap at 7 days * 24 hours * 60 minutes + 1
-    const MAX_MINUTES: usize = 7 * 24 * 60 + 1;
-    let minutes =
-        (((to_minute.saturating_sub(from_minute)) / 60 + 1).max(2) as usize).min(MAX_MINUTES);
-    let mut series = vec![0u64; minutes];
-    for &(m, count) in points {
-        if m >= from_minute && m <= to_minute {
-            let idx = ((m - from_minute) / 60) as usize;
+    // Allocation guard for degenerate windows/steps: 7 days of minutes + 1.
+    const MAX_POINTS: usize = 7 * 24 * 60 + 1;
+    let n = (((to - from) / step_secs + 1).max(2) as usize).min(MAX_POINTS);
+    let mut series = vec![0u64; n];
+    for &(t, count) in points {
+        if t >= from && t <= to {
+            let idx = ((t - from) / step_secs) as usize;
             if let Some(slot) = series.get_mut(idx) {
                 *slot += count;
             }
         }
     }
     let max = series.iter().copied().max().unwrap_or(0).max(1) as f64;
-    let step = f64::from(width) / (minutes - 1) as f64;
+    let step = f64::from(width) / (n - 1) as f64;
     let height_offset = f64::from(height.saturating_sub(2));
     let coords: Vec<String> = series
         .iter()
@@ -178,7 +179,7 @@ mod tests {
 
     #[test]
     fn sparkline_bins_minutes_and_handles_empty() {
-        let svg = sparkline(&[(60, 2), (180, 4)], 60, 180, 100, 20);
+        let svg = sparkline(&[(60, 2), (180, 4)], 60, 180, 60, 100, 20);
         assert!(svg.starts_with("<svg") && svg.contains("polyline"));
         // Count points by parsing coordinates: each point is "x,y" and they're space-separated
         let points_str = svg
@@ -192,13 +193,13 @@ mod tests {
             points_str.split(' ').count()
         };
         assert_eq!(point_count, 3, "three minutes → three points: {svg}");
-        assert!(sparkline(&[], 0, 0, 100, 20).contains("points=\"0.0,19.0 100.0,19.0\""));
+        assert!(sparkline(&[], 0, 0, 60, 100, 20).contains("points=\"0.0,19.0 100.0,19.0\""));
     }
 
     #[test]
     fn sparkline_caps_huge_windows() {
         // from=0, to=u32::MAX should not allocate unbounded memory
-        let svg = sparkline(&[], 0, u32::MAX, 100, 20);
+        let svg = sparkline(&[], 0, u32::MAX, 60, 100, 20);
         assert!(svg.starts_with("<svg") && svg.contains("polyline"));
         // Count the number of points in the SVG
         let points_str = svg
@@ -219,18 +220,34 @@ mod tests {
     }
 
     #[test]
+    fn sparkline_steps_by_bucket_width() {
+        // 7 days at 5040 s buckets: about 121 points, with per-minute input summed per bucket.
+        let to = 1_791_029_520;
+        let from = to - 120 * 5040;
+        let minutes: Vec<(u32, u64)> = (0..10_080).map(|i| (from + i * 60, 1)).collect();
+        let svg = sparkline(&minutes, from, to, 5040, 120, 22);
+        let points = svg
+            .split("points=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap();
+        assert_eq!(points.split(' ').count(), 121);
+        assert!(svg.len() < 2_000, "{} bytes", svg.len());
+    }
+
+    #[test]
     fn sparkline_tiny_height_does_not_panic() {
         // height 0 and 1 should not cause panics or undefined behavior
-        let svg0 = sparkline(&[(0, 1)], 0, 60, 100, 0);
+        let svg0 = sparkline(&[(0, 1)], 0, 60, 60, 100, 0);
         assert!(svg0.starts_with("<svg"));
-        let svg1 = sparkline(&[(0, 1)], 0, 60, 100, 1);
+        let svg1 = sparkline(&[(0, 1)], 0, 60, 60, 100, 1);
         assert!(svg1.starts_with("<svg"));
     }
 
     #[test]
     fn sparkline_ignores_points_beyond_cap() {
         // Points far in the future (beyond cap) should not cause out-of-bounds panics
-        let svg = sparkline(&[(10_000_000, 1), (60, 5)], 0, u32::MAX, 100, 20);
+        let svg = sparkline(&[(10_000_000, 1), (60, 5)], 0, u32::MAX, 60, 100, 20);
         assert!(svg.starts_with("<svg") && svg.contains("polyline"));
         // Verify point count is still within cap
         let points_str = svg
@@ -252,9 +269,9 @@ mod tests {
     #[test]
     fn sparkline_reversed_window_tiny_height() {
         // Reversed window (from > to) with tiny heights should not panic
-        let svg0 = sparkline(&[], 10, 5, 100, 0);
+        let svg0 = sparkline(&[], 10, 5, 60, 100, 0);
         assert!(svg0.starts_with("<svg"));
-        let svg1 = sparkline(&[], 10, 5, 100, 1);
+        let svg1 = sparkline(&[], 10, 5, 60, 100, 1);
         assert!(svg1.starts_with("<svg"));
     }
 

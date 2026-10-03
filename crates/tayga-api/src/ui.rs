@@ -1,7 +1,7 @@
 //! Server-rendered pages (spec §10). No JavaScript.
 
 use crate::model::{GroupView, StoryView, TraceLogRow};
-use crate::params::{group_filter, parse_fingerprint, parse_hex_id, parse_since};
+use crate::params::{bucket_secs, group_filter, parse_fingerprint, parse_hex_id, parse_since};
 use crate::repo::Repo;
 use crate::routes::{ApiMetrics, AppState, GroupsQuery, SinceQuery};
 use crate::svg::{WaterfallRow, sparkline, waterfall};
@@ -113,16 +113,39 @@ struct GroupsPage {
     rows: Vec<GroupRowView>,
 }
 
-fn window_minutes(since_secs: u32) -> (u32, u32) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as u32)
-        .unwrap_or(0);
-    let to = now / 60 * 60;
-    (to.saturating_sub(since_secs) / 60 * 60, to)
+/// Sparkline window `(from, to, step)`: bucket starts aligned like ClickHouse's
+/// `toStartOfInterval` (epoch multiples of the step), so stored buckets land on points.
+#[derive(Clone, Copy)]
+struct SparkWindow {
+    from: u32,
+    to: u32,
+    step: u32,
 }
 
-fn row_view(g: &GroupView, (from, to): (u32, u32)) -> GroupRowView {
+impl SparkWindow {
+    fn new(since_secs: u32) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as u32)
+            .unwrap_or(0);
+        Self::at(now, since_secs)
+    }
+
+    fn at(now: u32, since_secs: u32) -> Self {
+        let step = bucket_secs(since_secs);
+        Self {
+            from: now.saturating_sub(since_secs) / step * step,
+            to: now / step * step,
+            step,
+        }
+    }
+
+    fn render(self, points: &[(u32, u64)], width: u32, height: u32) -> String {
+        sparkline(points, self.from, self.to, self.step, width, height)
+    }
+}
+
+fn row_view(g: &GroupView, w: SparkWindow) -> GroupRowView {
     GroupRowView {
         kind: g.group.kind.clone(),
         fingerprint: g.group.fingerprint.clone(),
@@ -130,7 +153,7 @@ fn row_view(g: &GroupView, (from, to): (u32, u32)) -> GroupRowView {
         rc_service: g.group.rc_service.clone(),
         endpoint: format!("{} {}", g.group.endpoint_service, g.group.endpoint_name),
         stories: g.group.stories,
-        spark: sparkline(&g.per_minute, from, to, 120, 22),
+        spark: w.render(&g.buckets, 120, 22),
         last_seen: fmt_time(g.group.last_seen_ns),
     }
 }
@@ -147,7 +170,7 @@ async fn groups_page<R: Repo>(
         Ok(f) => f,
         Err(e) => return error_page(StatusCode::BAD_REQUEST, e),
     };
-    let window = window_minutes(f.since_secs);
+    let window = SparkWindow::new(f.since_secs);
     match s.app.repo.story_groups(&f).await {
         Ok(groups) => GroupsPage {
             since: q.since.as_deref().map_or("1h", str::trim).to_string(),
@@ -200,8 +223,8 @@ async fn group_page<R: Repo>(
     };
     match s.app.repo.story_group(&fp, since).await {
         Ok(Some(d)) => {
-            let (from, to) = window_minutes(since);
-            let row = row_view(&d.group, (from, to));
+            let window = SparkWindow::new(since);
+            let row = row_view(&d.group, window);
             GroupPage {
                 kind: row.kind,
                 summary: row.summary,
@@ -209,7 +232,7 @@ async fn group_page<R: Repo>(
                 stories: row.stories,
                 rc_service: row.rc_service,
                 endpoint: row.endpoint,
-                spark: sparkline(&d.group.per_minute, from, to, 600, 60),
+                spark: window.render(&d.group.buckets, 600, 60),
                 examples: d
                     .examples
                     .into_iter()
@@ -473,7 +496,8 @@ mod tests {
                 last_seen_ns: 0,
                 sample_story_id: "ab".repeat(16),
             },
-            per_minute: vec![],
+            bucket_secs: 60,
+            buckets: vec![],
         };
         let (status, body) = html(
             FakeRepo {
@@ -489,6 +513,54 @@ mod tests {
                 && body.contains("<svg")
                 && body.contains("/groups/42?since=15m")
         );
+    }
+
+    #[tokio::test]
+    async fn groups_page_sparkline_is_bounded_at_7d() {
+        // Worst case: the repo hands back one point per minute for the whole week.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32;
+        let start = now - 7 * 86_400;
+        let g = GroupView {
+            group: StoryGroupRow {
+                fingerprint: "42".into(),
+                kind: "slow".into(),
+                summary: "shipping slow".into(),
+                rc_service: "shipping".into(),
+                rc_span_name: "quote".into(),
+                endpoint_service: "frontend".into(),
+                endpoint_name: "POST /api/checkout".into(),
+                stories: 10_080,
+                first_seen_ns: 0,
+                last_seen_ns: 0,
+                sample_story_id: "ab".repeat(16),
+            },
+            bucket_secs: 60,
+            buckets: (0..10_080).map(|i| (start + i * 60, 1)).collect(),
+        };
+        let (status, body) = html(
+            FakeRepo {
+                groups: vec![g],
+                ..Default::default()
+            },
+            "/?since=7d",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let svg_start = body.find("<svg").expect("sparkline rendered");
+        let svg_len = body[svg_start..].find("</svg>").unwrap() + "</svg>".len();
+        assert!(svg_len < 10 * 1024, "7d sparkline is {svg_len} bytes");
+    }
+
+    #[test]
+    fn spark_window_aligns_to_bucket_width() {
+        let w = SparkWindow::at(1_791_029_999, 7 * 86_400);
+        assert_eq!(w.step, 5040);
+        assert_eq!(w.to, 1_791_029_520);
+        assert_eq!(w.from % 5040, 0);
+        assert!((w.to - w.from) / w.step <= 121);
     }
 
     #[tokio::test]
@@ -611,7 +683,8 @@ mod tests {
                     last_seen_ns: 0,
                     sample_story_id: id.clone(),
                 },
-                per_minute: vec![],
+                bucket_secs: 60,
+                buckets: vec![],
             },
             examples: vec![StorySummaryRow {
                 story_id: id.clone(),

@@ -9,6 +9,15 @@ pub struct GroupFilter {
     pub service: Option<String>,
 }
 
+/// Sparkline points per window, at most (one more when the window straddles bucket edges).
+pub const SPARK_BUCKETS: u32 = 120;
+
+/// Sparkline bucket width for a window: `since / 120` rounded up to whole minutes, at least 60 s.
+/// Keeps every group to about 120 points whatever the window (7d -> 5040 s buckets).
+pub fn bucket_secs(since_secs: u32) -> u32 {
+    since_secs.div_ceil(SPARK_BUCKETS).div_ceil(60).max(1) * 60
+}
+
 /// `<n>[smhd]`, between 1 second and 7 days.
 pub fn parse_since(raw: &str) -> Result<u32, String> {
     let raw = raw.trim();
@@ -96,6 +105,17 @@ mod tests {
         assert!(parse_since("é").is_err());
         assert!(parse_since("５m").is_err()); // full-width digit
         assert!(parse_since("1h\u{0301}").is_err()); // combining accent
+    }
+
+    #[test]
+    fn bucket_width_scales_with_window() {
+        assert_eq!(bucket_secs(1), 60);
+        assert_eq!(bucket_secs(3600), 60);
+        assert_eq!(bucket_secs(86_400), 720);
+        assert_eq!(bucket_secs(604_800), 5040);
+        // Not a whole minute after division: round up.
+        assert_eq!(bucket_secs(7201 * 60), 3660);
+        assert!(604_800 / bucket_secs(604_800) <= SPARK_BUCKETS);
     }
 
     #[test]

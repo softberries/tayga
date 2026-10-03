@@ -1,7 +1,7 @@
 //! Read side over the tables written by the writer and the assembler.
 
 use crate::model::*;
-use crate::params::GroupFilter;
+use crate::params::{GroupFilter, bucket_secs};
 use std::collections::HashMap;
 use std::future::Future;
 use tayga_store::ClickHouseSettings;
@@ -27,21 +27,29 @@ pub trait Repo: Send + Sync + 'static {
     ) -> impl Future<Output = anyhow::Result<Vec<EdgeView>>> + Send;
 }
 
-/// Attaches per-minute counts to their groups, preserving group order.
-pub fn merge_minutes(groups: Vec<StoryGroupRow>, minutes: Vec<GroupMinuteRow>) -> Vec<GroupView> {
+/// Attaches bucketed counts to their groups, preserving group order.
+pub fn merge_buckets(
+    groups: Vec<StoryGroupRow>,
+    rows: Vec<GroupBucketRow>,
+    bucket_secs: u32,
+) -> Vec<GroupView> {
     let mut by_fp: HashMap<String, Vec<(u32, u64)>> = HashMap::new();
-    for m in minutes {
+    for r in rows {
         by_fp
-            .entry(m.fingerprint)
+            .entry(r.fingerprint)
             .or_default()
-            .push((m.minute, m.stories));
+            .push((r.bucket, r.stories));
     }
     groups
         .into_iter()
         .map(|group| {
-            let mut per_minute = by_fp.remove(&group.fingerprint).unwrap_or_default();
-            per_minute.sort_unstable();
-            GroupView { group, per_minute }
+            let mut buckets = by_fp.remove(&group.fingerprint).unwrap_or_default();
+            buckets.sort_unstable();
+            GroupView {
+                group,
+                bucket_secs,
+                buckets,
+            }
         })
         .collect()
 }
@@ -86,13 +94,23 @@ impl ChRepo {
         )))
         .fetch_all()
         .await?;
-        let minutes: Vec<GroupMinuteRow> = bind(self.client.query(&format!(
-            "SELECT toString(fingerprint) AS fingerprint, toUInt32(toStartOfMinute(ts)) AS minute, count() AS stories \
-             FROM ({FILTERED}) GROUP BY fingerprint, minute ORDER BY minute"
-        )))
-        .fetch_all()
-        .await?;
-        Ok(merge_minutes(groups, minutes))
+        if groups.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Only the groups kept above, bucketed to about 120 points per group.
+        let step = bucket_secs(f.since_secs);
+        let top: Vec<&str> = groups.iter().map(|g| g.fingerprint.as_str()).collect();
+        // Placeholder order: bucket width, the FILTERED binds, then the fingerprint list.
+        let query = self
+            .client
+            .query(&format!(
+                "SELECT toString(fingerprint) AS fingerprint, \
+                 toUInt32(toStartOfInterval(ts, toIntervalSecond(?))) AS bucket, count() AS stories \
+                 FROM ({FILTERED} AND has(?, toString(fingerprint))) GROUP BY fingerprint, bucket ORDER BY bucket"
+            ))
+            .bind(step);
+        let rows: Vec<GroupBucketRow> = bind(query).bind(&top).fetch_all().await?;
+        Ok(merge_buckets(groups, rows, step))
     }
 }
 
@@ -206,32 +224,33 @@ mod tests {
     }
 
     #[test]
-    fn merge_minutes_attaches_sorted_points_and_keeps_order() {
-        let minutes = vec![
-            GroupMinuteRow {
+    fn merge_buckets_attaches_sorted_points_and_keeps_order() {
+        let rows = vec![
+            GroupBucketRow {
                 fingerprint: "2".into(),
-                minute: 120,
+                bucket: 120,
                 stories: 3,
             },
-            GroupMinuteRow {
+            GroupBucketRow {
                 fingerprint: "1".into(),
-                minute: 60,
+                bucket: 60,
                 stories: 1,
             },
-            GroupMinuteRow {
+            GroupBucketRow {
                 fingerprint: "2".into(),
-                minute: 60,
+                bucket: 60,
                 stories: 2,
             },
         ];
-        let out = merge_minutes(vec![group("2"), group("1"), group("3")], minutes);
+        let out = merge_buckets(vec![group("2"), group("1"), group("3")], rows, 60);
         assert_eq!(
             out.iter()
                 .map(|g| g.group.fingerprint.as_str())
                 .collect::<Vec<_>>(),
             ["2", "1", "3"]
         );
-        assert_eq!(out[0].per_minute, vec![(60, 2), (120, 3)]);
-        assert!(out[2].per_minute.is_empty());
+        assert_eq!(out[0].buckets, vec![(60, 2), (120, 3)]);
+        assert_eq!(out[0].bucket_secs, 60);
+        assert!(out[2].buckets.is_empty());
     }
 }

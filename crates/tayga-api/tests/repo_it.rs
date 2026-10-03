@@ -26,7 +26,7 @@ async fn reads_live_groups_story_trace_and_map() {
     assert!(!groups.is_empty(), "no story groups in the last 7 days");
     let g = &groups[0];
     assert!(g.group.fingerprint.parse::<u64>().is_ok());
-    assert!(g.group.stories >= 1 && !g.per_minute.is_empty());
+    assert!(g.group.stories >= 1 && !g.buckets.is_empty());
     let detail = r
         .story_group(&g.group.fingerprint, 7 * 86_400)
         .await

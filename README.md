@@ -83,7 +83,7 @@ JSON API:
 
 | Route | Query | Returns |
 |---|---|---|
-| `GET /api/v1/story-groups` | `since` (default `1h`), `kind` (`error` or `slow`), `service` | Story groups with per-minute counts |
+| `GET /api/v1/story-groups` | `since` (default `1h`), `kind` (`error` or `slow`), `service` | Top 100 story groups, each with `buckets` (`[bucket_start_unix_s, stories]`, about 120 per window) and `bucket_secs` |
 | `GET /api/v1/story-groups/{fingerprint}` | `since` (default `24h`) | One group with example stories; 404 if absent |
 | `GET /api/v1/stories/{story_id}` | none | Full story; 404 if absent |
 | `GET /api/v1/traces/{trace_id}` | none | Spans and logs from the raw tables; 404 if neither exists |

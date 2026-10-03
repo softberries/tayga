@@ -192,7 +192,8 @@ mod tests {
                 last_seen_ns: 2,
                 sample_story_id: "ab".repeat(16),
             },
-            per_minute: vec![(60, 4)],
+            bucket_secs: 60,
+            buckets: vec![(60, 4)],
         }
     }
 
@@ -235,7 +236,8 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json[0]["fingerprint"], "17393964261140422938");
-        assert_eq!(json[0]["per_minute"][0][1], 4);
+        assert_eq!(json[0]["buckets"][0][1], 4);
+        assert_eq!(json[0]["bucket_secs"], 60);
         assert_eq!(json[0]["rc_service"], "payment");
         assert_eq!(
             repo.last_filter.lock().unwrap().clone(),
