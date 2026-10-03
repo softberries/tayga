@@ -1,0 +1,17 @@
+apiVersion: 1
+datasources:
+  - name: Tayga ClickHouse
+    uid: tayga-clickhouse
+    type: grafana-clickhouse-datasource
+    jsonData:
+      host: clickhouse
+      port: 8123
+      protocol: http
+      secure: false
+      username: default
+      defaultDatabase: tayga
+  - name: Tayga Prometheus
+    uid: tayga-prometheus
+    type: prometheus
+    access: proxy
+    url: http://tayga-prometheus:9090
