@@ -65,7 +65,26 @@ pub fn peer_of(span: &SpanRec) -> String {
                 .map(|(svc, _)| svc.to_string())
         })
         .or_else(|| span.attr("server.address").map(str::to_string))
+        .or_else(|| {
+            span.attr("url.full")
+                .or_else(|| span.attr("http.url"))
+                .and_then(url_host)
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| "an unknown peer".to_string())
+}
+
+/// Host of an absolute URL: scheme, userinfo, port and path removed.
+fn url_host(url: &str) -> Option<&str> {
+    let (_, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = if host_port.starts_with('[') {
+        host_port.find(']').map_or(host_port, |i| &host_port[..=i])
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    (!host.is_empty()).then_some(host)
 }
 
 fn operation_of(span: &SpanRec) -> &str {
@@ -237,6 +256,30 @@ mod tests {
                 "cart"
             )),
             "cart"
+        );
+        assert_eq!(
+            peer_of(&attr(s.clone(), "url.full", "http://agent:8000/x")),
+            "agent"
+        );
+        assert_eq!(
+            peer_of(&attr(
+                s.clone(),
+                "http.url",
+                "https://u:p@api.example.com/v1?q=1"
+            )),
+            "api.example.com"
+        );
+        assert_eq!(
+            peer_of(&attr(
+                attr(s.clone(), "url.full", "http://agent:8000/x"),
+                "server.address",
+                "10.0.0.1"
+            )),
+            "10.0.0.1"
+        );
+        assert_eq!(
+            peer_of(&attr(s.clone(), "url.full", "/relative")),
+            "an unknown peer"
         );
         assert_eq!(peer_of(&s), "an unknown peer");
     }

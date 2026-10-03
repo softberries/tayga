@@ -143,6 +143,8 @@ pub fn endpoint_name(span: &SpanRec) -> String {
 
 /// Strips scheme/host, query and fragment; replaces segments with a digit or > 24 chars by `<*>`.
 pub fn normalize_path(raw: &str) -> String {
+    // Query and fragment first: they may themselves contain `://` or `/`.
+    let raw = raw.split(['?', '#']).next().unwrap_or("");
     let path = match raw.find("://") {
         Some(i) => {
             let rest = &raw[i + 3..];
@@ -150,7 +152,6 @@ pub fn normalize_path(raw: &str) -> String {
         }
         None => raw,
     };
-    let path = path.split(['?', '#']).next().unwrap_or("");
     let joined = path
         .split('/')
         .map(|seg| {
@@ -443,6 +444,8 @@ mod tests {
         );
         assert_eq!(normalize_path("http://frontend-proxy:8080"), "/");
         assert_eq!(normalize_path("/api/cart"), "/api/cart");
+        assert_eq!(normalize_path("/redirect?to=http://x/y"), "/redirect");
+        assert_eq!(normalize_path("http://h?next=/a/b"), "/");
     }
 
     #[test]
