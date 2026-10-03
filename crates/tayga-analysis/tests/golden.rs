@@ -129,7 +129,7 @@ fn healthy_traffic_mostly_has_no_error_stories() {
         traces.len()
     );
     assert!(
-        (errors.len() as f64) / (traces.len() as f64) < 0.25,
+        (errors.len() as f64) / (traces.len() as f64) < 0.05,
         "{} of {} healthy traces produced error stories:\n{}",
         errors.len(),
         traces.len(),
@@ -139,10 +139,6 @@ fn healthy_traffic_mostly_has_no_error_stories() {
 
 #[test]
 fn shipping_slowdown_produces_slow_stories_blaming_shipping() {
-    if !fixture("healthy_checkout").exists() || !fixture("shipping_slowdown").exists() {
-        eprintln!("healthy_checkout or shipping_slowdown fixture absent; skipping");
-        return;
-    }
     let t = Thresholds {
         min_baseline_traces: 5,
         ..Thresholds::default()
@@ -157,10 +153,29 @@ fn shipping_slowdown_produces_slow_stories_blaming_shipping() {
         .into_iter()
         .filter(|s| s.kind == StoryKind::Slow)
         .collect();
-    println!("shipping_slowdown slow stories:\n{}", describe(&slow));
+    let table = slow
+        .iter()
+        .map(|s| {
+            format!(
+                "{} | {} | {} | {}",
+                s.endpoint.service, s.endpoint.name, s.root_cause.span.service, s.summary
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    println!("shipping_slowdown slow stories:\n{table}");
+    let checkouts: Vec<&Story> = slow
+        .iter()
+        .filter(|s| s.endpoint.service == "load-generator" && s.endpoint.name.contains("checkout"))
+        .collect();
     assert!(
-        slow.iter().any(|s| s.root_cause.span.service == "shipping"),
-        "no slow story blames shipping:\n{}",
-        describe(&slow)
+        !checkouts.is_empty(),
+        "no slow load-generator checkout story:\n{table}"
+    );
+    assert!(
+        checkouts
+            .iter()
+            .all(|s| s.root_cause.span.service == "shipping"),
+        "a slow checkout story blames another service:\n{table}"
     );
 }

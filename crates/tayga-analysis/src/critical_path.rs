@@ -66,9 +66,17 @@ pub fn critical_path(tree: &SpanTree) -> CriticalPath {
             let c = top.kids[top.next];
             top.next += 1;
             let child = tree.span(c);
-            let child_hi = child.end_ns.min(top.hi); // clamp skew overshoot
+            let mut child_hi = child.end_ns.min(top.hi); // clamp skew overshoot
+            let child_lo = child.start_ns.max(top.lo);
             if child_hi > top.cursor {
-                continue; // overlaps a later child already on the path
+                // Overlaps a later sibling already on the path. A small overlap is clock skew
+                // between hosts (the sibling was started after this child returned): clip it.
+                // A larger one means the calls ran concurrently and the sibling dominates.
+                if child_lo < top.cursor && child_hi - top.cursor <= CLOCK_SKEW_TOLERANCE_NS {
+                    child_hi = top.cursor;
+                } else {
+                    continue;
+                }
             }
             if top.cursor > child_hi {
                 reversed.push(Segment {
@@ -77,7 +85,6 @@ pub fn critical_path(tree: &SpanTree) -> CriticalPath {
                     end_ns: top.cursor,
                 });
             }
-            let child_lo = child.start_ns.max(top.lo);
             top.cursor = child_lo;
             stack.push(frame(c, child_lo, child_hi));
         } else {
@@ -120,7 +127,8 @@ mod tests {
 
     #[test]
     fn nested_and_sequential_children() {
-        // root [0,100]; A [10,40]; B [30,90] with C [50,80] inside B.
+        // root [0,100]; A [10,40]; B [30,90] with C [50,80] inside B. A overlaps B by 10 ns,
+        // within the skew tolerance, so A is clipped to end where B starts.
         let b = bundle(vec![
             span("r", "", "fe", "root", 0, 100),
             span("a", "r", "x", "A", 10, 40),
@@ -132,14 +140,15 @@ mod tests {
         assert_eq!(
             cp.segments,
             vec![
-                seg(0, 0, 30),
+                seg(0, 0, 10),
+                seg(1, 10, 30),
                 seg(2, 30, 50),
                 seg(3, 50, 80),
                 seg(2, 80, 90),
                 seg(0, 90, 100)
             ]
         );
-        assert_eq!(cp.self_time, vec![(0, 40), (2, 30), (3, 30)]);
+        assert_eq!(cp.self_time, vec![(2, 30), (3, 30), (0, 20), (1, 20)]);
     }
 
     #[test]
@@ -165,6 +174,54 @@ mod tests {
         assert_eq!(cp.self_time[0].0, 2, "shipping span owns the path");
         let total: u64 = cp.segments.iter().map(|s| s.end_ns - s.start_ns).sum();
         assert_eq!(total, 5_000_000_000);
+    }
+
+    #[test]
+    fn sibling_overlapping_slightly_is_clipped_not_dropped() {
+        // Seen in the demo: the next call starts 0.64 ms before the long call ends (skew). The
+        // long call must stay on the path instead of crediting its time to the parent.
+        let b = bundle(vec![
+            span("r", "", "lg", "root", 0, 3_000_000_000),
+            span("p", "r", "checkout", "PlaceOrder", 1_000_000, 2_500_000_000),
+            span(
+                "g",
+                "r",
+                "frontend",
+                "GetProduct",
+                2_499_360_000,
+                2_600_000_000,
+            ),
+        ]);
+        let t = SpanTree::build(&b).unwrap();
+        let cp = critical_path(&t);
+        assert_eq!(
+            cp.segments,
+            vec![
+                seg(0, 0, 1_000_000),
+                seg(1, 1_000_000, 2_499_360_000),
+                seg(2, 2_499_360_000, 2_600_000_000),
+                seg(0, 2_600_000_000, 3_000_000_000),
+            ]
+        );
+        assert_eq!(cp.self_time[0].0, 1);
+    }
+
+    #[test]
+    fn sibling_overlapping_beyond_tolerance_is_dropped() {
+        let b = bundle(vec![
+            span("r", "", "lg", "root", 0, 100_000_000),
+            span("p", "r", "x", "A", 0, 60_000_000),
+            span("g", "r", "y", "B", 40_000_000, 90_000_000),
+        ]);
+        let t = SpanTree::build(&b).unwrap();
+        assert_eq!(
+            critical_path(&t).segments,
+            vec![
+                seg(0, 0, 40_000_000),
+                seg(2, 40_000_000, 90_000_000),
+                seg(0, 90_000_000, 100_000_000),
+            ]
+        );
     }
 
     #[test]
@@ -208,10 +265,14 @@ mod tests {
 
     proptest! {
         #[test]
-        fn segments_tile_the_root_window(raw in prop::collection::vec((any::<u16>(), 0u64..1_000, 0u64..1_000), 1..60)) {
+        // scale 1: every overlap is within the skew tolerance (clipped); 100 000: many exceed it.
+        fn segments_tile_the_root_window(
+            raw in prop::collection::vec((any::<u16>(), 0u64..1_000, 0u64..1_000), 1..60),
+            scale in prop::sample::select(vec![1u64, 100_000]),
+        ) {
             let spans = raw.iter().enumerate().map(|(i, &(p, start, len))| {
                 let parent = if i == 0 { String::new() } else { format!("s{}", p as usize % i) };
-                span(&format!("s{i}"), &parent, "svc", "op", start, start + len)
+                span(&format!("s{i}"), &parent, "svc", "op", start * scale, (start + len) * scale)
             }).collect();
             let b = bundle(spans);
             let t = SpanTree::build(&b).unwrap();
