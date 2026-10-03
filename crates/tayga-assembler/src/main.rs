@@ -148,8 +148,12 @@ async fn main() -> anyhow::Result<()> {
             _ = tick.tick() => {
                 windows.revoke(&revoked.take());
                 pending.extend(windows.close_due(Instant::now()));
+                let started = Instant::now();
                 let outputs = process(&pending, &baselines, &settings.thresholds);
-                if !write_outputs(&store, &producer, &a.stories_topic, &outputs, &mut stop).await {
+                let written = write_outputs(&store, &producer, &a.stories_topic, &outputs, &mut stop).await;
+                // Records were not read while analysing and writing; that time is not trace inactivity.
+                windows.shift(started.elapsed());
+                if !written {
                     break; // shutdown during retries: nothing committed, records are re-read on restart
                 }
                 pending.clear();
@@ -169,7 +173,9 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             _ = refresh.tick() => {
+                let started = Instant::now();
                 baselines = load_baselines(&store, a.baseline_window_minutes, baselines).await;
+                windows.shift(started.elapsed());
             }
             msg = consumer.recv() => match msg {
                 Ok(m) => {

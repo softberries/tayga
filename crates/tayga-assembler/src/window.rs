@@ -190,6 +190,17 @@ impl Windows {
         }
     }
 
+    /// Moves every open trace's clocks forward by `by`. Call after time spent not reading
+    /// records (blocked writes, baseline refresh) so that time does not count as inactivity.
+    pub fn shift(&mut self, by: Duration) {
+        for state in self.partitions.values_mut() {
+            for b in state.open.values_mut() {
+                b.opened += by;
+                b.last_seen += by;
+            }
+        }
+    }
+
     pub fn open_traces(&self) -> usize {
         self.partitions.values().map(|p| p.open.len()).sum()
     }
@@ -430,6 +441,17 @@ mod tests {
         assert_eq!(w.open_traces(), 1);
         assert_eq!(w.buffered_bytes(), 10);
         assert_eq!(w.commit_offsets(), vec![(1, 1)]);
+    }
+
+    #[test]
+    fn shift_discounts_time_spent_not_reading() {
+        let t0 = Instant::now();
+        let mut w = Windows::new(cfg());
+        w.ingest(0, 1, Some(&tid(1)), &env(1, &[1]), 10, t0);
+        w.shift(Duration::from_secs(30));
+        assert!(w.close_due(t0 + Duration::from_secs(30)).is_empty());
+        assert!(w.close_due(t0 + Duration::from_secs(39)).is_empty());
+        assert_eq!(w.close_due(t0 + Duration::from_secs(40)).len(), 1);
     }
 
     #[test]
