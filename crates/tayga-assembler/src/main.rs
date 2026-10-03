@@ -23,6 +23,7 @@ use tokio::time::MissedTickBehavior;
 
 const GROUP: &str = "tayga-assembler";
 const STATS_EVERY_TICKS: u64 = 30;
+const FINAL_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
 struct Settings {
@@ -157,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
                     break; // shutdown during retries: nothing committed, records are re-read on restart
                 }
                 pending.clear();
-                commit(&consumer, &settings.kafka.topic, &mut windows, &mut pending);
+                commit(&consumer, &settings.kafka.topic, &mut windows, &mut pending, CommitMode::Async);
                 ticks += 1;
                 if ticks.is_multiple_of(STATS_EVERY_TICKS) {
                     tracing::info!(
@@ -191,6 +192,30 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             },
+        }
+    }
+    if !pending.is_empty() {
+        let outputs = process(&pending, &baselines, &settings.thresholds);
+        let write = write_once(&store, &producer, &a.stories_topic, &outputs);
+        match tokio::time::timeout(FINAL_WRITE_TIMEOUT, write).await {
+            Ok(Ok(())) => {
+                tracing::info!(traces = pending.len(), "wrote closed traces at shutdown");
+                pending.clear();
+                commit(
+                    &consumer,
+                    &settings.kafka.topic,
+                    &mut windows,
+                    &mut pending,
+                    CommitMode::Sync,
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, traces = pending.len(), "final write failed; traces are re-read on restart")
+            }
+            Err(_) => tracing::warn!(
+                traces = pending.len(),
+                "final write timed out; traces are re-read on restart"
+            ),
         }
     }
     tracing::info!(
@@ -251,6 +276,32 @@ fn ingest(windows: &mut Windows, m: &BorrowedMessage<'_>) -> Vec<ClosedTrace> {
     }
 }
 
+/// Inserts the analysis rows. Edges go last: they are aggregated by a SummingMergeTree, so a
+/// retry after a failed summary/story insert must not have inserted them already.
+async fn insert_outputs(store: &Store, out: &Outputs) -> anyhow::Result<()> {
+    store.insert_rows("trace_summaries", &out.summaries).await?;
+    store.insert_rows("error_stories", &out.stories).await?;
+    store.insert_rows("service_edges", &out.edges).await?;
+    Ok(())
+}
+
+async fn publish_stories(
+    producer: &FutureProducer,
+    topic: &str,
+    out: &Outputs,
+) -> Result<(), rdkafka::error::KafkaError> {
+    let sends = out.story_messages.iter().map(|(key, json)| {
+        producer.send(
+            FutureRecord::to(topic).key(key).payload(json),
+            Duration::from_secs(5),
+        )
+    });
+    for result in futures::future::join_all(sends).await {
+        result.map_err(|(e, _)| e)?;
+    }
+    Ok(())
+}
+
 /// Returns false if shutdown interrupted the writes (nothing may be committed then).
 async fn write_outputs(
     store: &Store,
@@ -262,30 +313,31 @@ async fn write_outputs(
     if out.is_empty() {
         return true;
     }
-    let insert = || async {
-        store.insert_rows("trace_summaries", &out.summaries).await?;
-        store.insert_rows("service_edges", &out.edges).await?;
-        store.insert_rows("error_stories", &out.stories).await
-    };
-    if retry_until("clickhouse insert", insert, stop)
+    if retry_until("clickhouse insert", || insert_outputs(store, out), stop)
         .await
         .is_none()
     {
         return false;
     }
-    let publish = || async {
-        let sends = out.story_messages.iter().map(|(key, json)| {
-            producer.send(
-                FutureRecord::to(topic).key(key).payload(json),
-                Duration::from_secs(5),
-            )
-        });
-        for result in futures::future::join_all(sends).await {
-            result.map_err(|(e, _)| e)?;
-        }
-        Ok::<(), rdkafka::error::KafkaError>(())
-    };
-    retry_until("story publish", publish, stop).await.is_some()
+    retry_until(
+        "story publish",
+        || publish_stories(producer, topic, out),
+        stop,
+    )
+    .await
+    .is_some()
+}
+
+/// One write attempt for traces closed but not yet written at shutdown.
+async fn write_once(
+    store: &Store,
+    producer: &FutureProducer,
+    topic: &str,
+    out: &Outputs,
+) -> anyhow::Result<()> {
+    insert_outputs(store, out).await?;
+    publish_stories(producer, topic, out).await?;
+    Ok(())
 }
 
 /// Drops all state of partitions this consumer no longer owns, including closed traces not yet
@@ -305,6 +357,7 @@ fn commit(
     topic: &str,
     windows: &mut Windows,
     pending: &mut Vec<ClosedTrace>,
+    mode: CommitMode,
 ) {
     let assigned: HashSet<i32> = match consumer.assignment() {
         Ok(tpl) => tpl
@@ -337,7 +390,7 @@ fn commit(
             return;
         }
     }
-    if let Err(e) = consumer.commit(&tpl, CommitMode::Async) {
+    if let Err(e) = consumer.commit(&tpl, mode) {
         // Typically a partition revoked by a concurrent rebalance; the next tick retries.
         tracing::warn!(error = %e, "offset commit failed");
     }
