@@ -15,11 +15,10 @@ pub fn sparkline(
 ) -> String {
     // Handle reversed or invalid window: treat as single point at zero
     if from_minute > to_minute {
+        let y = height.saturating_sub(1);
         return format!(
-            "<svg class=\"spark\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\"><polyline fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" points=\"0.0,{} {}.0,{}\"/></svg>",
-            height - 1,
+            "<svg class=\"spark\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\"><polyline fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" points=\"0.0,{y} {}.0,{y}\"/></svg>",
             width,
-            height - 1
         );
     }
     // Cap at 7 days * 24 hours * 60 minutes + 1
@@ -29,7 +28,10 @@ pub fn sparkline(
     let mut series = vec![0u64; minutes];
     for &(m, count) in points {
         if m >= from_minute && m <= to_minute {
-            series[((m - from_minute) / 60) as usize] += count;
+            let idx = ((m - from_minute) / 60) as usize;
+            if let Some(slot) = series.get_mut(idx) {
+                *slot += count;
+            }
         }
     }
     let max = series.iter().copied().max().unwrap_or(0).max(1) as f64;
@@ -222,6 +224,37 @@ mod tests {
         let svg0 = sparkline(&[(0, 1)], 0, 60, 100, 0);
         assert!(svg0.starts_with("<svg"));
         let svg1 = sparkline(&[(0, 1)], 0, 60, 100, 1);
+        assert!(svg1.starts_with("<svg"));
+    }
+
+    #[test]
+    fn sparkline_ignores_points_beyond_cap() {
+        // Points far in the future (beyond cap) should not cause out-of-bounds panics
+        let svg = sparkline(&[(10_000_000, 1), (60, 5)], 0, u32::MAX, 100, 20);
+        assert!(svg.starts_with("<svg") && svg.contains("polyline"));
+        // Verify point count is still within cap
+        let points_str = svg
+            .split("points=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("");
+        let point_count = if points_str.is_empty() {
+            0
+        } else {
+            points_str.split(' ').count()
+        };
+        assert!(
+            point_count <= 10082,
+            "point count {point_count} exceeds cap"
+        );
+    }
+
+    #[test]
+    fn sparkline_reversed_window_tiny_height() {
+        // Reversed window (from > to) with tiny heights should not panic
+        let svg0 = sparkline(&[], 10, 5, 100, 0);
+        assert!(svg0.starts_with("<svg"));
+        let svg1 = sparkline(&[], 10, 5, 100, 1);
         assert!(svg1.starts_with("<svg"));
     }
 
