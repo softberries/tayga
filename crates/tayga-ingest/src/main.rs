@@ -1,3 +1,4 @@
+use prometheus_client::registry::Registry;
 use rdkafka::producer::Producer;
 use serde::Deserialize;
 use std::future::IntoFuture;
@@ -6,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tayga_ingest::grpc::OtlpGrpc;
 use tayga_ingest::kafka_sink::KafkaSink;
+use tayga_ingest::metrics::IngestMetrics;
 use tayga_ingest::supervise::supervise;
 use tayga_kafka::KafkaSettings;
 use tayga_model::otlp::collector::logs::v1::logs_service_server::LogsServiceServer;
@@ -49,7 +51,14 @@ async fn main() -> anyhow::Result<()> {
     let http_listener = tokio::net::TcpListener::bind(settings.http_addr).await?;
 
     let (stop_tx, stop_rx) = watch::channel(());
-    let grpc = OtlpGrpc::new(sink.clone(), settings.kafka.max_record_bytes);
+    let mut registry = Registry::default();
+    let metrics = IngestMetrics::register(&mut registry);
+    let registry = Arc::new(registry);
+    let grpc = OtlpGrpc::new(
+        sink.clone(),
+        settings.kafka.max_record_bytes,
+        metrics.clone(),
+    );
     let traces = TraceServiceServer::new(grpc.clone())
         .accept_compressed(CompressionEncoding::Gzip)
         .max_decoding_message_size(MAX_GRPC_MESSAGE);
@@ -67,7 +76,12 @@ async fn main() -> anyhow::Result<()> {
     let mut http_stop = stop_rx;
     let http_server = axum::serve(
         http_listener,
-        tayga_ingest::http::router(sink.clone(), settings.kafka.max_record_bytes),
+        tayga_ingest::http::router(
+            sink.clone(),
+            settings.kafka.max_record_bytes,
+            metrics,
+            registry,
+        ),
     )
     .with_graceful_shutdown(async move {
         let _ = http_stop.changed().await;

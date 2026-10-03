@@ -1781,6 +1781,7 @@ dependencies = [
  "axum",
  "flate2",
  "futures",
+ "prometheus-client",
  "prost",
  "rdkafka",
  "serde",
