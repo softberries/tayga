@@ -3,7 +3,7 @@
 use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
-use rdkafka::consumer::StreamConsumer;
+use rdkafka::consumer::{ConsumerContext, StreamConsumer};
 use rdkafka::error::KafkaResult;
 use rdkafka::message::{Header, OwnedHeaders};
 use rdkafka::producer::FutureProducer;
@@ -39,6 +39,24 @@ fn default_max_record_bytes() -> usize {
     900_000
 }
 
+impl KafkaSettings {
+    /// Rejects settings that would let ingest produce records the broker refuses.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.max_record_bytes > 0 && self.max_record_bytes < MAX_MESSAGE_BYTES,
+            "kafka.max_record_bytes must be between 1 and {} (got {})",
+            MAX_MESSAGE_BYTES - 1,
+            self.max_record_bytes
+        );
+        anyhow::ensure!(
+            self.partitions > 0,
+            "kafka.partitions must be positive (got {})",
+            self.partitions
+        );
+        Ok(())
+    }
+}
+
 pub fn producer(s: &KafkaSettings) -> KafkaResult<FutureProducer> {
     ClientConfig::new()
         .set("bootstrap.servers", &s.brokers)
@@ -54,17 +72,31 @@ pub fn producer(s: &KafkaSettings) -> KafkaResult<FutureProducer> {
         .create()
 }
 
-/// Manual commits only: callers commit after their side effects succeed.
-pub fn consumer(s: &KafkaSettings, group: &str) -> KafkaResult<StreamConsumer> {
-    ClientConfig::new()
+fn consumer_config(s: &KafkaSettings, group: &str) -> ClientConfig {
+    let mut config = ClientConfig::new();
+    config
         .set("bootstrap.servers", &s.brokers)
         .set("group.id", group)
         .set("enable.auto.commit", "false")
         .set("auto.offset.reset", "earliest")
         .set("enable.partition.eof", "false")
         .set("session.timeout.ms", "30000")
-        .set("max.poll.interval.ms", "600000")
-        .create()
+        .set("max.poll.interval.ms", "600000");
+    config
+}
+
+/// Manual commits only: callers commit after their side effects succeed.
+pub fn consumer(s: &KafkaSettings, group: &str) -> KafkaResult<StreamConsumer> {
+    consumer_config(s, group).create()
+}
+
+/// Like [`consumer`], with a context that receives rebalance callbacks.
+pub fn consumer_with_context<C: ConsumerContext + 'static>(
+    s: &KafkaSettings,
+    group: &str,
+    ctx: C,
+) -> KafkaResult<StreamConsumer<C>> {
+    consumer_config(s, group).create_with_context(ctx)
 }
 
 /// Creates the topic if missing (with `max.message.bytes` matching the producer);
@@ -131,5 +163,34 @@ mod tests {
                 ("tayga-key".into(), b"service".to_vec()),
             ]
         );
+    }
+
+    fn settings(max_record_bytes: usize) -> KafkaSettings {
+        KafkaSettings {
+            brokers: "b:1".into(),
+            topic: "t".into(),
+            partitions: 3,
+            max_record_bytes,
+        }
+    }
+
+    #[test]
+    fn validate_accepts_defaults() {
+        let s: KafkaSettings = serde_json::from_str(r#"{"brokers":"b:1"}"#).unwrap();
+        s.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_record_budget_at_or_above_message_limit() {
+        assert!(settings(MAX_MESSAGE_BYTES).validate().is_err());
+        assert!(settings(0).validate().is_err());
+        settings(MAX_MESSAGE_BYTES - 1).validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_partitions() {
+        let mut s = settings(1000);
+        s.partitions = 0;
+        assert!(s.validate().is_err());
     }
 }

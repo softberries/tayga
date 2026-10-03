@@ -37,6 +37,7 @@ fn default_http() -> SocketAddr {
 async fn main() -> anyhow::Result<()> {
     tayga_common::init_logging();
     let settings: Settings = tayga_common::load_settings()?;
+    settings.kafka.validate()?;
     tayga_kafka::ensure_topic(&settings.kafka).await?;
     let sink = Arc::new(KafkaSink::new(
         tayga_kafka::producer(&settings.kafka)?,

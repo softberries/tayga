@@ -3,6 +3,19 @@
 use serde::de::DeserializeOwned;
 use tracing_subscriber::EnvFilter;
 
+pub mod retry;
+
+/// A flag that flips to `true` on SIGINT/SIGTERM. Must be called inside a tokio runtime;
+/// clone the receiver into every loop that has to stop.
+pub fn shutdown_flag() -> tokio::sync::watch::Receiver<bool> {
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = tx.send(true);
+    });
+    rx
+}
+
 /// Loads settings from the optional TOML file at `$TAYGA_CONFIG`, then
 /// overrides from `TAYGA__SECTION__KEY` environment variables.
 pub fn load_settings<T: DeserializeOwned>() -> anyhow::Result<T> {
