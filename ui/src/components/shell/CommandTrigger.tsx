@@ -11,18 +11,19 @@ export function CommandTrigger() {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
-        setOpen((o) => !o)
+        // Not over another dialog (its own focus trap would fight the palette).
+        if (!open && document.querySelector('[role="dialog"]')) return
+        setOpen(!open)
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [open])
 
   return (
-    <>
+    <CommandPalette open={open} onOpenChange={setOpen}>
       <button
         type="button"
-        onClick={() => setOpen(true)}
         aria-keyshortcuts="Meta+K Control+K"
         className="flex h-9 min-w-0 flex-[0_1_340px] sm:min-w-[260px] cursor-pointer items-center gap-2 rounded-field border border-field-line bg-field px-2.5 text-muted shadow-inset hover:text-ink"
       >
@@ -30,7 +31,6 @@ export function CommandTrigger() {
         <span className="flex-1 truncate text-left">Jump to service, trace id, template…</span>
         <Kbd>⌘K</Kbd>
       </button>
-      <CommandPalette open={open} onOpenChange={setOpen} />
-    </>
+    </CommandPalette>
   )
 }

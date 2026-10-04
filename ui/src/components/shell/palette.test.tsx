@@ -35,7 +35,7 @@ describe('command palette', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     await user.keyboard('{Control>}k{/Control}')
     expect(await screen.findByRole('dialog', { name: 'Command palette' })).toBeInTheDocument()
-    expect(screen.getByRole('combobox')).toHaveFocus()
+    await waitFor(() => expect(screen.getByRole('combobox')).toHaveFocus())
   })
 
   it('lists pages, actions and no search before typing', async () => {
@@ -44,7 +44,7 @@ describe('command palette', () => {
     await user.keyboard('{Meta>}k{/Meta}')
     const list = await screen.findByRole('listbox')
     expect(within(list).getByRole('option', { name: /Pipeline health/ })).toBeInTheDocument()
-    expect(within(list).getByRole('option', { name: /Toggle theme/ })).toBeInTheDocument()
+    expect(within(list).getByRole('option', { name: 'Theme: Dark' })).toBeInTheDocument()
     expect(fetch.mock.calls.some(([u]) => String(u).includes('/search'))).toBe(false)
   })
 
@@ -74,14 +74,14 @@ describe('command palette', () => {
     await waitFor(() => expect(router.state.location.pathname).toBe('/logs/templates/1066356062084821589'))
   })
 
-  it('the theme action cycles the theme and closes the palette', async () => {
+  it('the theme actions set the theme and close the palette', async () => {
     const user = userEvent.setup()
     await openPalette()
     expect(screen.getByRole('button', { name: /^Theme: system/ })).toBeInTheDocument()
     await user.keyboard('{Meta>}k{/Meta}')
-    await user.click(await screen.findByRole('option', { name: /Toggle theme/ }))
+    await user.click(await screen.findByRole('option', { name: 'Theme: Dark' }))
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
-    expect(screen.getByRole('button', { name: /^Theme: light/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Theme: dark/ })).toBeInTheDocument()
   })
 
   it('the time range action sets since', async () => {
@@ -105,6 +105,132 @@ describe('command palette', () => {
   })
 })
 
+/** Replaces fetch so each /search call waits on a promise the test resolves. */
+function deferredSearch() {
+  const calls: { q: string; resolve: (body: unknown, status?: number) => void }[] = []
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: string) => {
+      const url = new URL(input, 'http://test')
+      if (url.pathname.endsWith('/search')) {
+        return new Promise<Response>((res) =>
+          calls.push({
+            q: url.searchParams.get('q') ?? '',
+            resolve: (body, status = 200) =>
+              res(new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })),
+          }),
+        )
+      }
+      return new Response(JSON.stringify(serviceMap), { status: 200, headers: { 'content-type': 'application/json' } })
+    }),
+  )
+  return calls
+}
+const view = (service: string) => ({ services: [service], templates: [], groups: [], trace_id: null })
+
+describe('palette search states', () => {
+  it('shows Searching while debouncing and never the previous query results', async () => {
+    const user = userEvent.setup()
+    const calls = deferredSearch()
+    await openPalette()
+    await user.keyboard('{Meta>}k{/Meta}')
+    const input = await screen.findByRole('combobox')
+    await user.type(input, 'ab')
+    await waitFor(() => expect(calls.map((c) => c.q)).toEqual(['ab']))
+    act(() => calls[0]!.resolve(view('alpha')))
+    expect(await screen.findByRole('option', { name: /alpha/ })).toBeInTheDocument()
+    await user.type(input, 'c')
+    expect(screen.queryByRole('option', { name: /alpha/ })).toBeNull()
+    expect(screen.getByRole('status')).toHaveTextContent('Searching…')
+  })
+
+  it('clearing the box shows only Recent and pages, no old groups', async () => {
+    const user = userEvent.setup()
+    await openPalette()
+    await user.keyboard('{Meta>}k{/Meta}')
+    const input = await screen.findByRole('combobox')
+    await user.type(input, 'pay')
+    await screen.findByRole('option', { name: /Checkout payment declined/ })
+    await user.clear(input)
+    expect(screen.queryByText('Story groups')).toBeNull()
+    expect(screen.queryByText('Templates')).toBeNull()
+    expect(screen.queryByRole('option', { name: /Checkout payment declined/ })).toBeNull()
+  })
+
+  it('a slow response for an old query does not overwrite a newer one', async () => {
+    const user = userEvent.setup()
+    const calls = deferredSearch()
+    await openPalette()
+    await user.keyboard('{Meta>}k{/Meta}')
+    const input = await screen.findByRole('combobox')
+    await user.type(input, 'ab')
+    await waitFor(() => expect(calls).toHaveLength(1))
+    await user.type(input, 'c')
+    await waitFor(() => expect(calls).toHaveLength(2))
+    act(() => calls[1]!.resolve(view('new')))
+    expect(await screen.findByRole('option', { name: /new/ })).toBeInTheDocument()
+    act(() => calls[0]!.resolve(view('old')))
+    await new Promise((r) => setTimeout(r, 30))
+    expect(screen.queryByRole('option', { name: /old/ })).toBeNull()
+    expect(screen.getByRole('option', { name: /new/ })).toBeInTheDocument()
+  })
+
+  it('shows an error row even when pages match', async () => {
+    const user = userEvent.setup()
+    const calls = deferredSearch()
+    await openPalette()
+    await user.keyboard('{Meta>}k{/Meta}')
+    await user.type(await screen.findByRole('combobox'), 'st')
+    await waitFor(() => expect(calls).toHaveLength(1))
+    act(() => calls[0]!.resolve({ error: 'boom' }, 500))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Search is unavailable.')
+    expect(screen.getByRole('option', { name: /Stories/ })).toBeInTheDocument()
+  })
+
+  it('shows an explicit empty row', async () => {
+    const user = userEvent.setup()
+    const calls = deferredSearch()
+    await openPalette()
+    await user.keyboard('{Meta>}k{/Meta}')
+    await user.type(await screen.findByRole('combobox'), 'st')
+    await waitFor(() => expect(calls).toHaveLength(1))
+    act(() => calls[0]!.resolve({ services: [], templates: [], groups: [], trace_id: null }))
+    expect(await screen.findByText('No matches for “st”.')).toBeInTheDocument()
+  })
+})
+
+describe('palette keyboard and focus', () => {
+  it('arrow keys move the selection and Enter opens it', async () => {
+    const user = userEvent.setup()
+    const { router } = await openPalette('/')
+    await user.keyboard('{Meta>}k{/Meta}')
+    await screen.findByRole('combobox')
+    // Order without a query: Pages first (no Recent yet): Stories, Traces, ...
+    await user.keyboard('{ArrowDown}{Enter}')
+    await waitFor(() => expect(router.state.location.pathname).toBe('/traces'))
+  })
+
+  it('returns focus to the trigger on close', async () => {
+    const user = userEvent.setup()
+    await openPalette()
+    const trigger = screen.getByRole('button', { name: /Jump to service/ })
+    await user.click(trigger)
+    await screen.findByRole('dialog')
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    await waitFor(() => expect(trigger).toHaveFocus())
+  })
+
+  it('Cmd+K does not open over another dialog', async () => {
+    const user = userEvent.setup()
+    await openPalette()
+    fireEvent.keyDown(document.body, { key: '?' })
+    await screen.findByRole('dialog', { name: 'Keyboard shortcuts' })
+    await user.keyboard('{Meta>}k{/Meta}')
+    expect(screen.queryByRole('dialog', { name: 'Command palette' })).toBeNull()
+  })
+})
+
 describe('keyboard shortcuts', () => {
   it('g then t goes to Traces, keeping since', async () => {
     const { router } = await openPalette('/map?since=24h')
@@ -123,10 +249,42 @@ describe('keyboard shortcuts', () => {
     expect(screen.queryByRole('dialog', { name: 'Keyboard shortcuts' })).toBeNull()
   })
 
+  it('the g chord times out after 1 s', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { router } = await openPalette()
+      fireEvent.keyDown(document.body, { key: 'g' })
+      await act(async () => void (await vi.advanceTimersByTimeAsync(1100)))
+      fireEvent.keyDown(document.body, { key: 't' })
+      await act(async () => void (await vi.advanceTimersByTimeAsync(50)))
+      expect(router.state.location.pathname).toBe('/map')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('g followed by an invalid key does nothing and disarms', async () => {
+    const { router } = await openPalette()
+    fireEvent.keyDown(document.body, { key: 'g' })
+    fireEvent.keyDown(document.body, { key: 'x' })
+    fireEvent.keyDown(document.body, { key: 't' })
+    await new Promise((r) => setTimeout(r, 30))
+    expect(router.state.location.pathname).toBe('/map')
+  })
+
+  it('? does not fire while a dialog is open', async () => {
+    const user = userEvent.setup()
+    await openPalette()
+    await user.keyboard('{Meta>}k{/Meta}')
+    await screen.findByRole('dialog', { name: 'Command palette' })
+    fireEvent.keyDown(document.body, { key: '?' })
+    expect(screen.queryByRole('dialog', { name: 'Keyboard shortcuts' })).toBeNull()
+  })
+
   it('? lists the shortcuts', async () => {
     await openPalette()
     act(() => void fireEvent.keyDown(document.body, { key: '?' }))
     const dlg = await screen.findByRole('dialog', { name: 'Keyboard shortcuts' })
-    expect(within(dlg).getByText('Go to Pipeline health')).toBeInTheDocument()
+    expect(within(dlg).getByText('Go to Log alerts')).toBeInTheDocument()
   })
 })

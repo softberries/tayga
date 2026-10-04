@@ -1,17 +1,16 @@
-import { useQuery, keepPreviousData } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { Command } from 'cmdk'
 import { Activity, ChartGantt, Clock, History, Moon, ScrollText, Server, TextAlignStart, Waypoints } from 'lucide-react'
-import type { ReactNode } from 'react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { ReactElement, ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../api/queries'
 import { HEX32, SINCE_VALUES, sinceSearch } from '../../app/search'
 import type { Since } from '../../app/search'
 import { pushRecent, readRecent } from '../../lib/recent'
 import type { RecentItem } from '../../lib/recent'
 import { useTheme } from '../../theme/ThemeProvider'
-import { NEXT_MODE } from '../../theme/theme'
-import { DialogContent, DialogRoot } from '../ui/Dialog'
+import { DialogContent, DialogRoot, DialogTrigger } from '../ui/Dialog'
 import { Kbd } from '../ui/Kbd'
 import { useSince } from './TimeRange'
 
@@ -92,9 +91,11 @@ function Row({ icon, label, hint, right }: { icon: ReactNode; label: string; hin
   )
 }
 
-export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
+/** `children` is the one focusable trigger element; closing returns focus to it. */
+export function CommandPalette({ open, onOpenChange, children }: { open: boolean; onOpenChange: (o: boolean) => void; children: ReactElement }) {
   return (
     <DialogRoot open={open} onOpenChange={onOpenChange}>
+      <DialogTrigger asChild>{children}</DialogTrigger>
       <DialogContent
         title="Command palette"
         bare
@@ -110,9 +111,17 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
 function PaletteBody({ onOpenChange }: { onOpenChange: (o: boolean) => void }) {
   const [text, setText] = useState('')
   const [recent] = useState<RecentItem[]>(readRecent)
-  const { mode, cycle } = useTheme()
+  const { setMode } = useTheme()
   const navigate = useNavigate()
   const openItem = useOpenItem()
+
+  // Focus after the dialog's focus scope has recorded the opener, so closing returns focus
+  // to it (an autoFocus here would make the scope remember this input instead).
+  const inputRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    const t = window.setTimeout(() => inputRef.current?.focus(), 0)
+    return () => window.clearTimeout(t)
+  }, [])
 
   const query = text.trim()
   const debounced = useDebounced(query, DEBOUNCE_MS)
@@ -120,10 +129,19 @@ function PaletteBody({ onOpenChange }: { onOpenChange: (o: boolean) => void }) {
   const search = useQuery({
     ...api.search(debounced),
     enabled: searching,
-    placeholderData: keepPreviousData,
     meta: { outage: false },
   })
-  const result = searching ? search.data : undefined
+  // Server results show only for exactly what is typed now: never a debounce-lagged or
+  // previous query's data, so Enter cannot open a stale item.
+  const current = searching && debounced === query
+  const result = current ? search.data : undefined
+  const searchState: 'idle' | 'loading' | 'error' | 'done' = !query
+    ? 'idle'
+    : current && search.isError
+      ? 'error'
+      : result
+        ? 'done'
+        : 'loading'
   const needle = query.toLowerCase()
   const isTraceId = HEX32.test(query)
   const traceId = isTraceId ? query.toLowerCase() : (result?.trace_id ?? undefined)
@@ -147,7 +165,12 @@ function PaletteBody({ onOpenChange }: { onOpenChange: (o: boolean) => void }) {
   const pages = useMemo(() => PAGES.filter((p) => !needle || p.label.toLowerCase().includes(needle)), [needle])
   const actions = useMemo(() => {
     const list: { id: string; label: string; icon: ReactNode; run: () => void }[] = [
-      { id: 'theme', label: `Toggle theme (now ${mode}, next ${NEXT_MODE[mode]})`, icon: <Moon size={15} />, run: cycle },
+      ...(['light', 'dark', 'system'] as const).map((m) => ({
+        id: `theme-${m}`,
+        label: `Theme: ${m[0]?.toUpperCase()}${m.slice(1)}`,
+        icon: <Moon size={15} />,
+        run: () => setMode(m),
+      })),
       ...SINCE_VALUES.map((v: Since) => ({
         id: `since-${v}`,
         label: `Time range: ${v}`,
@@ -161,14 +184,14 @@ function PaletteBody({ onOpenChange }: { onOpenChange: (o: boolean) => void }) {
       })),
     ]
     return list.filter((a) => !needle || a.label.toLowerCase().includes(needle) || 'action'.includes(needle))
-  }, [mode, cycle, navigate, needle])
+  }, [setMode, navigate, needle])
 
   const showRecent = !query && recent.length > 0
   return (
     <Command shouldFilter={false} label="Command palette" loop className="flex flex-col">
       <div className="border-b border-panel-line py-3 pl-4 pr-12">
         <Command.Input
-          autoFocus
+          ref={inputRef}
           value={text}
           onValueChange={setText}
           placeholder="Jump to service, trace id, template…"
@@ -177,10 +200,6 @@ function PaletteBody({ onOpenChange }: { onOpenChange: (o: boolean) => void }) {
         />
       </div>
       <Command.List className={`max-h-[min(55vh,420px)] overflow-y-auto overscroll-contain p-2 ${headingClass}`}>
-        <Command.Empty className="px-3 py-6 text-center text-muted">
-          {search.isFetching ? 'Searching…' : search.isError ? 'Search is unavailable.' : 'No matches.'}
-        </Command.Empty>
-
         {traceId ? (
           <Command.Group heading="Trace">
             <Command.Item
@@ -221,6 +240,22 @@ function PaletteBody({ onOpenChange }: { onOpenChange: (o: boolean) => void }) {
               </Command.Item>
             ))}
           </Command.Group>
+        ) : null}
+
+        {searchState === 'loading' ? (
+          <div role="status" className="px-3 py-2.5 text-muted">
+            Searching…
+          </div>
+        ) : null}
+        {searchState === 'error' ? (
+          <div role="alert" className="px-3 py-2.5 text-err">
+            Search is unavailable.
+          </div>
+        ) : null}
+        {searchState === 'done' && !traceId && !result?.services.length && !result?.groups.length && !result?.templates.length ? (
+          <div role="status" className="px-3 py-2.5 text-muted">
+            No matches for “{query}”.
+          </div>
         ) : null}
 
         {result && result.services.length > 0 ? (

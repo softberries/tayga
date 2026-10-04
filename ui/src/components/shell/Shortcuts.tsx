@@ -9,7 +9,7 @@ const GO = {
   s: { to: '/', label: 'Stories' },
   t: { to: '/traces', label: 'Traces' },
   m: { to: '/map', label: 'Service map' },
-  l: { to: '/logs/alerts', label: 'Logs and templates' },
+  l: { to: '/logs/alerts', label: 'Log alerts' },
   p: { to: '/pipeline', label: 'Pipeline health' },
 } as const
 
