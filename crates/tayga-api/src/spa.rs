@@ -41,6 +41,7 @@ pub trait Assets: Send + Sync + 'static {
 /// The app embedded at compile time from `ui/dist`.
 #[cfg(feature = "embed-ui")]
 #[derive(rust_embed::RustEmbed)]
+// Keep in sync with the `ui/dist` path in build.rs.
 #[folder = "../../ui/dist"]
 #[allow_missing = true]
 struct Dist;
@@ -98,6 +99,9 @@ pub const OLD_URL_REDIRECTS: &[Redirect308] = &[
     },
 ];
 
+/// Must match the routes registered in `ui.rs`. Task 13 deletes askama and
+/// empties this list.
+///
 /// Paths the askama UI (`ui.rs`) still serves. A redirect whose `from` is
 /// listed here is not mounted, because the askama page must keep winning.
 /// Task 13 deletes askama and empties this list, which activates every
@@ -198,15 +202,54 @@ fn not_found() -> Response {
         .into_response()
 }
 
-async fn serve(State(assets): State<Arc<dyn Assets>>, method: Method, uri: Uri) -> Response {
-    if method != Method::GET && method != Method::HEAD {
-        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+/// Percent-decode a URL path; `None` when the result is not valid UTF-8.
+fn decode(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = s.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
     }
-    let path = uri.path();
-    if is_reserved(path) {
+    String::from_utf8(out).ok()
+}
+
+/// A relative asset path that could escape the dist root (rust-embed reads
+/// from disk in debug builds) or is otherwise not a plain file path.
+fn is_unsafe(rel: &str) -> bool {
+    rel.starts_with('/')
+        || rel.contains('\\')
+        || rel.contains('\0')
+        || rel.split('/').any(|seg| seg == "..")
+}
+
+async fn serve(State(assets): State<Arc<dyn Assets>>, method: Method, uri: Uri) -> Response {
+    let raw = uri.path();
+    if is_reserved(raw) {
         return not_found();
     }
-    let rel = path.trim_start_matches('/');
+    if method != Method::GET && method != Method::HEAD {
+        let mut res = StatusCode::METHOD_NOT_ALLOWED.into_response();
+        res.headers_mut()
+            .insert(header::ALLOW, HeaderValue::from_static("GET, HEAD"));
+        return res;
+    }
+    let Some(path) = decode(raw) else {
+        return not_found();
+    };
+    if is_reserved(&path) {
+        return not_found();
+    }
+    let rel = path.strip_prefix('/').unwrap_or(&path);
+    if is_unsafe(rel) {
+        return not_found();
+    }
     if rel.starts_with("assets/") {
         return match assets.get(rel) {
             Some(a) => file(a, IMMUTABLE),
@@ -334,9 +377,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_get_is_405() {
+    async fn non_get_is_405_with_allow_but_reserved_wins() {
         let res = call(app(), Method::POST, "/traces").await;
         assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(header_of(&res, header::ALLOW), "GET, HEAD");
+        let res = call(app(), Method::POST, "/api/v1/unknown").await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body(res).await, r#"{"error":"not found"}"#);
+    }
+
+    #[tokio::test]
+    async fn head_on_asset_matches_get_headers() {
+        let get = call(app(), Method::GET, "/assets/x.js").await;
+        let head = call(app(), Method::HEAD, "/assets/x.js").await;
+        assert_eq!(head.status(), StatusCode::OK);
+        for h in [header::CONTENT_TYPE, header::CACHE_CONTROL] {
+            assert_eq!(header_of(&head, h.clone()), header_of(&get, h));
+        }
+    }
+
+    #[tokio::test]
+    async fn traversal_paths_are_404_even_if_the_source_has_the_key() {
+        let mem: Arc<dyn Assets> = Arc::new(Mem(HashMap::from([
+            ("assets/../secret", ("text/plain", &b"secret"[..])),
+            ("assets/x.js", ("text/javascript", &b"ok"[..])),
+        ])));
+        let app = router_with(mem, &[]);
+        for uri in [
+            "/assets/../secret",
+            "/assets/%2e%2e/secret",
+            "/assets/%2E%2E/secret",
+            "/assets/..%5Csecret",
+            "/assets/a%00b",
+            "//etc/passwd",
+        ] {
+            let res = call(app.clone(), Method::GET, uri).await;
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
+        let res = call(app, Method::GET, "/assets/x.js").await;
+        assert_eq!(res.status(), StatusCode::OK);
     }
 
     #[tokio::test]

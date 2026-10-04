@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+// Keep in sync with the `#[folder]` path in src/spa.rs.
 fn main() {
     println!("cargo:rerun-if-changed=../../ui/dist");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_EMBED_UI");
