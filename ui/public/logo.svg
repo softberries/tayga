@@ -1,0 +1,146 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Tayga">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2B6CB0"/>
+      <stop offset="1" stop-color="#7CC4FF"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.56" cy="0.42" r="0.55">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.38"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="brown" x1="0.85" y1="0" x2="0.15" y2="1">
+      <stop offset="0" stop-color="#8A5530"/>
+      <stop offset="0.55" stop-color="#5C3720"/>
+      <stop offset="1" stop-color="#3A2012"/>
+    </linearGradient>
+    <linearGradient id="earfill" x1="0.9" y1="0" x2="0.2" y2="1">
+      <stop offset="0" stop-color="#6A4024"/>
+      <stop offset="1" stop-color="#2E180D"/>
+    </linearGradient>
+    <linearGradient id="white" x1="0.7" y1="0" x2="0.3" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#D6CDBD"/>
+    </linearGradient>
+    <linearGradient id="jaw" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#D9D0C0"/>
+      <stop offset="1" stop-color="#F3EEE4"/>
+    </linearGradient>
+    <radialGradient id="iris" cx="0.5" cy="0.62" r="0.6">
+      <stop offset="0" stop-color="#D99A4A"/>
+      <stop offset="0.7" stop-color="#8A5221"/>
+      <stop offset="1" stop-color="#4A2A10"/>
+    </radialGradient>
+    <radialGradient id="nose" cx="0.4" cy="0.3" r="0.8">
+      <stop offset="0" stop-color="#5A4038"/>
+      <stop offset="0.5" stop-color="#2A1812"/>
+      <stop offset="1" stop-color="#120906"/>
+    </radialGradient>
+    <linearGradient id="collar" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFC45C"/>
+      <stop offset="1" stop-color="#E08A1E"/>
+    </linearGradient>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="9"/></filter>
+    <filter id="softer" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="16"/></filter>
+
+    <clipPath id="frame"><rect width="512" height="512" rx="150"/></clipPath>
+    <path id="body" d="M160 235C125 290 95 380 80 512L372 512C382 450 374 384 348 338C336 316 324 302 312 290Z"/>
+    <clipPath id="body-clip"><use href="#body"/></clipPath>
+    <path id="skull" d="M168 236C160 160 210 108 276 110C316 112 340 138 348 168C352 184 350 200 340 214C320 250 290 284 250 292C205 296 172 275 168 236Z"/>
+    <clipPath id="skull-clip"><use href="#skull"/></clipPath>
+    <path id="muzzle" d="M326 166C350 174 372 184 392 190C414 196 430 206 434 222C437 236 430 248 420 252C412 266 396 274 376 276C350 280 322 276 300 262C288 238 298 192 326 166Z"/>
+    <clipPath id="muzzle-clip"><use href="#muzzle"/></clipPath>
+    <path id="earshape" d="M222 132C190 128 160 160 150 210C140 260 138 310 152 345C160 364 178 372 190 360C198 372 214 372 222 356C232 364 246 354 246 336C250 290 262 220 258 170C256 148 244 134 222 132Z"/>
+    <clipPath id="ear-clip"><use href="#earshape"/></clipPath>
+  </defs>
+
+  <rect width="512" height="512" rx="150" fill="url(#bg)"/>
+  <g clip-path="url(#frame)">
+    <rect width="512" height="512" fill="url(#glow)"/>
+    <g transform="translate(-44 -50) scale(1.14)">
+
+    <!-- chest and neck -->
+    <use href="#body" fill="url(#white)"/>
+    <g clip-path="url(#body-clip)">
+      <path d="M150 230C110 300 85 400 70 520L214 520C198 452 226 396 212 338C204 306 222 272 252 258Z" fill="url(#brown)"/>
+      <g fill="#4A2C1A">
+        <circle cx="246" cy="352" r="3"/><circle cx="268" cy="366" r="2.5"/><circle cx="292" cy="356" r="3.5"/>
+        <circle cx="316" cy="372" r="2.5"/><circle cx="336" cy="360" r="3"/><circle cx="254" cy="388" r="2.5"/>
+        <circle cx="280" cy="398" r="3"/><circle cx="304" cy="390" r="2"/><circle cx="328" cy="402" r="3.5"/>
+        <circle cx="352" cy="392" r="2.5"/><circle cx="238" cy="414" r="3"/><circle cx="262" cy="428" r="2.5"/>
+        <circle cx="290" cy="424" r="3"/><circle cx="314" cy="436" r="2.5"/><circle cx="340" cy="430" r="3"/>
+        <circle cx="358" cy="444" r="2.5"/><circle cx="244" cy="456" r="3.5"/><circle cx="272" cy="462" r="2.5"/>
+        <circle cx="298" cy="458" r="3"/><circle cx="324" cy="470" r="3"/><circle cx="348" cy="476" r="2.5"/>
+        <circle cx="232" cy="486" r="2.5"/><circle cx="258" cy="494" r="3"/><circle cx="286" cy="490" r="2.5"/>
+        <circle cx="310" cy="500" r="3"/><circle cx="338" cy="504" r="2.5"/><circle cx="362" cy="416" r="2"/>
+        <ellipse cx="300" cy="412" rx="9" ry="6"/><ellipse cx="332" cy="452" rx="7" ry="5"/><ellipse cx="262" cy="474" rx="8" ry="5"/>
+      </g>
+      <ellipse cx="262" cy="304" rx="96" ry="26" fill="#1A0F08" opacity="0.38" filter="url(#soft)"/>
+      <!-- collar -->
+      <path d="M150 292C196 334 276 340 334 312L340 332C278 362 190 356 140 314Z" fill="url(#collar)"/>
+      <path d="M152 296C198 336 276 342 334 316" fill="none" stroke="#FFE2A6" stroke-width="3" opacity="0.8"/>
+      <path d="M360 330C374 380 380 440 372 512L330 512C350 450 356 390 344 340Z" fill="#B8AD9A" opacity="0.35" filter="url(#soft)"/>
+    </g>
+    <circle cx="306" cy="348" r="13" fill="#F2B544" stroke="#B9741A" stroke-width="2.5"/>
+    <circle cx="302" cy="344" r="4" fill="#FFE9B8"/>
+
+    <!-- lower jaw -->
+    <path d="M308 262C338 278 380 280 410 262C404 280 380 290 352 290C328 290 312 282 306 270Z" fill="url(#jaw)"/>
+
+    <!-- skull and cheek -->
+    <use href="#skull" fill="url(#brown)"/>
+    <g clip-path="url(#skull-clip)">
+      <ellipse cx="300" cy="140" rx="60" ry="34" fill="#C58A55" opacity="0.35" filter="url(#softer)"/>
+      <ellipse cx="230" cy="290" rx="80" ry="30" fill="#1A0F08" opacity="0.35" filter="url(#softer)"/>
+    </g>
+
+    <!-- muzzle -->
+    <use href="#muzzle" fill="url(#white)"/>
+    <g clip-path="url(#muzzle-clip)">
+      <ellipse cx="300" cy="216" rx="26" ry="64" fill="#5C3720" opacity="0.55" filter="url(#soft)"/>
+      <ellipse cx="366" cy="282" rx="70" ry="16" fill="#8E8271" opacity="0.45" filter="url(#soft)"/>
+      <g fill="#4A2C1A">
+        <circle cx="338" cy="196" r="2.5"/><circle cx="352" cy="208" r="3"/><circle cx="368" cy="200" r="2"/>
+        <circle cx="382" cy="212" r="2.5"/><circle cx="398" cy="206" r="2"/><circle cx="342" cy="224" r="2.5"/>
+        <circle cx="360" cy="230" r="3"/><circle cx="378" cy="232" r="2"/><circle cx="394" cy="226" r="2.5"/>
+        <circle cx="332" cy="244" r="2"/><circle cx="350" cy="250" r="2.5"/><circle cx="370" cy="252" r="3"/>
+        <circle cx="388" cy="248" r="2"/><circle cx="404" cy="242" r="2.5"/><circle cx="326" cy="212" r="2"/>
+        <circle cx="344" cy="264" r="2"/><circle cx="364" cy="266" r="2"/><circle cx="410" cy="226" r="2"/>
+        <ellipse cx="372" cy="216" rx="6" ry="4"/>
+      </g>
+    </g>
+    <path d="M420 252C390 268 350 270 318 258C312 256 308 250 310 244" fill="none" stroke="#4A2C1A" stroke-width="3.5" stroke-linecap="round"/>
+
+    <!-- nose -->
+    <path d="M406 204C412 192 438 194 444 210C448 224 440 236 428 236C414 236 400 220 406 204Z" fill="url(#nose)"/>
+    <ellipse cx="422" cy="205" rx="9" ry="4" fill="#FFFFFF" opacity="0.45" transform="rotate(12 422 205)"/>
+    <ellipse cx="436" cy="222" rx="3" ry="4.5" fill="#000000" opacity="0.6"/>
+
+    <!-- eye -->
+    <g transform="translate(-17 -1)">
+    <ellipse cx="300" cy="180" rx="21" ry="23" fill="#2A160B"/>
+    <ellipse cx="301" cy="181" rx="18" ry="20" fill="#FBF8F2"/>
+    <circle cx="305" cy="183" r="14.5" fill="url(#iris)"/>
+    <circle cx="306" cy="184" r="8" fill="#0E0705"/>
+    <circle cx="299" cy="175" r="5" fill="#FFFFFF"/>
+    <circle cx="312" cy="191" r="2.2" fill="#FFFFFF" opacity="0.85"/>
+    <path d="M279 172C284 156 312 152 323 168" fill="none" stroke="#2A160B" stroke-width="5" stroke-linecap="round"/>
+    <path d="M278 146C290 134 312 134 326 146" fill="none" stroke="#8A5530" stroke-width="7" stroke-linecap="round"/>
+    </g>
+
+    <!-- ear -->
+    <use href="#earshape" fill="#120A05" opacity="0.4" transform="translate(10 8)" filter="url(#soft)"/>
+    <use href="#earshape" fill="url(#earfill)"/>
+    <g clip-path="url(#ear-clip)">
+      <ellipse cx="236" cy="170" rx="26" ry="60" fill="#9A6236" opacity="0.4" filter="url(#soft)"/>
+      <g fill="none" stroke="#8A5530" stroke-width="5" stroke-linecap="round" opacity="0.85">
+        <path d="M176 200C188 218 168 236 182 256"/>
+        <path d="M208 190C222 210 200 230 216 252"/>
+        <path d="M236 214C246 232 230 248 240 268"/>
+        <path d="M166 268C178 286 160 302 172 322"/>
+        <path d="M198 274C212 294 190 312 204 334"/>
+        <path d="M228 288C238 304 224 320 232 338"/>
+      </g>
+    </g>
+    </g>
+  </g>
+</svg>

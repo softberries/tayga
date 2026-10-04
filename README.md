@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="ui/public/logo.jpg" alt="Tayga logo: a brown and white ticked German spaniel in profile" width="180">
+</p>
+
 # Tayga
 
 Tayga turns OpenTelemetry traces and logs into "error stories". For each failing or slow request it shows the root-cause span, the request path across services, the critical path, a diff against the endpoint's normal baseline, and the related logs. Stories are grouped by fingerprint, so one underlying problem shows up as one group rather than as hundreds of traces.

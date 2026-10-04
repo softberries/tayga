@@ -33,12 +33,13 @@ export function Rail() {
         aria-label="Main"
         className="sticky top-0 flex h-dvh w-[68px] flex-col items-center gap-1.5 py-4 max-sm:static max-sm:h-auto max-sm:w-full max-sm:flex-row max-sm:justify-center max-sm:py-2"
       >
-        <div
-          aria-hidden
-          className="tg-brand mb-3.5 flex size-[34px] items-center justify-center rounded-field font-bold text-on-accent shadow-brand max-sm:mb-0 max-sm:mr-3"
-        >
-          T
-        </div>
+        <img
+          src="/logo-mark.png"
+          alt=""
+          width={34}
+          height={34}
+          className="mb-3.5 size-[34px] rounded-field object-cover shadow-brand max-sm:mb-0 max-sm:mr-3"
+        />
         {SECTIONS.map(({ to, label, icon: Icon, match }) => {
           const active = match(path)
           return (

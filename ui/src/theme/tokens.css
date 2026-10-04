@@ -423,9 +423,6 @@
     background-repeat: no-repeat;
     animation: tg-shimmer 1.4s ease-in-out infinite;
   }
-  .tg-brand {
-    background: linear-gradient(135deg, var(--tg-brand-from), var(--tg-brand-to));
-  }
   .tg-cta {
     background: linear-gradient(135deg, var(--tg-cta-from), var(--tg-cta-to));
   }
