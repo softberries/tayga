@@ -149,6 +149,27 @@ impl ChRepo {
         Ok(merge_buckets(groups, rows, step))
     }
 
+    /// The subset of `trace_ids` that has an error story (story_id equals trace_id).
+    async fn story_ids_among<'a>(
+        &self,
+        trace_ids: impl Iterator<Item = &'a str>,
+    ) -> anyhow::Result<HashSet<String>> {
+        let mut traces: Vec<&str> = trace_ids.collect();
+        traces.sort_unstable();
+        traces.dedup();
+        if traces.is_empty() {
+            return Ok(HashSet::new());
+        }
+        Ok(self
+            .client
+            .query("SELECT story_id FROM error_stories FINAL WHERE story_id IN ?")
+            .bind(&traces)
+            .fetch_all::<String>()
+            .await?
+            .into_iter()
+            .collect())
+    }
+
     /// Alerts newest first, resolving which example traces have an error story.
     async fn alerts(
         &self,
@@ -178,23 +199,12 @@ impl ChRepo {
             .bind(template_id)
             .fetch_all()
             .await?;
-        let mut traces: Vec<&str> = rows
-            .iter()
-            .flat_map(|r| r.example_trace_ids.iter().map(String::as_str))
-            .collect();
-        traces.sort_unstable();
-        traces.dedup();
-        let stories: HashSet<String> = if traces.is_empty() {
-            HashSet::new()
-        } else {
-            self.client
-                .query("SELECT story_id FROM error_stories FINAL WHERE story_id IN ?")
-                .bind(&traces)
-                .fetch_all::<String>()
-                .await?
-                .into_iter()
-                .collect()
-        };
+        let stories = self
+            .story_ids_among(
+                rows.iter()
+                    .flat_map(|r| r.example_trace_ids.iter().map(String::as_str)),
+            )
+            .await?;
         Ok(rows
             .into_iter()
             .map(|r| LogAlertView::from_row(r, &stories))
@@ -362,7 +372,7 @@ impl Repo for ChRepo {
             .bind(since_secs)
             .fetch_all()
             .await?;
-        let recent: Vec<TemplateHitView> = self
+        let hits: Vec<TemplateHitRow> = self
             .client
             .query(
                 "SELECT toUnixTimestamp64Nano(ts) AS ts_ns, trace_id, span_id, severity_number \
@@ -372,6 +382,13 @@ impl Repo for ChRepo {
             .bind(template_id)
             .fetch_all()
             .await?;
+        let stories = self
+            .story_ids_among(hits.iter().map(|h| h.trace_id.as_str()))
+            .await?;
+        let recent = hits
+            .into_iter()
+            .map(|h| TemplateHitView::from_row(h, &stories))
+            .collect();
         let alerts = self
             .alerts(MAX_ALERT_AGE_SECS, "", "", template_id, 20)
             .await?;

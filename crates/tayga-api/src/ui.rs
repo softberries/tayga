@@ -1,11 +1,14 @@
 //! Server-rendered pages (spec §10). No JavaScript.
 
-use crate::model::{GroupView, StoryView, TraceLogRow, TraceSpanRow};
+use crate::model::{
+    ExampleTrace, GroupView, LogAlertView, StoryView, TraceLogRow, TraceLogTemplate, TraceSpanRow,
+};
 use crate::params::{
-    bucket_secs, group_filter, parse_fingerprint, parse_hex_id, parse_since, since_or,
+    alert_filter, bucket_secs, group_filter, parse_fingerprint, parse_hex_id, parse_since,
+    since_or, template_filter,
 };
 use crate::repo::Repo;
-use crate::routes::{ApiMetrics, AppState, GroupsQuery, SinceQuery};
+use crate::routes::{AlertsQuery, ApiMetrics, AppState, GroupsQuery, SinceQuery, TemplatesQuery};
 use crate::svg::{WaterfallRow, sparkline, waterfall};
 use askama::Template;
 use askama_web::WebTemplate;
@@ -46,6 +49,9 @@ pub fn ui_router<R: Repo>(repo: Arc<R>, metrics: ApiMetrics, links: UiLinks) -> 
         .route("/groups/{fingerprint}", get(group_page::<R>))
         .route("/stories/{story_id}", get(story_page::<R>))
         .route("/service-map", get(map_page::<R>))
+        .route("/alerts", get(alerts_page::<R>))
+        .route("/templates", get(templates_page::<R>))
+        .route("/templates/{id}", get(template_page::<R>))
         .with_state(UiState {
             app: AppState { repo, metrics },
             links,
@@ -114,6 +120,13 @@ fn url_component(raw: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+fn jaeger_trace_url(links: &UiLinks, trace_id: &str) -> String {
+    format!(
+        "{}/trace/{trace_id}",
+        links.jaeger_url.trim_end_matches('/')
+    )
 }
 
 fn ms(ns: u64) -> String {
@@ -281,12 +294,33 @@ async fn group_page<R: Repo>(
     }
 }
 
+/// Template cell of one log row; `text` is truncated, `full` is the whole template.
+struct TemplateCell {
+    id: String,
+    text: String,
+    full: String,
+    alert: Option<String>,
+}
+
 struct LogView {
     time: String,
     service: String,
     span: String,
     severity: String,
     body: String,
+    template: Option<TemplateCell>,
+}
+
+const TEMPLATE_CELL_CHARS: usize = 80;
+
+/// At most `max` characters, with `…` replacing the cut-off tail.
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 /// One service filter link above the log table; `href` is a relative link to this story.
@@ -356,7 +390,11 @@ fn diff_lines(story: &StoryView) -> Vec<String> {
     out
 }
 
-fn log_view(l: &TraceLogRow, span_names: &HashMap<&str, &str>) -> LogView {
+fn log_view(
+    l: &TraceLogRow,
+    span_names: &HashMap<&str, &str>,
+    templates: &HashMap<&str, &TraceLogTemplate>,
+) -> LogView {
     LogView {
         time: fmt_clock_ms(l.ts_ns),
         service: l.service_name.clone(),
@@ -370,6 +408,12 @@ fn log_view(l: &TraceLogRow, span_names: &HashMap<&str, &str>) -> LogView {
             (true, n) => n.to_string(),
         },
         body: l.body.clone(),
+        template: templates.get(l.log_id.as_str()).map(|t| TemplateCell {
+            id: t.template_id.clone(),
+            text: truncate_chars(&t.template, TEMPLATE_CELL_CHARS),
+            full: t.template.clone(),
+            alert: t.alert.clone(),
+        }),
     }
 }
 
@@ -378,8 +422,11 @@ fn story_logs(
     story_id: &str,
     spans: &[TraceSpanRow],
     logs: &[TraceLogRow],
+    templates: &[TraceLogTemplate],
     filter: &str,
 ) -> (Vec<LogView>, Vec<LogChip>) {
+    let by_log: HashMap<&str, &TraceLogTemplate> =
+        templates.iter().map(|t| (t.log_id.as_str(), t)).collect();
     let span_names: HashMap<&str, &str> = spans
         .iter()
         .map(|s| (s.span_id.as_str(), s.span_name.as_str()))
@@ -406,7 +453,7 @@ fn story_logs(
     let rows = sorted
         .into_iter()
         .filter(|l| filter.is_empty() || l.service_name == filter)
-        .map(|l| log_view(l, &span_names))
+        .map(|l| log_view(l, &span_names, &by_log))
         .collect();
     (rows, chips)
 }
@@ -440,7 +487,19 @@ async fn story_page<R: Repo>(
         }
     };
     let critical: HashSet<String> = story.critical_span_ids().into_iter().collect();
-    let (logs, log_chips) = story_logs(&id, &trace.spans, &trace.logs, &log_filter);
+    // Templates are an enhancement: when the lookup fails the column shows dashes.
+    let templates = if trace.logs.is_empty() {
+        Vec::new()
+    } else {
+        match s.app.repo.trace_log_templates(&story.trace_id).await {
+            Ok(t) => t,
+            Err(e) => {
+                s.app.unavailable(e);
+                Vec::new()
+            }
+        }
+    };
+    let (logs, log_chips) = story_logs(&id, &trace.spans, &trace.logs, &templates, &log_filter);
     let trace_service_count = trace
         .spans
         .iter()
@@ -455,11 +514,7 @@ async fn story_page<R: Repo>(
         duration_ms: ms(story.duration_ns),
         span_count: story.span_count,
         flags: story.flags.clone(),
-        jaeger_link: format!(
-            "{}/trace/{}",
-            s.links.jaeger_url.trim_end_matches('/'),
-            story.trace_id
-        ),
+        jaeger_link: jaeger_trace_url(&s.links, &story.trace_id),
         fingerprint: story.fingerprint.clone(),
         rows: waterfall(&trace.spans, &critical, &story.root_cause.span_id),
         diff_lines: diff_lines(&story),
@@ -529,11 +584,224 @@ async fn map_page<R: Repo>(
     }
 }
 
+/// A trace reference: the story page when a story exists, otherwise the Jaeger trace.
+struct TraceLink {
+    label: String,
+    href: String,
+}
+
+fn trace_link(links: &UiLinks, trace_id: &str, story_id: Option<&str>) -> TraceLink {
+    TraceLink {
+        label: trace_id.chars().take(8).collect(),
+        href: match story_id {
+            Some(id) => format!("/stories/{id}"),
+            None => jaeger_trace_url(links, trace_id),
+        },
+    }
+}
+
+struct AlertRowView {
+    kind: String,
+    service: String,
+    template_id: String,
+    template: String,
+    counts: String,
+    started: String,
+    last_seen: String,
+    active: bool,
+    examples: Vec<TraceLink>,
+}
+
+fn alert_row(a: &LogAlertView, links: &UiLinks) -> AlertRowView {
+    AlertRowView {
+        kind: a.kind.clone(),
+        service: a.service.clone(),
+        template_id: a.template_id.clone(),
+        template: a.template.clone(),
+        counts: if a.kind == "spike" {
+            format!("{} vs {:.1}", a.peak_count, a.baseline_per_window)
+        } else {
+            "—".to_string()
+        },
+        started: fmt_time(a.started_at_ns),
+        last_seen: fmt_time(a.last_at_ns),
+        active: a.active,
+        examples: a
+            .example_traces
+            .iter()
+            .map(|ExampleTrace { trace_id, story_id }| {
+                trace_link(links, trace_id, story_id.as_deref())
+            })
+            .collect(),
+    }
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "alerts.html")]
+struct AlertsPage {
+    since: String,
+    kind: String,
+    service: String,
+    rows: Vec<AlertRowView>,
+}
+
+async fn alerts_page<R: Repo>(
+    State(s): State<UiState<R>>,
+    q: Result<Query<AlertsQuery>, QueryRejection>,
+) -> Response {
+    let Query(q) = match q {
+        Ok(q) => q,
+        Err(r) => return error_page(StatusCode::BAD_REQUEST, r.body_text()),
+    };
+    let f = match alert_filter(q.since.as_deref(), q.kind.as_deref(), q.service.as_deref()) {
+        Ok(f) => f,
+        Err(e) => return error_page(StatusCode::BAD_REQUEST, e),
+    };
+    match s.app.repo.log_alerts(&f).await {
+        Ok(alerts) => AlertsPage {
+            since: since_or(q.since.as_deref(), "24h").to_string(),
+            kind: f.kind.clone().unwrap_or_default(),
+            service: f.service.clone().unwrap_or_default(),
+            rows: alerts.iter().map(|a| alert_row(a, &s.links)).collect(),
+        }
+        .into_response(),
+        Err(e) => {
+            s.app.unavailable(e);
+            error_page(StatusCode::SERVICE_UNAVAILABLE, "storage unavailable")
+        }
+    }
+}
+
+struct TemplateRowView {
+    template_id: String,
+    service: String,
+    template: String,
+    count: u64,
+    first_seen: String,
+    alerting: bool,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "templates.html")]
+struct TemplatesPage {
+    since: String,
+    since_param: String,
+    service: String,
+    q: String,
+    rows: Vec<TemplateRowView>,
+}
+
+async fn templates_page<R: Repo>(
+    State(s): State<UiState<R>>,
+    q: Result<Query<TemplatesQuery>, QueryRejection>,
+) -> Response {
+    let Query(q) = match q {
+        Ok(q) => q,
+        Err(r) => return error_page(StatusCode::BAD_REQUEST, r.body_text()),
+    };
+    let f = match template_filter(q.since.as_deref(), q.service.as_deref(), q.q.as_deref()) {
+        Ok(f) => f,
+        Err(e) => return error_page(StatusCode::BAD_REQUEST, e),
+    };
+    match s.app.repo.log_templates(&f).await {
+        Ok(templates) => {
+            let since = since_or(q.since.as_deref(), "1h").to_string();
+            TemplatesPage {
+                since_param: url_component(&since),
+                since,
+                service: f.service.clone().unwrap_or_default(),
+                q: f.q.clone().unwrap_or_default(),
+                rows: templates
+                    .into_iter()
+                    .map(|t| TemplateRowView {
+                        first_seen: fmt_time(t.first_seen_ns),
+                        template_id: t.template_id,
+                        service: t.service,
+                        template: t.template,
+                        count: t.count,
+                        alerting: t.alerting,
+                    })
+                    .collect(),
+            }
+            .into_response()
+        }
+        Err(e) => {
+            s.app.unavailable(e);
+            error_page(StatusCode::SERVICE_UNAVAILABLE, "storage unavailable")
+        }
+    }
+}
+
+struct HitView {
+    time: String,
+    link: TraceLink,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "template.html")]
+struct TemplatePage {
+    since: String,
+    template: String,
+    service: String,
+    alerting: bool,
+    count: u64,
+    first_seen: String,
+    last_seen: String,
+    sample: String,
+    spark: String,
+    hits: Vec<HitView>,
+    alerts: Vec<AlertRowView>,
+}
+
+async fn template_page<R: Repo>(
+    State(s): State<UiState<R>>,
+    Path(id): Path<String>,
+    q: Result<Query<SinceQuery>, QueryRejection>,
+) -> Response {
+    let Query(q) = match q {
+        Ok(q) => q,
+        Err(r) => return error_page(StatusCode::BAD_REQUEST, r.body_text()),
+    };
+    let since_raw = since_or(q.since.as_deref(), "24h").to_string();
+    let (Ok(id), Ok(since)) = (parse_fingerprint(&id), parse_since(&since_raw)) else {
+        return error_page(StatusCode::BAD_REQUEST, "invalid template id or since");
+    };
+    match s.app.repo.log_template(&id, since).await {
+        Ok(Some(d)) => TemplatePage {
+            since: since_raw,
+            spark: SparkWindow::new(since).render(&d.buckets, 600, 60),
+            template: d.template.template,
+            service: d.template.service,
+            alerting: d.template.alerting,
+            count: d.template.count,
+            first_seen: fmt_time(d.template.first_seen_ns),
+            last_seen: fmt_time(d.template.last_seen_ns),
+            sample: d.sample,
+            hits: d
+                .recent
+                .iter()
+                .map(|h| HitView {
+                    time: fmt_time(h.ts_ns),
+                    link: trace_link(&s.links, &h.trace_id, h.story_id.as_deref()),
+                })
+                .collect(),
+            alerts: d.alerts.iter().map(|a| alert_row(a, &s.links)).collect(),
+        }
+        .into_response(),
+        Ok(None) => error_page(StatusCode::NOT_FOUND, "no such log template"),
+        Err(e) => {
+            s.app.unavailable(e);
+            error_page(StatusCode::SERVICE_UNAVAILABLE, "storage unavailable")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::tests::record;
     use crate::model::*;
+    use crate::params::{AlertFilter, GroupFilter, TemplateFilter};
     use crate::testrepo::FakeRepo;
     use axum::body::Body;
     use axum::http::Request;
@@ -846,9 +1114,9 @@ mod tests {
         let mut l = log(0, "s", "frontend-proxy", "GET /");
         l.severity_text = String::new();
         l.severity_number = 0;
-        assert_eq!(log_view(&l, &names).severity, "—");
+        assert_eq!(log_view(&l, &names, &HashMap::new()).severity, "—");
         l.severity_number = 17;
-        assert_eq!(log_view(&l, &names).severity, "17");
+        assert_eq!(log_view(&l, &names, &HashMap::new()).severity, "17");
     }
 
     #[test]
@@ -961,5 +1229,328 @@ mod tests {
         let (status, body) = html(FakeRepo::default(), "/?service=%22%3E%3Cscript%3E").await;
         assert_eq!(status, StatusCode::OK);
         assert!(!body.contains("\"><script>"));
+    }
+
+    fn alert_view(kind: &str, traces: Vec<ExampleTrace>) -> LogAlertView {
+        LogAlertView {
+            alert_id: "a1".into(),
+            kind: kind.into(),
+            template_id: "17393964261140422938".into(),
+            service: "payment".into(),
+            template: "Payment request failed <*>".into(),
+            started_at_ns: 1_700_000_000_000_000_000,
+            last_at_ns: 1_700_000_060_000_000_000,
+            window_count: 40,
+            peak_count: 42,
+            baseline_per_window: 1.25,
+            active: true,
+            example_traces: traces,
+        }
+    }
+
+    fn example_traces() -> Vec<ExampleTrace> {
+        vec![
+            ExampleTrace {
+                trace_id: "ab".repeat(16),
+                story_id: Some("ab".repeat(16)),
+            },
+            ExampleTrace {
+                trace_id: "cd".repeat(16),
+                story_id: None,
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn alerts_page_empty_state_and_bad_params() {
+        let (status, body) = html(FakeRepo::default(), "/alerts").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("No log alerts in this window."));
+        assert!(body.contains("name=\"since\" value=\"24h\""));
+        assert!(body.contains("href=\"/alerts\">Log alerts</a>"));
+        for uri in [
+            "/alerts?kind=error",
+            "/alerts?since=8d",
+            "/alerts?since=1h&since=2h",
+        ] {
+            let (status, body) = html(FakeRepo::default(), uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert!(body.contains("<html"));
+        }
+        let repo = FakeRepo {
+            fail: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            html(repo, "/alerts").await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn alerts_page_lists_alerts_and_prefers_story_links() {
+        let repo = FakeRepo {
+            alerts: vec![
+                alert_view("spike", example_traces()),
+                alert_view("new", vec![]),
+            ],
+            ..Default::default()
+        };
+        let (status, body) = html(repo, "/alerts?kind=spike&service=payment").await;
+        assert_eq!(status, StatusCode::OK);
+        // The template is escaped, the counts are one-decimal, `new` shows a dash.
+        assert!(
+            body.contains("Payment request failed &#60;*&#62;")
+                || body.contains("Payment request failed &lt;*&gt;")
+        );
+        assert!(body.contains("42 vs 1.2") || body.contains("42 vs 1.3"));
+        assert!(body.contains("<span class=\"badge spike\">spike</span>"));
+        assert!(body.contains("<span class=\"badge new\">new</span>"));
+        assert!(body.contains("<td>—</td>"));
+        assert!(body.contains("2023-11-14 22:13:20 UTC"));
+        assert!(body.contains("<span class=\"badge active\">active</span>"));
+        assert!(body.contains("/templates/17393964261140422938"));
+        // Story when one exists, Jaeger otherwise.
+        assert!(body.contains(&format!("href=\"/stories/{}\"", "ab".repeat(16))));
+        assert!(body.contains(&format!(
+            "href=\"http://localhost:8080/jaeger/ui/trace/{}\"",
+            "cd".repeat(16)
+        )));
+        assert!(!body.contains(&format!("/jaeger/ui/trace/{}\"", "ab".repeat(16))));
+        assert!(body.contains("<option value=\"spike\" selected>"));
+    }
+
+    #[tokio::test]
+    async fn alerts_filters_reach_the_repo() {
+        let repo = Arc::new(FakeRepo::default());
+        let app = ui_router(repo.clone(), ApiMetrics::default(), links());
+        let res = app
+            .oneshot(
+                Request::get("/alerts?since=5m&kind=new&service=cart")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let f = repo.last_alert_filter.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            (f.since_secs, f.kind.as_deref(), f.service.as_deref()),
+            (300, Some("new"), Some("cart"))
+        );
+    }
+
+    fn template_view(count: u64, alerting: bool) -> LogTemplateView {
+        LogTemplateView {
+            template_id: "17393964261140422938".into(),
+            service: "payment".into(),
+            template: "Found <script>alert(1)</script> products".into(),
+            count,
+            first_seen_ns: 1_700_000_000_000_000_000,
+            last_seen_ns: 1_700_000_060_000_000_000,
+            max_severity: 17,
+            alerting,
+        }
+    }
+
+    #[tokio::test]
+    async fn templates_page_renders_rows_and_escapes() {
+        let repo = FakeRepo {
+            templates: vec![template_view(9, true)],
+            ..Default::default()
+        };
+        let (status, body) = html(repo, "/templates?since=30m&q=Found").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("<script>alert(1)</script>"));
+        assert!(
+            body.contains("&#60;script&#62;alert(1)") || body.contains("&lt;script&gt;alert(1)")
+        );
+        assert!(body.contains("href=\"/templates/17393964261140422938?since=30m\""));
+        assert!(body.contains("<span class=\"badge alerting\">alerting</span>"));
+        assert!(body.contains("<td>9</td>"));
+        assert!(body.contains("name=\"q\" value=\"Found\""));
+    }
+
+    #[tokio::test]
+    async fn templates_page_empty_default_and_bad_params() {
+        let (status, body) = html(FakeRepo::default(), "/templates").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("No log templates in this window."));
+        assert!(body.contains("name=\"since\" value=\"1h\""));
+        let long = "x".repeat(201);
+        for uri in [
+            "/templates?since=0m".to_string(),
+            format!("/templates?q={long}"),
+        ] {
+            let (status, body) = html(FakeRepo::default(), &uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(body.contains("<html"));
+        }
+        // A hostile search term is attribute-escaped and not reflected into links.
+        let (_, body) = html(FakeRepo::default(), "/templates?q=%22%3E%3Cscript%3E").await;
+        assert!(!body.contains("\"><script>"));
+    }
+
+    fn template_detail(hits: Vec<TemplateHitView>) -> FakeRepo {
+        FakeRepo {
+            template_detail: Some(LogTemplateDetail {
+                template: template_view(3, true),
+                sample: "Found <b>3</b> products".into(),
+                bucket_secs: 60,
+                buckets: vec![(1_700_000_040, 3)],
+                recent: hits,
+                alerts: vec![alert_view("spike", example_traces())],
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn template_page_renders_sparkline_hits_and_alerts() {
+        let hit = |trace: &str, story: Option<&str>| TemplateHitView {
+            ts_ns: 1_700_000_000_000_000_000,
+            trace_id: trace.into(),
+            span_id: "01".repeat(8),
+            severity_number: 17,
+            story_id: story.map(str::to_string),
+        };
+        let repo = template_detail(vec![
+            hit(&"ab".repeat(16), Some(&"ab".repeat(16))),
+            hit(&"ef".repeat(16), None),
+        ]);
+        let (status, body) = html(repo, "/templates/17393964261140422938").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<svg"));
+        assert!(body.contains("in the last 24h") && body.contains("3 hits"));
+        // Sample and template are escaped.
+        assert!(!body.contains("<b>3</b>") && !body.contains("<script>alert(1)"));
+        assert!(body.contains("&#60;b&#62;3") || body.contains("&lt;b&gt;3"));
+        assert!(body.contains(&format!("href=\"/stories/{}\"", "ab".repeat(16))));
+        assert!(body.contains(&format!(
+            "href=\"http://localhost:8080/jaeger/ui/trace/{}\"",
+            "ef".repeat(16)
+        )));
+        assert!(body.contains("<span class=\"badge spike\">spike</span>"));
+        assert!(body.contains("42 vs 1.2") || body.contains("42 vs 1.3"));
+    }
+
+    #[tokio::test]
+    async fn template_page_404_and_bad_params() {
+        assert_eq!(
+            html(FakeRepo::default(), "/templates/17393964261140422938")
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        for uri in ["/templates/zz", "/templates/17393964261140422938?since=8d"] {
+            let (status, body) = html(FakeRepo::default(), uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert!(body.contains("<html"));
+        }
+    }
+
+    fn template_for(log_id: &str, template: &str, alert: Option<&str>) -> TraceLogTemplate {
+        TraceLogTemplate {
+            log_id: log_id.into(),
+            template_id: "17393964261140422938".into(),
+            template: template.into(),
+            alert: alert.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn story_page_shows_template_column_with_badge() {
+        let mut repo = logs_repo();
+        repo.trace.as_mut().unwrap().logs[0].log_id = "77".into();
+        repo.trace_templates = vec![template_for(
+            "77",
+            "order <script>x</script> placed",
+            Some("spike"),
+        )];
+        let (status, body) = html(repo, &format!("/stories/{}", "ab".repeat(16))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<th>Template</th>"));
+        assert!(body.contains("href=\"/templates/17393964261140422938\""));
+        assert!(!body.contains("<script>x</script>"));
+        assert!(body.contains("<span class=\"badge spike\">spike</span>"));
+        // The other logs have no template.
+        assert!(body.contains("<span class=\"muted\">—</span>"));
+    }
+
+    #[test]
+    fn long_templates_are_truncated_to_80_chars() {
+        let t = template_for("1", &"é".repeat(100), None);
+        let map: HashMap<&str, &TraceLogTemplate> = [("1", &t)].into();
+        let v = log_view(&log(0, "s", "svc", "b"), &HashMap::new(), &map);
+        let cell = v.template.unwrap();
+        assert_eq!(cell.text.chars().count(), 80);
+        assert!(cell.text.ends_with('…'));
+        assert_eq!(cell.full.chars().count(), 100);
+        assert_eq!(truncate_chars("short", 80), "short");
+    }
+
+    #[tokio::test]
+    async fn story_page_survives_template_lookup_failure() {
+        // The repo fails on every call, so exercise the handler's fallback through a repo
+        // that only fails the template lookup.
+        struct FlakyTemplates(FakeRepo);
+        impl Repo for FlakyTemplates {
+            async fn story_groups(&self, f: &GroupFilter) -> anyhow::Result<Vec<GroupView>> {
+                self.0.story_groups(f).await
+            }
+            async fn story_group(&self, fp: &str, s: u32) -> anyhow::Result<Option<GroupDetail>> {
+                self.0.story_group(fp, s).await
+            }
+            async fn story(&self, id: &str) -> anyhow::Result<Option<StoryView>> {
+                self.0.story(id).await
+            }
+            async fn trace(&self, id: &str) -> anyhow::Result<TraceView> {
+                self.0.trace(id).await
+            }
+            async fn service_map(&self, s: u32) -> anyhow::Result<Vec<EdgeView>> {
+                self.0.service_map(s).await
+            }
+            async fn log_alerts(&self, f: &AlertFilter) -> anyhow::Result<Vec<LogAlertView>> {
+                self.0.log_alerts(f).await
+            }
+            async fn log_templates(
+                &self,
+                f: &TemplateFilter,
+            ) -> anyhow::Result<Vec<LogTemplateView>> {
+                self.0.log_templates(f).await
+            }
+            async fn log_template(
+                &self,
+                id: &str,
+                s: u32,
+            ) -> anyhow::Result<Option<LogTemplateDetail>> {
+                self.0.log_template(id, s).await
+            }
+            async fn trace_log_templates(&self, _: &str) -> anyhow::Result<Vec<TraceLogTemplate>> {
+                anyhow::bail!("templates down")
+            }
+        }
+        let metrics = ApiMetrics::default();
+        let app = ui_router(
+            Arc::new(FlakyTemplates(logs_repo())),
+            metrics.clone(),
+            links(),
+        );
+        let res = app
+            .oneshot(
+                Request::get(format!("/stories/{}", "ab".repeat(16)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 22)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("order placed") && body.contains("<th>Template</th>"));
+        assert!(!body.contains("href=\"/templates/"));
+        assert_eq!(metrics.repo_errors.get(), 1);
     }
 }

@@ -302,11 +302,34 @@ pub struct TemplateDetailRow {
 }
 
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
+pub struct TemplateHitRow {
+    pub ts_ns: i64,
+    pub trace_id: String,
+    pub span_id: String,
+    pub severity_number: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TemplateHitView {
     pub ts_ns: i64,
     pub trace_id: String,
     pub span_id: String,
     pub severity_number: u8,
+    /// Set when an error story exists for the trace (story_id equals trace_id).
+    pub story_id: Option<String>,
+}
+
+impl TemplateHitView {
+    /// `stories` holds the story ids that exist among the hit traces.
+    pub fn from_row(r: TemplateHitRow, stories: &HashSet<String>) -> Self {
+        Self {
+            story_id: stories.contains(&r.trace_id).then(|| r.trace_id.clone()),
+            ts_ns: r.ts_ns,
+            trace_id: r.trace_id,
+            span_id: r.span_id,
+            severity_number: r.severity_number,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]

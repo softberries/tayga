@@ -446,6 +446,12 @@ async fn reads_seeded_log_templates_alerts_and_trace_links() {
     assert_eq!(d.recent.len(), 3, "recent ignores the window, one per log");
     assert!(d.recent.windows(2).all(|w| w[0].ts_ns >= w[1].ts_ns));
     assert_eq!(d.recent[0].trace_id, trace_plain);
+    assert!(
+        d.recent
+            .iter()
+            .all(|h| h.story_id.is_some() == (h.trace_id == trace_story)),
+        "only the story trace's hits carry a story id"
+    );
     assert_eq!(d.alerts.len(), 2);
     assert_eq!(d.alerts[0].alert_id, ids[0]);
     assert!(r.log_template("1", 3600).await.unwrap().is_none());

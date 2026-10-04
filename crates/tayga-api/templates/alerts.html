@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Log alerts · Tayga{% endblock %}
+{% block content %}
+<form class="filters" method="get" action="/alerts">
+  <label>Since <input name="since" value="{{ since }}" size="4"></label>
+  <label>Kind <select name="kind">
+    <option value="" {% if kind.is_empty() %}selected{% endif %}>all</option>
+    <option value="new" {% if kind == "new" %}selected{% endif %}>new</option>
+    <option value="spike" {% if kind == "spike" %}selected{% endif %}>spike</option>
+  </select></label>
+  <label>Service <input name="service" value="{{ service }}" size="16"></label>
+  <button type="submit">Apply</button>
+</form>
+{% if rows.is_empty() %}
+<div class="empty">No log alerts in this window.</div>
+{% else %}
+<table>
+<tr><th>Kind</th><th>Service</th><th>Template</th><th>Count vs baseline</th><th>Started</th><th>Last seen</th><th>Active</th><th>Examples</th></tr>
+{% for r in rows %}
+<tr>
+  <td><span class="badge {{ r.kind }}">{{ r.kind }}</span></td>
+  <td>{{ r.service }}</td>
+  <td class="mono"><a href="/templates/{{ r.template_id }}">{{ r.template }}</a></td>
+  <td>{{ r.counts }}</td>
+  <td class="muted">{{ r.started }}</td>
+  <td class="muted">{{ r.last_seen }}</td>
+  <td>{% if r.active %}<span class="badge active">active</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+  <td class="mono">{% for e in r.examples %}<a href="{{ e.href }}">{{ e.label }}</a> {% endfor %}</td>
+</tr>
+{% endfor %}
+</table>
+{% endif %}
+{% endblock %}

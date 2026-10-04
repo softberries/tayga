@@ -571,6 +571,7 @@ mod tests {
                     trace_id: "ab".repeat(16),
                     span_id: "01".repeat(8),
                     severity_number: 17,
+                    story_id: None,
                 }],
                 alerts: vec![],
             }),
