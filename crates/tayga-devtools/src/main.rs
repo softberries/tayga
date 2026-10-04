@@ -47,6 +47,20 @@ enum Cmd {
         #[arg(long, default_value = "tayga.signals")]
         topic: String,
     },
+    /// Send one OTLP/HTTP log record to an ingest endpoint and print its trace id.
+    EmitLog {
+        #[arg(long, default_value = "http://localhost:14318")]
+        endpoint: String,
+        #[arg(long)]
+        service: String,
+        #[arg(long)]
+        body: String,
+        /// 32 hex chars; random when omitted.
+        #[arg(long)]
+        trace_id: Option<String>,
+        #[arg(long, default_value_t = 9)]
+        severity: i32,
+    },
 }
 
 #[tokio::main]
@@ -98,6 +112,35 @@ async fn main() -> anyhow::Result<()> {
             gz.finish()?;
             println!("wrote {} envelopes to {}", envelopes.len(), out.display());
         }
+        Cmd::EmitLog {
+            endpoint,
+            service,
+            body,
+            trace_id,
+            severity,
+        } => {
+            let id = match trace_id {
+                Some(hex) => parse_trace_id(&hex)?,
+                None => tayga_devtools::emit::random_trace_id(),
+            };
+            tayga_devtools::emit::emit_log(&endpoint, &service, &body, &id, severity).await?;
+            println!(
+                "{}",
+                id.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            );
+        }
     }
     Ok(())
+}
+
+fn parse_trace_id(hex: &str) -> anyhow::Result<[u8; 16]> {
+    anyhow::ensure!(
+        hex.len() == 32 && hex.is_ascii(),
+        "trace id must be 32 hex chars"
+    );
+    let mut id = [0u8; 16];
+    for (i, b) in id.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)?;
+    }
+    Ok(id)
 }

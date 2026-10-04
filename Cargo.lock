@@ -1882,6 +1882,7 @@ dependencies = [
  "clap",
  "clickhouse",
  "flate2",
+ "prost",
  "rand 0.10.3",
  "rdkafka",
  "reqwest",

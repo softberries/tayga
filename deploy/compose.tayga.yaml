@@ -23,6 +23,8 @@ services:
     container_name: tayga-ingest
     command: ["tayga-ingest"]
     environment: *tayga-env
+    ports:
+      - "127.0.0.1:14318:4318"
     restart: unless-stopped
     depends_on:
       redpanda:
