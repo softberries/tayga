@@ -86,7 +86,7 @@ services:
     container_name: tayga-prometheus
     command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d"]
     volumes:
-      - ${TAYGA_ROOT}/deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ${TAYGA_ROOT}/deploy/prometheus:/etc/prometheus:ro
     ports:
       - "127.0.0.1:19090:9090"
     restart: unless-stopped
