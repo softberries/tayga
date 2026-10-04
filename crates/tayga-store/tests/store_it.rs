@@ -707,3 +707,86 @@ async fn metric_samples_roundtrip_through_metric_points() {
 
     drop_db(&s, &store).await;
 }
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn metric_buckets_keep_the_last_value_per_series_and_step() {
+    let (s, store) = log_store().await;
+    let step = 60_i64;
+    // The start of a bucket comfortably inside the window, so the points below share it.
+    let now_ms = now_ns() / 1_000_000;
+    let b0 = (now_ms / 1000 - 300) / step * step * 1000;
+    let b1 = b0 + step * 1000;
+    let m = "tayga_writer_rows_inserted_total";
+    let spans = [("kind", "spans")];
+    let logs = [("kind", "logs")];
+    store
+        .insert_metric_samples(&[
+            // Bucket 0: the later sample (15) wins; NaN never wins.
+            sample(b0 + 1_000, "tayga-writer", m, &spans, 10.0),
+            sample(b0 + 30_000, "tayga-writer", m, &spans, 15.0),
+            sample(b0 + 45_000, "tayga-writer", m, &spans, f64::NAN),
+            sample(b0 + 2_000, "tayga-writer", m, &logs, 100.0),
+            // Bucket 1.
+            sample(b1 + 5_000, "tayga-writer", m, &spans, 40.0),
+            sample(b1 + 5_000, "other-job", m, &spans, 7.0),
+            // Outside a 30 min window.
+            sample(now_ms - 7_200_000, "tayga-writer", m, &spans, 1.0),
+        ])
+        .await
+        .unwrap();
+
+    let all = store
+        .metric_buckets(Some("tayga-writer"), m, &[], 1800, 60)
+        .await
+        .unwrap();
+    let pt = |ts_ms, labels: &[(&str, &str)], value| MetricPointRow {
+        ts_ms,
+        job: "tayga-writer".into(),
+        labels: labels
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect(),
+        value,
+    };
+    let mut got = all.clone();
+    got.sort_by(|a, b| (a.ts_ms, &a.labels).cmp(&(b.ts_ms, &b.labels)));
+    assert_eq!(
+        got,
+        vec![
+            pt(b0, &logs, 100.0),
+            pt(b0, &spans, 15.0),
+            pt(b1, &spans, 40.0)
+        ]
+    );
+    assert!(
+        all.windows(2).all(|w| w[0].ts_ms <= w[1].ts_ms),
+        "oldest first"
+    );
+
+    let filtered = store
+        .metric_buckets(None, m, &[("kind".into(), "spans".into())], 1800, 60)
+        .await
+        .unwrap();
+    assert_eq!(filtered.len(), 3, "both jobs, spans only: {filtered:?}");
+    assert!(filtered.iter().any(|p| p.job == "other-job"));
+    // A label value with a quote is bound, not interpolated.
+    assert!(
+        store
+            .metric_buckets(None, m, &[("kind".into(), "' OR 1=1 --".into())], 1800, 60)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let wide = store
+        .metric_buckets(Some("tayga-writer"), m, &[], 3 * 3600, 3600)
+        .await
+        .unwrap();
+    assert!(
+        wide.iter().any(|p| p.value == 1.0),
+        "the 2h-old sample is in a 3h window"
+    );
+    assert!(wide.iter().all(|p| p.ts_ms % 3_600_000 == 0));
+
+    drop_db(&s, &store).await;
+}

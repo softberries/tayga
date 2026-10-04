@@ -62,4 +62,43 @@ impl Store {
         rows.reverse();
         Ok(rows)
     }
+
+    /// The last finite sample of `metric` per series (job and label set) and `step_secs`
+    /// bucket over the last `since_secs` seconds, oldest first. `ts_ms` is the bucket start
+    /// (epoch-aligned), so the series math sees one point per series and step whatever the
+    /// window; at most `MAX_METRIC_POINTS` rows. `labels` keeps only series carrying every
+    /// listed label with that value.
+    pub async fn metric_buckets(
+        &self,
+        job: Option<&str>,
+        metric: &str,
+        labels: &[(String, String)],
+        since_secs: u32,
+        step_secs: u32,
+    ) -> clickhouse::error::Result<Vec<MetricPointRow>> {
+        let job_clause = if job.is_some() { "AND job = ? " } else { "" };
+        let label_clause = "AND labels[?] = ? ".repeat(labels.len());
+        // The inner alias differs from `value` so the WHERE clause reads the column.
+        let sql = format!(
+            "SELECT job, labels, ts_ms, last AS value FROM ( \
+             SELECT toString(job) AS job, labels, \
+             toInt64(toUnixTimestamp(toStartOfInterval(ts, toIntervalSecond(?)))) * 1000 AS ts_ms, \
+             argMax(value, ts) AS last FROM metric_samples \
+             WHERE metric = ? {job_clause}{label_clause}AND isFinite(value) \
+             AND ts > now64(3) - toIntervalSecond(?) GROUP BY job, labels, ts_ms) \
+             ORDER BY ts_ms LIMIT ?"
+        );
+        let mut q = self
+            .client()
+            .query(&sql)
+            .bind(step_secs.max(1))
+            .bind(metric);
+        if let Some(job) = job {
+            q = q.bind(job);
+        }
+        for (k, v) in labels {
+            q = q.bind(k.as_str()).bind(v.as_str());
+        }
+        q.bind(since_secs).bind(MAX_METRIC_POINTS).fetch_all().await
+    }
 }
