@@ -18,7 +18,7 @@ export function AppShell() {
       <div className="flex min-w-0 flex-1 flex-col">
         <Header />
         <OutageBanner />
-        <main id="main" className="flex min-h-0 flex-1 flex-col px-6 py-[18px] max-sm:px-4">
+        <main id="main" className="flex min-h-0 flex-1 flex-col px-6 py-[18px] max-sm:px-4 max-sm:pb-[calc(72px+env(safe-area-inset-bottom,0px))]">
           <Outlet />
         </main>
       </div>

@@ -26,19 +26,19 @@ export function Rail() {
   const path = useLocation({ select: (l) => l.pathname })
   const search = sinceSearch(useSince())
   // The wrapper stretches to the page height and carries the rail's background and border;
-  // the nav inside stays in view (sticky). Phones: a top bar that sticks as a whole.
+  // the nav inside stays in view (sticky). Phones: a bottom bar fixed to the viewport (main gets matching bottom padding).
   return (
-    <div className="shrink-0 border-r border-line bg-rail max-sm:sticky max-sm:top-0 max-sm:border-r-0 max-sm:border-b">
+    <div className="shrink-0 border-r border-line bg-rail max-sm:fixed max-sm:inset-x-0 max-sm:bottom-0 max-sm:z-30 max-sm:border-r-0 max-sm:border-t max-sm:pb-[env(safe-area-inset-bottom,0px)]">
       <nav
         aria-label="Main"
-        className="sticky top-0 flex h-dvh w-[68px] flex-col items-center gap-1.5 py-4 max-sm:static max-sm:h-auto max-sm:w-full max-sm:flex-row max-sm:justify-center max-sm:py-2"
+        className="sticky top-0 flex h-dvh w-[68px] flex-col items-center gap-1.5 py-4 max-sm:static max-sm:h-auto max-sm:w-full max-sm:flex-row max-sm:justify-around max-sm:px-2 max-sm:py-1.5"
       >
         <img
           src="/logo-mark.png"
           alt=""
           width={34}
           height={34}
-          className="mb-3.5 size-[34px] rounded-field object-cover shadow-brand max-sm:mb-0 max-sm:mr-3"
+          className="mb-3.5 size-[34px] rounded-field object-cover shadow-brand max-sm:hidden"
         />
         {SECTIONS.map(({ to, label, icon: Icon, match }) => {
           const active = match(path)

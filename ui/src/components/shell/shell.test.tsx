@@ -194,3 +194,21 @@ describe('routes', () => {
     expect(screen.getByRole('navigation', { name: 'Main' })).toBeInTheDocument()
   })
 })
+
+describe('phone layout', () => {
+  it('the rail is a fixed bottom bar with safe-area padding, 44px targets and kept labels', async () => {
+    const { container } = renderApp('/traces')
+    const nav = await screen.findByRole('navigation', { name: 'Main' })
+    const wrapper = nav.parentElement!
+    for (const c of ['max-sm:fixed', 'max-sm:bottom-0', 'max-sm:inset-x-0', 'max-sm:border-t', 'max-sm:pb-[env(safe-area-inset-bottom,0px)]']) {
+      expect(wrapper.className).toContain(c)
+    }
+    expect(nav.className).toContain('max-sm:flex-row')
+    for (const link of within(nav).getAllByRole('link')) {
+      expect(link.className).toContain('size-11')
+      expect(link).toHaveAttribute('aria-label')
+    }
+    expect(within(nav).getByRole('link', { name: 'Traces' })).toHaveAttribute('aria-current', 'page')
+    expect(container.querySelector('main')!.className).toContain('max-sm:pb-[calc(72px+env(safe-area-inset-bottom,0px))]')
+  })
+})
