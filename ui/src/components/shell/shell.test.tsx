@@ -41,6 +41,22 @@ describe('rail', () => {
     expect(within(nav).getByRole('link', { name: 'Stories' })).not.toHaveAttribute('aria-current')
   })
 
+  it('section links carry only since, not page filters', async () => {
+    renderApp('/traces?since=24h&service=checkout&errors=true')
+    const nav = await screen.findByRole('navigation', { name: 'Main' })
+    for (const link of within(nav).getAllByRole('link')) {
+      expect(link.getAttribute('href')).toMatch(/^\/[a-z]*\?since=24h$/)
+    }
+  })
+
+  it('section links have no query at the default range', async () => {
+    renderApp('/traces?service=checkout')
+    const nav = await screen.findByRole('navigation', { name: 'Main' })
+    for (const link of within(nav).getAllByRole('link')) {
+      expect(link.getAttribute('href')).not.toContain('?')
+    }
+  })
+
   it('stories stays active on a story page', async () => {
     renderApp(`/stories/${TRACE}`)
     const nav = await screen.findByRole('navigation', { name: 'Main' })
@@ -104,7 +120,8 @@ describe('header', () => {
     renderApp('/?since=24h')
     const badge = await screen.findByText('2 services degraded')
     expect(badge).toHaveAttribute('data-kind', 'error')
-    const link = badge.closest('a')
+    const link = screen.getByRole('link', { name: '2 services degraded: payment, shipping' })
+    expect(link).toContainElement(badge)
     expect(link).toHaveAttribute('href', '/map?since=24h')
     expect(link).toHaveAttribute('title', 'payment, shipping')
   })

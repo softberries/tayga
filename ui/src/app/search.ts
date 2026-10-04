@@ -25,3 +25,11 @@ export function validateRootSearch(search: Record<string, unknown>): RootSearch 
 export const HEX32 = /^[0-9a-fA-F]{32}$/
 /** A u64 as decimal digits (template ids, fingerprints). */
 export const U64 = /^[0-9]{1,20}$/
+
+/**
+ * Search for a cross-section link: only the time range travels, so one page's filters never
+ * leak into another section. The default range stays out of the URL.
+ */
+export function sinceSearch(since: Since): RootSearch {
+  return { since: since === DEFAULT_SINCE ? undefined : since }
+}

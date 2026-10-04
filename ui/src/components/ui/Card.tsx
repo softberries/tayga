@@ -1,4 +1,4 @@
-import { motion } from 'motion/react'
+import { m } from 'motion/react'
 import type { HTMLMotionProps } from 'motion/react'
 import type { HTMLAttributes } from 'react'
 import { cx } from '../../lib/cx'
@@ -21,7 +21,7 @@ const variants = {
 
 export function Card({ variant = 'panel', elevated, lift, className, ...rest }: CardProps) {
   return (
-    <motion.div
+    <m.div
       data-variant={variant}
       className={cx(
         variants[variant],

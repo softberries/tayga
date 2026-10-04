@@ -24,7 +24,7 @@ export function CommandTrigger() {
         type="button"
         onClick={() => setOpen(true)}
         aria-keyshortcuts="Meta+K Control+K"
-        className="flex h-9 min-w-0 flex-[0_1_260px] cursor-pointer items-center gap-2 rounded-field border border-field-line bg-field px-2.5 text-muted shadow-inset hover:text-ink"
+        className="flex h-9 min-w-0 flex-[0_1_340px] sm:min-w-[260px] cursor-pointer items-center gap-2 rounded-field border border-field-line bg-field px-2.5 text-muted shadow-inset hover:text-ink"
       >
         <Search size={14} strokeWidth={2} aria-hidden />
         <span className="flex-1 truncate text-left">Jump to service, trace id, template…</span>

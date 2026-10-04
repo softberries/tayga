@@ -1,4 +1,4 @@
-import { motion, stagger } from 'motion/react'
+import { m, stagger } from 'motion/react'
 import type { HTMLMotionProps, Variants } from 'motion/react'
 
 const list: Variants = {
@@ -13,9 +13,9 @@ const item: Variants = {
 
 /** Container whose StaggerItem children fade and rise in one after another (60 ms apart). */
 export function StaggerList(props: HTMLMotionProps<'div'>) {
-  return <motion.div variants={list} initial="hidden" animate="shown" {...props} />
+  return <m.div variants={list} initial="hidden" animate="shown" {...props} />
 }
 
 export function StaggerItem(props: HTMLMotionProps<'div'>) {
-  return <motion.div variants={item} {...props} />
+  return <m.div variants={item} {...props} />
 }

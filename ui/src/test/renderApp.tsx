@@ -1,12 +1,12 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { RouterProvider, createMemoryHistory, createRouter } from '@tanstack/react-router'
+import { RouterProvider, createMemoryHistory } from '@tanstack/react-router'
 import { render } from '@testing-library/react'
-import { MotionConfig } from 'motion/react'
+import { LazyMotion, MotionConfig, domAnimation } from 'motion/react'
 import { vi } from 'vitest'
 import { LiveProvider } from '../app/live'
 import { createQueryClient } from '../app/queryClient'
 import { TooltipProvider } from '../components/ui/Tooltip'
-import { routeTree } from '../router'
+import { createAppRouter } from '../router'
 import { ThemeProvider } from '../theme/ThemeProvider'
 
 /** Responses by API path (without /api/v1 and query); unknown paths return 404. */
@@ -26,14 +26,15 @@ export function stubApi(routes: Routes) {
   return fetch
 }
 
-/** Renders the real route tree at `url` with the app providers. */
+/** Renders the app's real router (same options as production) at `url` with the providers. */
 export function renderApp(url: string) {
   const queryClient = createQueryClient()
   queryClient.setDefaultOptions({ queries: { ...queryClient.getDefaultOptions().queries, retry: false } })
   const history = createMemoryHistory({ initialEntries: [url] })
-  const router = createRouter({ routeTree, history, context: { queryClient } })
+  const router = createAppRouter(queryClient, history)
   const utils = render(
     <ThemeProvider>
+      <LazyMotion features={domAnimation} strict>
       <MotionConfig reducedMotion="always">
         <QueryClientProvider client={queryClient}>
           <LiveProvider>
@@ -43,6 +44,7 @@ export function renderApp(url: string) {
           </LiveProvider>
         </QueryClientProvider>
       </MotionConfig>
+      </LazyMotion>
     </ThemeProvider>,
   )
   return { ...utils, router, history, queryClient }

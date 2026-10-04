@@ -1,4 +1,4 @@
-import { animate, useReducedMotionConfig } from 'motion/react'
+import { animateValue, useReducedMotionConfig } from 'motion/react'
 import { useEffect, useRef, useState } from 'react'
 
 export interface CountUpProps {
@@ -26,8 +26,11 @@ export function CountUp({ value, format = round, duration = 0.6, className }: Co
       from.current = value
       return
     }
-    const controls = animate(from.current, value, {
-      duration,
+    // animateValue: Motion's single-value tween, without the element/sequence machinery
+    // that animate() pulls into the bundle.
+    const controls = animateValue({
+      keyframes: [from.current, value],
+      duration: duration * 1000,
       ease: 'easeOut',
       onUpdate: (v) => {
         from.current = v

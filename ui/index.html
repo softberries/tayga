@@ -7,6 +7,11 @@
     <title>Tayga</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="preload" href="/fonts/sora-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <style>
+      /* Ground per theme before the CSS bundle loads (mirrors --tg-ground; tokens.test.ts checks). */
+      html[data-theme='light']{background:#eef2f8;color-scheme:light}
+      html[data-theme='dark']{background:#0a1020;color-scheme:dark}
+    </style>
     <script>
       // Set the theme before first paint (mirrors src/theme/theme.ts; key "tayga-theme").
       ;(function () {

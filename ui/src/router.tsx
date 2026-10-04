@@ -1,4 +1,5 @@
 import type { QueryClient } from '@tanstack/react-query'
+import type { RouterHistory } from '@tanstack/react-router'
 import {
   createRootRouteWithContext,
   createRoute,
@@ -149,10 +150,15 @@ export const routeTree = rootRoute.addChildren([
   pipelineRoute,
 ])
 
-export function createAppRouter(queryClient: QueryClient) {
+/** `history` defaults to the browser; tests pass a memory history. */
+export function createAppRouter(queryClient: QueryClient, history?: RouterHistory) {
   return createRouter({
     routeTree,
+    history,
     context: { queryClient },
+    // Page errors render inside the shell's <Outlet>, so the rail and header stay usable.
+    defaultErrorComponent: RouteError,
+    defaultNotFoundComponent: NotFound,
     defaultPreload: 'intent',
     // Query owns caching; the router re-runs loaders whenever asked.
     defaultPreloadStaleTime: 0,

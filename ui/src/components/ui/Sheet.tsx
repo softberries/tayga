@@ -1,6 +1,6 @@
 import { Dialog as D } from 'radix-ui'
 import { X } from 'lucide-react'
-import { AnimatePresence, motion } from 'motion/react'
+import { AnimatePresence, m } from 'motion/react'
 import { useCallback, useRef, useState } from 'react'
 import type { KeyboardEvent, PointerEvent, ReactNode } from 'react'
 import { cx } from '../../lib/cx'
@@ -111,7 +111,7 @@ export function Sheet({
           <D.Portal forceMount>
             {modal ? (
               <D.Overlay forceMount asChild>
-                <motion.div
+                <m.div
                   className="fixed inset-0 z-40 bg-scrim"
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
@@ -126,7 +126,7 @@ export function Sheet({
               aria-describedby={undefined}
               onInteractOutside={modal ? undefined : (e) => e.preventDefault()}
             >
-              <motion.aside
+              <m.aside
                 className={cx(
                   'fixed inset-y-0 right-0 z-50 flex max-w-[100vw] flex-col border-l border-panel-line bg-panel text-ink shadow-panel-lg focus:outline-none',
                   className,
@@ -165,7 +165,7 @@ export function Sheet({
                   </D.Close>
                 </header>
                 <div className="min-h-0 flex-1 overflow-auto px-5 py-4">{children}</div>
-              </motion.aside>
+              </m.aside>
             </D.Content>
           </D.Portal>
         ) : null}

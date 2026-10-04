@@ -128,12 +128,14 @@
   --tg-muted: #55627a;
   --tg-faint: #8a96aa;
 
-  --tg-accent: #1f6fd1;
+  /* accent, err and slow are darkened from the design (#1f6fd1, #c93a33, #9a6408) to reach
+     4.5:1 as text on ground, panel, inner and their soft backgrounds (tokens.test.ts). */
+  --tg-accent: #1c69c7;
   --tg-accent-strong: #1f6fd1;
   --tg-on-accent: #ffffff;
-  --tg-err: #c93a33;
+  --tg-err: #bf342d;
   --tg-err-soft: #fce8e6;
-  --tg-slow: #9a6408;
+  --tg-slow: #8f5c06;
   --tg-slow-soft: #fbf0da;
   --tg-on-slow: #ffffff;
   --tg-ok: #1f7a4d;

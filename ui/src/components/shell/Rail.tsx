@@ -1,8 +1,10 @@
 import { Link, useLocation } from '@tanstack/react-router'
 import { Activity, ChartGantt, ScrollText, TextAlignStart, Waypoints } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+import { sinceSearch } from '../../app/search'
 import { cx } from '../../lib/cx'
 import { Tooltip } from '../ui/Tooltip'
+import { useSince } from './TimeRange'
 
 interface Section {
   to: '/' | '/traces' | '/map' | '/logs' | '/pipeline'
@@ -22,6 +24,7 @@ export const SECTIONS: readonly Section[] = [
 
 export function Rail() {
   const path = useLocation({ select: (l) => l.pathname })
+  const search = sinceSearch(useSince())
   return (
     <nav
       aria-label="Main"
@@ -39,7 +42,7 @@ export function Rail() {
           <Tooltip key={to} content={label} side="right">
             <Link
               to={to}
-              search={(prev) => prev}
+              search={search}
               aria-label={label}
               aria-current={active ? 'page' : undefined}
               className={cx(
