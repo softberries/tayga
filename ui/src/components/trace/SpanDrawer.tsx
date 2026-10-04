@@ -19,7 +19,7 @@ export interface SpanDrawerProps {
   /** The open span; null closes the drawer. */
   span: TraceSpan | null
   onClose: () => void
-  /** Trace window, for the start offset and share of the trace. */
+  /** Trace window (earliest span start to latest span end), for offsets and shares. */
   traceStartNs: number
   traceTotalNs: number
   /** All logs of the trace; the drawer shows the ones of this span. */
@@ -28,6 +28,8 @@ export interface SpanDrawerProps {
   templates?: ReadonlyMap<string, TraceLogTemplate>
   rootCause?: boolean
   critical?: boolean
+  /** Return focus on close (see Sheet). */
+  onCloseAutoFocus?: (e: Event) => void
 }
 
 function CopyButton({ value, label }: { value: string; label: string }) {
@@ -169,6 +171,7 @@ export function SpanDrawer({
   templates,
   rootCause,
   critical,
+  onCloseAutoFocus,
 }: SpanDrawerProps) {
   return (
     <Sheet
@@ -179,6 +182,7 @@ export function SpanDrawer({
       title={span ? span.span_name || '(unnamed span)' : ''}
       subtitle={span ? <DrawerSubtitle span={span} rootCause={rootCause} critical={critical} /> : null}
       storageKey="tayga-span-drawer-width"
+      onCloseAutoFocus={onCloseAutoFocus}
       defaultWidth={560}
     >
       {span ? (
@@ -304,7 +308,11 @@ function DrawerBody({
             <Stat label="Start offset" value={`+${duration(offset)}`} hint="from the trace start" />
             <Stat label="Duration" value={duration(span.duration_ns)} />
             <Stat label="Self time" value={duration(span.self_ns)} hint={`${percent(selfShare)} of the span`} />
-            <Stat label="Share of trace" value={percent(span.duration_ns / total)} hint={`of ${duration(total)}`} />
+            <Stat
+              label="Share of trace window"
+              value={percent(span.duration_ns / total)}
+              hint={`of the ${duration(total)} trace window`}
+            />
           </dl>
           <div className="mt-4 flex flex-col gap-1.5">
             <span className="text-[11px] uppercase tracking-[0.06em] text-muted">Position in the trace</span>

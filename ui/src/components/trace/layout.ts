@@ -24,6 +24,9 @@ export interface LayoutRow {
   width: number
   /** Start relative to the trace start, in ns. */
   offsetNs: number
+  /** Unclamped start and length as fractions of the trace (no MIN_BAR): for zoomed views. */
+  startFrac: number
+  durFrac: number
   critical: boolean
   error: boolean
   rootCause: boolean
@@ -107,6 +110,8 @@ export function buildLayout(spans: readonly TraceSpan[], opts: LayoutOptions = {
         left: Math.min(left, 1 - width),
         width,
         offsetNs,
+        startFrac: left,
+        durFrac: Math.min(1, finite(durOf(s) / totalNs)),
         critical: critical.has(s.span_id),
         error: s.status === 'error',
         rootCause: rc !== '' && s.span_id === rc,
@@ -247,16 +252,38 @@ export function projectBar(left: number, width: number, view: readonly [number, 
   if (b < 0 || a > 1) return { left: 0, width: 0, clipped: true }
   const l = Math.max(0, a)
   const r = Math.min(1, b)
-  return { left: l, width: Math.max(MIN_BAR, r - l), clipped: false }
+  const w = Math.max(MIN_BAR, r - l)
+  return { left: Math.min(l, 1 - w), width: w, clipped: false }
 }
 
-/** Round tick values (ns) inside `[from, to]`, about `count` intervals apart. */
+const MIN = 60e9
+const HOUR = 60 * MIN
+const DAY = 24 * HOUR
+/** Tick steps from one minute up, in whole human units (1/2/5 of min, h, d). */
+const LONG_STEPS = [1, 2, 5, 10, 20, 30].map((m) => m * MIN).concat([1, 2, 5, 10].map((h) => h * HOUR))
+
+/**
+ * Round tick values (ns) inside `[from, to]`, about `count` intervals apart. Below a minute
+ * steps are 1, 2 or 5 times a power of ten ns (so 1/2/5 µs, ms, s); from a minute up they
+ * are 1/2/5-style multiples of minutes, hours and days.
+ */
 export function niceTicks(from: number, to: number, count: number): number[] {
   const range = to - from
   if (!(range > 0) || !Number.isFinite(range)) return [from]
   const raw = range / Math.max(1, count)
-  const pow = 10 ** Math.floor(Math.log10(raw))
-  const step = ([1, 2, 2.5, 5, 10].map((m) => m * pow).find((s) => s >= raw) ?? 10 * pow)
+  let step: number
+  if (raw < MIN) {
+    const pow = 10 ** Math.floor(Math.log10(raw))
+    step = [1, 2, 5, 10].map((m) => m * pow).find((x) => x >= raw) ?? 10 * pow
+    // Never step finer than 1 ns, nor past a minute in this branch.
+    step = Math.min(Math.max(1, step), MIN)
+  } else {
+    step = LONG_STEPS.find((x) => x >= raw) ?? (() => {
+      const days = raw / DAY
+      const pow = 10 ** Math.floor(Math.log10(days))
+      return ([1, 2, 5, 10].map((m) => m * pow).find((d) => d >= days) ?? 10 * pow) * DAY
+    })()
+  }
   const out: number[] = []
   for (let v = Math.ceil(from / step) * step; v <= to + step * 1e-9; v += step) out.push(Math.round(v * 1e3) / 1e3)
   return out

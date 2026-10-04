@@ -147,10 +147,22 @@ export function TracePage() {
       </Card>
     )
   }
-  // Wait for the story (if any) so the waterfall opens with its root cause and critical path.
-  const waitingForStory = storyId !== null && story.isPending
   const s = stats!
   const root = s.root
+  // A trace whose window dwarfs its root request (long-lived streams sharing the trace id)
+  // opens zoomed to the root span; Reset zoom shows the whole window.
+  // Not when the span the page opens on (the URL's span, else the story's root cause) lies
+  // outside the root request: zooming would hide the very row it highlights.
+  const focusId = search.span ?? story.data?.root_cause.span_id
+  const focus = focusId ? trace.data.spans.find((x) => x.span_id === focusId) : undefined
+  const focusInRoot =
+    !focus ||
+    !root ||
+    (focus.start_ns >= root.start_ns && focus.start_ns + focus.duration_ns <= root.start_ns + root.duration_ns)
+  const rootZoom =
+    root && focusInRoot && s.durationNs > 5 * Math.max(1, root.duration_ns) ? [root.span_id] : undefined
+  // Wait for the story (if any) so the waterfall opens with its root cause and critical path.
+  const waitingForStory = storyId !== null && story.isPending
 
   return (
     <div className="flex flex-col gap-4">
@@ -173,7 +185,8 @@ export function TracePage() {
           </div>
         </div>
         <dl className="m-0 grid grid-cols-[repeat(auto-fit,minmax(110px,1fr))] gap-4">
-          <Stat label="Duration" value={duration(s.durationNs)} />
+          <Stat label="Root span" value={root ? duration(root.duration_ns) : '—'} />
+          <Stat label="Trace window" value={duration(s.durationNs)} />
           <Stat label="Spans" value={String(s.spans)} />
           <Stat label="Services" value={String(s.services)} />
           <Stat label="Errors" value={String(s.errors)} tone={s.errors > 0 ? 'err' : undefined} />
@@ -200,6 +213,8 @@ export function TracePage() {
             search={search}
             onSearch={onSearch}
             height="max(360px, calc(100dvh - 430px))"
+            initialZoomTo={rootZoom}
+            zoomHint="Showing the root request"
           />
         )}
       </Card>

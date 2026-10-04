@@ -48,6 +48,9 @@ export interface SheetProps {
   storageKey?: string
   /** Modal drawers trap focus and dim the page; inspectors default to non-modal. */
   modal?: boolean
+  /** Where focus goes on close; call `e.preventDefault()` and focus your element. Without a
+   *  Radix trigger (drawers opened from a list), focus would otherwise fall to <body>. */
+  onCloseAutoFocus?: (e: Event) => void
   className?: string
 }
 
@@ -64,6 +67,7 @@ export function Sheet({
   defaultWidth = 520,
   storageKey,
   modal = false,
+  onCloseAutoFocus,
   className,
 }: SheetProps) {
   const [width, setWidth] = useState(() => readWidth(storageKey, defaultWidth))
@@ -125,6 +129,7 @@ export function Sheet({
               asChild
               aria-describedby={undefined}
               onInteractOutside={modal ? undefined : (e) => e.preventDefault()}
+              onCloseAutoFocus={onCloseAutoFocus}
             >
               <m.aside
                 className={cx(

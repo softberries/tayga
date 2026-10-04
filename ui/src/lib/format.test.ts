@@ -30,6 +30,7 @@ describe('format', () => {
     expect(msValue(210_000)).toBe('0.21')
     expect(msValue(65_100_000)).toBe('65.1')
     expect(msValue(5_120_000_000)).toBe('5120')
+    expect(msValue(600e9)).toBe('10.0 min')
   })
   it('formats times and percents', () => {
     expect(clockMs(1.791114992498e18)).toMatch(/^\d\d:\d\d:\d\d\.\d{3}$/)

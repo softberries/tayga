@@ -134,5 +134,13 @@ describe('focusWindow', () => {
     expect(focusWindow(l, ['a'])).toEqual([0, 1])
     expect(focusWindow(l, ['nope'])).toEqual([0, 1])
     expect(focusWindow(l, undefined)).toEqual([0, 1])
+    // A short root in a very long window zooms to its real extent, not the MIN_BAR-wide bar.
+    const long = buildLayout([
+      { ...small[0]!, span_id: 'r', duration_ns: 500e6, start_ns: 0 },
+      { ...small[1]!, span_id: 's', parent_span_id: '', start_ns: 0, duration_ns: 2 * 86_400e9 },
+    ])
+    const [lf, lt] = focusWindow(long, ['r'])
+    expect(lf).toBe(0)
+    expect(lt * long.totalNs).toBeCloseTo(520e6, -6)
   })
 })

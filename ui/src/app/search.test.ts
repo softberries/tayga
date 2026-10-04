@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { HEX32, U64, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch } from './search'
+import { HEX32, U64, sinceCovering, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch } from './search'
 
 describe('validateRootSearch', () => {
   it('keeps a valid non-default since', () => {
@@ -48,5 +48,21 @@ describe('page search params', () => {
   it('map: service', () => {
     expect(validateMapSearch({ service: 'checkout' })).toEqual({ service: 'checkout' })
     expect(validateMapSearch({})).toStrictEqual({ service: undefined })
+  })
+})
+
+describe('sinceCovering', () => {
+  const now = 1_791_000_000_000
+  const ago = (secs: number) => (now - secs * 1000) * 1e6
+  it('picks the smallest range that still contains the moment', () => {
+    expect(sinceCovering(ago(60), now)).toBe('15m')
+    expect(sinceCovering(ago(1800), now)).toBe('1h')
+    expect(sinceCovering(ago(5 * 3600), now)).toBe('24h')
+    expect(sinceCovering(ago(3 * 86_400), now)).toBe('7d')
+    expect(sinceCovering(ago(30 * 86_400), now)).toBe('7d')
+  })
+  it('never goes below the requested range', () => {
+    expect(sinceCovering(ago(60), now, '24h')).toBe('24h')
+    expect(sinceCovering(ago(5 * 3600), now, '1h')).toBe('24h')
   })
 })

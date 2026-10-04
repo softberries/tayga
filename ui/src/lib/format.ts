@@ -30,10 +30,11 @@ export function duration(ns: number): string {
   return `${(ms / 86_400_000).toFixed(1)} d`
 }
 
-/** Bare milliseconds for a ms column: "0.21", "65.1", "5120". */
+/** A ms column value: bare ms below 10 s ("0.21", "65.1", "5120"), else with a unit ("5.0 min"). */
 export function msValue(ns: number): string {
   if (!Number.isFinite(ns) || ns < 0) return '—'
   const ms = ns / 1e6
+  if (ms >= 10_000) return duration(ns)
   return ms < 10 ? ms.toFixed(2) : ms < 1000 ? ms.toFixed(1) : String(Math.round(ms))
 }
 

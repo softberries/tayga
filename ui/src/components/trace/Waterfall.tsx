@@ -16,6 +16,7 @@ import type { TraceSpan } from '../../api/types'
 import { cx } from '../../lib/cx'
 import { duration, msValue } from '../../lib/format'
 import { serviceColor } from '../../lib/serviceColor'
+import { NARROW_QUERY, useMediaQuery } from '../../lib/useMediaQuery'
 import { Button } from '../ui/Button'
 import { EmptyState } from '../ui/EmptyState'
 import { ToggleGroup } from '../ui/ToggleGroup'
@@ -54,6 +55,8 @@ export interface WaterfallProps {
    * path), when that window is under 70 % of the trace. Reset zoom shows everything.
    */
   initialZoomTo?: readonly string[]
+  /** Shown beside "Reset zoom" while that initial zoom is active (default "Zoomed in"). */
+  zoomHint?: string
   /** Full only: height of the scrolling row area (default `min(70vh, 720px)`). */
   height?: CSSProperties['height']
   /** Accessible name of the tree. */
@@ -62,10 +65,14 @@ export interface WaterfallProps {
 }
 
 const ROW_H = 28
+/** Narrowest initial zoom window (fraction of the trace). */
+const MIN_VIEW = 1e-6
 const MAX_INDENT = 10
+const NARROW_MAX_INDENT = 3
 const COMPACT_MAX_INDENT = 6
 const COMPACT_ROW_H = 25
 const COLS = 'minmax(240px, 32%) minmax(0, 1fr) 64px'
+const NARROW_COLS = 'minmax(140px, 42%) minmax(0, 1fr) 56px'
 const COMPACT_COLS = '170px minmax(0, 1fr) 52px'
 const FILTERS = [
   { value: 'all', label: 'All spans' },
@@ -155,6 +162,11 @@ interface RowProps {
   compact: boolean
   /** Compact rows that open something are buttons (full rows are tree items). */
   interactive?: boolean
+  /** Below `sm`: less indentation and a narrower name column. */
+  narrow?: boolean
+  /** Position among visible siblings (tree items only). */
+  setSize?: number
+  posInSet?: number
   onClick: (row: LayoutRow) => void
   onToggle: (row: LayoutRow) => void
 }
@@ -169,15 +181,20 @@ const SpanRow = memo(function SpanRow({
   revealed,
   compact,
   interactive,
+  narrow,
+  setSize,
+  posInSet,
   onClick,
   onToggle,
 }: RowProps) {
   const s = row.span
-  const bar = projectBar(row.left, row.width, view)
+  // Project the true extent, then widen to MIN_BAR: a pre-widened bar would cover the whole
+  // view when zoomed far into a long trace.
+  const bar = projectBar(row.startFrac, row.durFrac, view)
   const context = row.match === false
   // Indentation stops at MAX_INDENT levels so deep chains keep their names readable; the
   // remaining depth is shown as a number.
-  const maxIndent = compact ? COMPACT_MAX_INDENT : MAX_INDENT
+  const maxIndent = compact ? COMPACT_MAX_INDENT : narrow ? NARROW_MAX_INDENT : MAX_INDENT
   const indent = Math.min(row.depth, maxIndent) * (compact ? 10 : 12) + (compact ? 6 : 4)
   const extraDepth = row.depth - maxIndent
   const exceptions = useMemo(
@@ -205,6 +222,8 @@ const SpanRow = memo(function SpanRow({
           : undefined
       }
       aria-level={compact ? undefined : row.depth + 1}
+      aria-setsize={compact ? undefined : setSize}
+      aria-posinset={compact ? undefined : posInSet}
       aria-selected={compact ? undefined : selected}
       aria-expanded={compact || flat || row.childCount === 0 ? undefined : expanded}
       data-span-id={s.span_id}
@@ -220,7 +239,7 @@ const SpanRow = memo(function SpanRow({
         !selected && !row.rootCause && 'hover:bg-inner',
         revealed && 'tg-in [animation-duration:220ms]',
       )}
-      style={{ gridTemplateColumns: compact ? COMPACT_COLS : COLS }}
+      style={{ gridTemplateColumns: compact ? COMPACT_COLS : narrow ? NARROW_COLS : COLS }}
     >
       <span className="flex min-w-0 items-center gap-1.5" style={{ paddingLeft: indent }}>
         {!compact && !flat && row.childCount > 0 ? (
@@ -286,13 +305,16 @@ export function focusWindow(layout: Layout, ids: readonly string[] | undefined):
   for (const id of ids ?? []) {
     const i = layout.byId.get(id)
     if (i === undefined) continue
+    // True extents, not the drawn bars: MIN_BAR would widen a short span in a long trace.
     const r = layout.rows[i]!
-    from = Math.min(from, r.left)
-    to = Math.max(to, r.left + r.width)
+    const a = r.offsetNs / layout.totalNs
+    const b = (r.offsetNs + Math.max(0, r.span.duration_ns)) / layout.totalNs
+    from = Math.min(from, a)
+    to = Math.max(to, b)
   }
   if (!(to > from) || to - from > 0.7) return FULL_VIEW
   const pad = (to - from) * 0.04
-  return [Math.max(0, from - pad), Math.min(1, to + pad)]
+  return [Math.max(0, from - pad), Math.min(1, Math.max(to + pad, from + MIN_VIEW))]
 }
 
 interface ModeProps extends WaterfallProps {
@@ -311,6 +333,7 @@ function FullWaterfall({
   onQueryChange,
   height = 'min(70vh, 720px)',
   initialZoomTo,
+  zoomHint = 'Zoomed in',
   label = 'Trace waterfall',
   className,
 }: ModeProps) {
@@ -323,7 +346,10 @@ function FullWaterfall({
   )
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set())
   const [revealed, setRevealed] = useState<{ from: number; to: number } | null>(null)
-  const [view, setView] = useState<ZoomWindow>(() => focusWindow(layout, initialZoomTo))
+  const [initialView] = useState<ZoomWindow>(() => focusWindow(layout, initialZoomTo))
+  const [view, setView] = useState<ZoomWindow>(initialView)
+  const narrow = useMediaQuery(NARROW_QUERY)
+  const cols = narrow ? NARROW_COLS : COLS
   const deferredQuery = useDeferredValue(query)
   const flat = filter !== 'all' || deferredQuery.trim() !== ''
 
@@ -331,6 +357,18 @@ function FullWaterfall({
     () => visibleRows(layout, { collapsed, filter, query: deferredQuery }),
     [layout, collapsed, filter, deferredQuery],
   )
+  // aria-posinset/aria-setsize: virtualized items must state their place among visible siblings.
+  const siblings = useMemo(() => {
+    const count = new Map<number, number>()
+    const pos = new Map<number, [number, number]>()
+    for (const r of rows) {
+      const n = (count.get(r.parent) ?? 0) + 1
+      count.set(r.parent, n)
+      pos.set(r.index, [n, 0])
+    }
+    for (const r of rows) pos.get(r.index)![1] = count.get(r.parent)!
+    return pos
+  }, [rows])
   const matches = useMemo(() => (flat ? rows.filter((r) => r.match).length : layout.rows.length), [rows, flat, layout])
 
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -439,7 +477,7 @@ function FullWaterfall({
     e.preventDefault()
   }
 
-  const ticks = useTicks({ totalNs: layout.totalNs, view, count: 6 })
+  const ticks = useTicks({ totalNs: layout.totalNs, view, count: narrow ? 2 : 6 })
   const parents = useMemo(() => layout.rows.filter((r) => r.childCount > 0).map((r) => r.span.span_id), [layout])
 
   return (
@@ -460,7 +498,12 @@ function FullWaterfall({
         <span className="tabular text-xs text-muted" aria-live="polite">
           {flat ? `${matches} of ${layout.rows.length} spans` : `${layout.rows.length} spans`}
         </span>
-        <div className="ml-auto flex items-center gap-1">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
+          {zoomed && view === initialView ? (
+            <span className="whitespace-nowrap text-xs text-muted" role="status">
+              {zoomHint} ·
+            </span>
+          ) : null}
           {zoomed ? (
             <Button size="sm" variant="secondary" onClick={() => setView(FULL_VIEW)}>
               <ZoomOut aria-hidden size={14} /> Reset zoom
@@ -479,10 +522,10 @@ function FullWaterfall({
 
       {/* Narrow screens scroll the rows sideways rather than squeezing the name column. */}
       <div className="overflow-x-auto">
-      <div className="min-w-[720px]">
+      <div className={narrow ? 'min-w-[400px]' : 'min-w-[720px]'}>
         <div
           className="grid gap-2 overflow-hidden border-b border-line pb-1.5 font-mono text-[10.5px] text-faint [scrollbar-gutter:stable]"
-          style={{ gridTemplateColumns: COLS }}
+          style={{ gridTemplateColumns: cols }}
         >
           <span className="pl-1 font-sans text-[11px] uppercase tracking-[0.06em] text-muted">Service · span</span>
           <AxisLabels ticks={ticks} />
@@ -522,7 +565,7 @@ function FullWaterfall({
           >
             <div className="relative" style={{ height: virt.getTotalSize() }}>
               {/* Tick gridlines behind the bars. */}
-              <div aria-hidden className="pointer-events-none absolute inset-0 grid gap-2" style={{ gridTemplateColumns: COLS }}>
+              <div aria-hidden className="pointer-events-none absolute inset-0 grid gap-2" style={{ gridTemplateColumns: cols }}>
                 <span />
                 <span className="relative">
                   {ticks.map((t) => (
@@ -547,6 +590,9 @@ function FullWaterfall({
                       flat={flat}
                       revealed={revealed !== null && row.index >= revealed.from && row.index < revealed.to}
                       compact={false}
+                      narrow={narrow}
+                      setSize={siblings.get(row.index)?.[1]}
+                      posInSet={siblings.get(row.index)?.[0]}
                       onClick={select}
                       onToggle={toggle}
                     />

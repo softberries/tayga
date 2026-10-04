@@ -94,6 +94,30 @@ describe('story page', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
+  it('scrolls the root-cause row into view', async () => {
+    stubApi(routes())
+    renderApp(`/stories/${ID}`)
+    const tree = await screen.findByRole('tree', { name: 'Trace waterfall' })
+    const rc = await within(tree).findByRole('treeitem', { selected: true })
+    // Rows sit in absolutely placed wrappers moved by translateY(start px).
+    const start = Number(/translateY\((\d+(?:\.\d+)?)px\)/.exec((rc.parentElement as HTMLElement).style.transform)?.[1])
+    expect(start).toBeGreaterThan(900) // far below the first screen: scrolling was needed
+    expect(tree.scrollTop).toBeGreaterThan(0)
+    expect(start).toBeGreaterThanOrEqual(tree.scrollTop)
+    expect(start + 28).toBeLessThanOrEqual(tree.scrollTop + 900)
+    // Virtualized items state their position among visible siblings.
+    expect(rc).toHaveAttribute('aria-posinset')
+    expect(Number(rc.getAttribute('aria-setsize'))).toBeGreaterThanOrEqual(Number(rc.getAttribute('aria-posinset')))
+  })
+
+  it('labels the header duration as the root span and zooms to the critical path', async () => {
+    stubApi(routes())
+    renderApp(`/stories/${ID}`)
+    expect(await screen.findByText('Root span')).toBeInTheDocument()
+    expect(await screen.findByText(/Showing the critical path/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Reset zoom/ })).toBeInTheDocument()
+  })
+
   it('shows path, compared-with-normal, logs and related alerts', async () => {
     stubApi(routes())
     renderApp(`/stories/${ID}?since=24h`)
@@ -204,6 +228,48 @@ describe('trace page and span drawer', () => {
     const drawer = await screen.findByRole('dialog')
     await user.click(within(drawer).getByRole('button', { name: 'Close panel' }))
     await waitFor(() => expect(router.state.location.search).not.toHaveProperty('span'))
+  })
+
+  it('returns focus to the waterfall when the drawer closes (Close and Escape)', async () => {
+    const user = userEvent.setup()
+    stubApi(routes())
+    renderApp(`/traces/${ID}`)
+    const tree = await screen.findByRole('tree', { name: 'Trace waterfall' })
+    tree.focus()
+    await user.keyboard('{Home}{Enter}')
+    const drawer = await screen.findByRole('dialog')
+    await user.click(within(drawer).getByRole('button', { name: 'Close panel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(tree).toHaveFocus()
+    await user.keyboard('{Enter}')
+    const again = await screen.findByRole('dialog')
+    within(again).getByRole('button', { name: 'Close panel' }).focus()
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(tree).toHaveFocus()
+  })
+
+  it('selection follows the span in the URL on back and forward', async () => {
+    const user = userEvent.setup()
+    stubApi(routes())
+    const { router } = renderApp(`/traces/${ID}?span=${RC}`)
+    await screen.findByRole('dialog', { name: 'charge' })
+    const tree = screen.getByRole('tree', { name: 'Trace waterfall' })
+    expect(within(tree).getByRole('treeitem', { selected: true })).toHaveAttribute('data-span-id', RC)
+    tree.focus()
+    await user.keyboard('{Home}{Enter}')
+    const first = trace.spans.find((x) => x.span_id === (router.state.location.search as { span?: string }).span)!
+    await waitFor(() => expect(within(tree).getByRole('treeitem', { selected: true })).toHaveAttribute('data-span-id', first.span_id))
+    router.history.back()
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ span: RC }))
+    await waitFor(() => expect(within(tree).getByRole('treeitem', { selected: true })).toHaveAttribute('data-span-id', RC))
+  })
+
+  it('labels root span and trace window separately', async () => {
+    stubApi(routes())
+    renderApp(`/traces/${ID}`)
+    expect(await screen.findByText('Root span')).toBeInTheDocument()
+    expect(screen.getByText('Trace window')).toBeInTheDocument()
   })
 
   it('keeps the span filter in the URL', async () => {

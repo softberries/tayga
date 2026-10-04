@@ -83,3 +83,15 @@ export interface MapSearch {
 export function validateMapSearch(s: Record<string, unknown>): MapSearch {
   return { service: str(s.service, 200) }
 }
+
+const SINCE_SECS: Record<Since, number> = { '15m': 900, '1h': 3600, '24h': 86_400, '7d': 604_800 }
+
+/**
+ * The smallest range, no smaller than `atLeast`, whose window still contains a moment `tsNs`
+ * (unix ns) as seen at `nowMs`; `7d` when even that is too short.
+ */
+export function sinceCovering(tsNs: number, nowMs: number, atLeast: Since = '15m'): Since {
+  const ageSecs = (nowMs - tsNs / 1e6) / 1000
+  const floor = SINCE_SECS[atLeast]
+  return SINCE_VALUES.find((s) => SINCE_SECS[s] >= floor && SINCE_SECS[s] >= ageSecs) ?? '7d'
+}

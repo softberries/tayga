@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import { readChartTokens, withAlpha } from '../../theme/echartsTheme'
+import { REDUCED_MOTION_QUERY, useMediaQuery } from '../../lib/useMediaQuery'
 import { useAppliedTheme } from '../../theme/useAppliedTheme'
 import { EChart } from './EChart'
 
@@ -30,15 +31,18 @@ export interface TimeSeriesProps {
 /** Shared time-series chart (line, area or bar) on a time axis, themed via echartsTheme. */
 export function TimeSeries({ series, height = 180, markAt, markLabel, format, summary }: TimeSeriesProps) {
   const applied = useAppliedTheme()
+  const reduceMotion = useMediaQuery(REDUCED_MOTION_QUERY)
   const option = useMemo(() => {
     // Canvas needs real colors: resolve semantic tones from the applied theme's variables.
     const tokens = applied ? readChartTokens() : null
     const fmt = format ?? ((v: number) => String(v))
     return {
+      // Spec §5: reduced motion turns every animation off, charts included.
+      animation: !reduceMotion,
       animationDuration: 300,
       grid: { left: 8, right: 12, top: 16, bottom: 4, containLabel: true },
       tooltip: { trigger: 'axis', valueFormatter: (v: unknown) => (typeof v === 'number' ? fmt(v) : '—') },
-      xAxis: { type: 'time' },
+      xAxis: { type: 'time', axisLabel: { hideOverlap: true } },
       yAxis: { type: 'value', minInterval: 1, axisLabel: { formatter: (v: number) => fmt(v) } },
       series: series.map((s, i) => {
         const color = s.tone && tokens ? tokens[s.tone] : undefined
@@ -63,6 +67,6 @@ export function TimeSeries({ series, height = 180, markAt, markLabel, format, su
         }
       }),
     }
-  }, [series, markAt, markLabel, format, applied])
+  }, [series, markAt, markLabel, format, applied, reduceMotion])
   return <EChart option={option} height={height} summary={summary} />
 }

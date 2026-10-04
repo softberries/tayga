@@ -235,6 +235,15 @@ describe('compactRows', () => {
 })
 
 describe('projectBar (zoom)', () => {
+  it('keeps short spans short when zoomed into a long trace', () => {
+    const l = buildLayout([span('root', '', 0, 500), span('long', '', 0, 1e9), span('kid', 'root', 100, 10)])
+    const kid = l.rows.find((r) => r.span.span_id === 'kid')!
+    expect(kid.width).toBe(MIN_BAR) // drawn at full view
+    const p = projectBar(kid.startFrac, kid.durFrac, [0, 500 / 1e9])
+    expect(p.left).toBeCloseTo(0.2)
+    expect(p.width).toBeCloseTo(0.02)
+  })
+
   it('maps a bar into the zoom window and clips it', () => {
     const id = projectBar(0.5, 0.1, [0, 1])
     expect(id.clipped).toBe(false)
@@ -258,6 +267,22 @@ describe('niceTicks', () => {
     expect(t[0]).toBe(0)
     expect(t.every((v) => v <= 65.1e6)).toBe(true)
     expect(t.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('steps in whole human units for long windows', () => {
+    const MIN = 60e9
+    const H = 60 * MIN
+    const D = 24 * H
+    const steps = (from: number, to: number) => {
+      const t = niceTicks(from, to, 6)
+      return t[1]! - t[0]!
+    }
+    expect(steps(0, 2.4 * D)).toBe(10 * H)
+    expect(steps(0, 20 * MIN)).toBe(5 * MIN)
+    expect(steps(0, 3 * H)).toBe(30 * MIN)
+    expect(steps(0, 60 * D)).toBe(10 * D)
+    expect(steps(0, 3e9)).toBe(5e8)
+    expect(steps(0, 650e6)).toBe(2e8)
   })
 
   it('handles an offset window and degenerate input', () => {

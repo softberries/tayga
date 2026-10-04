@@ -13,6 +13,7 @@ import { cx } from '../../lib/cx'
 import { clockMs } from '../../lib/format'
 import { serviceColor } from '../../lib/serviceColor'
 import { severityKind, severityLabel } from '../../lib/severity'
+import { NARROW_QUERY, useMediaQuery } from '../../lib/useMediaQuery'
 import { Badge } from '../ui/Badge'
 import { EmptyState } from '../ui/EmptyState'
 import { ToggleGroup } from '../ui/ToggleGroup'
@@ -33,6 +34,10 @@ export interface LogTableProps {
 }
 
 const COLS = '96px 128px minmax(120px, 170px) 72px minmax(240px, 1fr) minmax(160px, 26%)'
+const AREAS = '"time svc span sev body tmpl"'
+/** Below `sm` each log stacks: time, service and severity; then the body; then span and template. */
+const NARROW_COLS = 'auto minmax(0, 1fr) auto'
+const NARROW_AREAS = '"time svc sev" "body body body" "span tmpl tmpl"'
 const SEV_OPTIONS = [
   { value: 'all', label: 'All' },
   { value: 'info', label: 'Info+' },
@@ -80,6 +85,7 @@ export function LogTable({
     return sorted.filter((l) => (!service || l.service_name === service) && l.severity_number >= min)
   }, [sorted, service, sev])
 
+  const narrow = useMediaQuery(NARROW_QUERY)
   const scrollRef = useRef<HTMLDivElement>(null)
   // No React Compiler in this build; the virtualizer's unstable functions are fine here.
   // eslint-disable-next-line react-hooks/incompatible-library
@@ -119,14 +125,17 @@ export function LogTable({
       {rows.length === 0 ? (
         <EmptyState title="No logs match" description="Try another service or a lower severity." />
       ) : (
-        <div className="overflow-x-auto">
-          <div role="table" aria-label="Logs" aria-rowcount={rows.length + 1} className="min-w-[920px]">
+        <div className={narrow ? undefined : 'overflow-x-auto'}>
+          <div role="table" aria-label="Logs" aria-rowcount={rows.length + 1} className={narrow ? undefined : 'min-w-[920px]'}>
             <div role="rowgroup">
               <div
                 role="row"
                 aria-rowindex={1}
-                className="grid gap-3 border-b border-line px-2 pb-1.5 text-[11px] uppercase tracking-[0.06em] text-muted [scrollbar-gutter:stable]"
-                style={{ gridTemplateColumns: COLS }}
+                className={cx(
+                  'grid gap-3 border-b border-line px-2 pb-1.5 text-[11px] uppercase tracking-[0.06em] text-muted [scrollbar-gutter:stable]',
+                  narrow && 'sr-only',
+                )}
+                style={{ gridTemplateColumns: COLS, gridTemplateAreas: AREAS }}
               >
                 {['Time', 'Service', 'Span', 'Severity', 'Body', 'Template'].map((h) => (
                   <span role="columnheader" key={h}>
@@ -153,17 +162,24 @@ export function LogTable({
                       data-index={vi.index}
                       role="row"
                       aria-rowindex={vi.index + 2}
-                      className="tg-row absolute left-0 top-0 grid w-full items-start gap-3 border-b border-line-soft px-2 py-1.5 text-[12px] hover:bg-inner"
-                      style={{ gridTemplateColumns: COLS, transform: `translateY(${vi.start}px)` }}
+                      className={cx(
+                        'tg-row absolute left-0 top-0 grid w-full items-start border-b border-line-soft px-2 py-1.5 text-[12px] hover:bg-inner',
+                        narrow ? 'gap-x-2 gap-y-1' : 'gap-3',
+                      )}
+                      style={{
+                        gridTemplateColumns: narrow ? NARROW_COLS : COLS,
+                        gridTemplateAreas: narrow ? NARROW_AREAS : AREAS,
+                        transform: `translateY(${vi.start}px)`,
+                      }}
                     >
-                      <span role="cell" className="tabular font-mono text-[11.5px] text-muted">
+                      <span role="cell" style={{ gridArea: 'time' }} className="tabular font-mono text-[11.5px] text-muted">
                         {clockMs(l.ts_ns)}
                       </span>
-                      <span role="cell" className="flex min-w-0 items-center gap-1.5">
+                      <span role="cell" style={{ gridArea: 'svc' }} className="flex min-w-0 items-center gap-1.5">
                         <span aria-hidden className="size-2 shrink-0 rounded-full" style={{ backgroundColor: serviceColor(l.service_name) }} />
                         <span className="truncate">{l.service_name}</span>
                       </span>
-                      <span role="cell" className="min-w-0 truncate">
+                      <span role="cell" style={{ gridArea: 'span' }} className="min-w-0 truncate">
                         {span && onSpanClick ? (
                           <button
                             type="button"
@@ -177,13 +193,13 @@ export function LogTable({
                           <span className="text-muted">{span ?? '—'}</span>
                         )}
                       </span>
-                      <span role="cell">
+                      <span role="cell" style={{ gridArea: 'sev' }}>
                         <Badge kind={severityKind(l.severity_number)}>{severityLabel(l.severity_text, l.severity_number)}</Badge>
                       </span>
-                      <span role="cell" className="whitespace-pre-wrap break-words font-mono text-[11.5px] text-ink [overflow-wrap:anywhere]">
+                      <span role="cell" style={{ gridArea: 'body' }} className="whitespace-pre-wrap break-words font-mono text-[11.5px] text-ink [overflow-wrap:anywhere]">
                         {l.body}
                       </span>
-                      <span role="cell" className="flex min-w-0 items-center gap-1.5">
+                      <span role="cell" style={{ gridArea: 'tmpl' }} className="flex min-w-0 items-center gap-1.5">
                         {t ? (
                           <>
                             <Link

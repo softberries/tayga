@@ -6,11 +6,12 @@ import { useQuery } from '@tanstack/react-query'
 import type { UseQueryResult } from '@tanstack/react-query'
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router'
 import { ArrowRight } from 'lucide-react'
-import { useCallback, useMemo } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { isApiError } from '../../api/client'
 import { api } from '../../api/queries'
 import type { GroupDetail, LogAlertView, StoryView, TraceLogTemplate, TraceView } from '../../api/types'
-import { sinceSearch } from '../../app/search'
+import { sinceCovering, sinceSearch } from '../../app/search'
+import type { Since } from '../../app/search'
 import type { StorySearch } from '../../app/search'
 import { TimeSeries } from '../../components/charts/TimeSeries'
 import { useSince } from '../../components/shell/TimeRange'
@@ -83,7 +84,7 @@ function StoryHeader({ story, services }: { story: StoryView; services: number |
       <PathChips services={story.path_services} kind={story.kind} />
       <dl className="m-0 grid grid-cols-[repeat(auto-fit,minmax(110px,1fr))] gap-4">
         <Fact label="Time" value={dateTime(story.ts_ns)} />
-        <Fact label="Duration" value={duration(story.duration_ns)} />
+        <Fact label="Root span" value={duration(story.duration_ns)} />
         <Fact label="Spans" value={String(story.span_count)} />
         <Fact label="Services" value={services === null ? String(story.path_services.length) : String(services)} />
         <Fact label="Trace" value={shortId(story.trace_id)} />
@@ -101,8 +102,7 @@ function StoryHeader({ story, services }: { story: StoryView; services: number |
   )
 }
 
-function GroupTrend({ story, group }: { story: StoryView; group: UseQueryResult<GroupDetail> }) {
-  const since = useSince()
+function GroupTrend({ story, group, since }: { story: StoryView; group: UseQueryResult<GroupDetail>; since: Since }) {
   const points = useMemo(
     () => (group.data?.group.buckets ?? []).map(([t, n]) => [t * 1000, n] as const),
     [group.data],
@@ -332,6 +332,7 @@ function WaterfallCard({
           onSearch={onSearch}
           height="min(62vh, 640px)"
           initialZoomTo={critical}
+          zoomHint="Showing the critical path"
         />
       )}
     </Card>
@@ -346,7 +347,11 @@ export function StoryPage() {
   const story = useQuery(api.story(storyId))
   const s = story.data
   const trace = useQuery({ ...api.trace(s?.trace_id ?? ''), enabled: s !== undefined })
-  const group = useQuery({ ...api.storyGroup(s?.fingerprint ?? '', since), enabled: s !== undefined })
+  // The trend uses the header range, widened until it contains the story itself, so an
+  // older story still shows its group (and the API does not answer 404 for an empty range).
+  const [now] = useState(() => Date.now())
+  const trendSince = s ? sinceCovering(s.ts_ns, now, since) : since
+  const group = useQuery({ ...api.storyGroup(s?.fingerprint ?? '', trendSince), enabled: s !== undefined })
   const hasLogs = (trace.data?.logs.length ?? 0) > 0
   const templates = useQuery({ ...api.traceLogTemplates(s?.trace_id ?? ''), enabled: hasLogs })
   const alerts = useQuery({ ...api.logAlerts({ since: '7d' }), enabled: s !== undefined })
@@ -377,7 +382,7 @@ export function StoryPage() {
     <div className="flex flex-col gap-4">
       <StoryHeader story={st} services={services} />
       <div className="grid gap-4 lg:grid-cols-2">
-        <GroupTrend story={st} group={group} />
+        <GroupTrend story={st} group={group} since={trendSince} />
         <ComparedWithNormal story={st} />
       </div>
       <WaterfallCard story={st} trace={trace} templates={templates.data} search={search} onSearch={onSearch} />
