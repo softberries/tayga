@@ -10,7 +10,7 @@ import type { LogAlertView } from '../../api/types'
 import { sinceSearch } from '../../app/search'
 import type { Since } from '../../app/search'
 import { Badge } from '../../components/ui/Badge'
-import { Tooltip } from '../../components/ui/Tooltip'
+import { TruncationTooltip } from '../../components/ui/Tooltip'
 import { cx } from '../../lib/cx'
 import { ago, dateTime, shortId } from '../../lib/format'
 import { serviceColor } from '../../lib/serviceColor'
@@ -65,7 +65,7 @@ function Status({ active }: { active: boolean }) {
 
 function TemplateLink({ a, since, className }: { a: LogAlertView; since: Since; className: string }) {
   return (
-    <Tooltip content={<span className="block max-w-[min(80vw,640px)] whitespace-pre-wrap break-words font-mono">{a.template}</span>}>
+    <TruncationTooltip content={<span className="font-mono">{a.template}</span>}>
       <Link
         to="/logs/templates/$templateId"
         params={{ templateId: a.template_id }}
@@ -74,7 +74,7 @@ function TemplateLink({ a, since, className }: { a: LogAlertView; since: Since; 
       >
         {a.template}
       </Link>
-    </Tooltip>
+    </TruncationTooltip>
   )
 }
 

@@ -242,61 +242,65 @@ function PaletteBody({ onOpenChange }: { onOpenChange: (o: boolean) => void }) {
           </Command.Group>
         ) : null}
 
-        {searchState === 'loading' ? (
-          <div role="status" className="px-3 py-2.5 text-muted">
-            Searching…
-          </div>
-        ) : null}
-        {searchState === 'error' ? (
-          <div role="alert" className="px-3 py-2.5 text-err">
-            Search is unavailable.
-          </div>
-        ) : null}
-        {searchState === 'done' && !traceId && !result?.services.length && !result?.groups.length && !result?.templates.length ? (
-          <div role="status" className="px-3 py-2.5 text-muted">
-            No matches for “{query}”.
-          </div>
-        ) : null}
+        {/* A fixed-height area while a query is typed, so the list does not jump between
+            Searching…, results and an empty row. */}
+        <div data-testid="palette-server" className={query ? 'min-h-36' : undefined}>
+          {searchState === 'loading' ? (
+            <div role="status" className="px-3 py-2.5 text-muted">
+              Searching…
+            </div>
+          ) : null}
+          {searchState === 'error' ? (
+            <div role="alert" className="px-3 py-2.5 text-err">
+              Search is unavailable.
+            </div>
+          ) : null}
+          {searchState === 'done' && !traceId && !result?.services.length && !result?.groups.length && !result?.templates.length ? (
+            <div role="status" className="px-3 py-2.5 text-muted">
+              No matches for “{query}”.
+            </div>
+          ) : null}
 
-        {result && result.services.length > 0 ? (
-          <Command.Group heading="Services">
-            {result.services.map((s) => (
-              <Command.Item key={s} value={`service:${s}`} className={itemClass} onSelect={() => pick({ kind: 'service', id: s, label: s, hint: 'Service' })}>
-                <Row icon={<Server size={15} />} label={s} hint="open on the map" />
-              </Command.Item>
-            ))}
-          </Command.Group>
-        ) : null}
+          {result && result.services.length > 0 ? (
+            <Command.Group heading="Services">
+              {result.services.map((s) => (
+                <Command.Item key={s} value={`service:${s}`} className={itemClass} onSelect={() => pick({ kind: 'service', id: s, label: s, hint: 'Service' })}>
+                  <Row icon={<Server size={15} />} label={s} hint="open on the map" />
+                </Command.Item>
+              ))}
+            </Command.Group>
+          ) : null}
 
-        {result && result.groups.length > 0 ? (
-          <Command.Group heading="Story groups">
-            {result.groups.map((g) => (
-              <Command.Item
-                key={g.fingerprint}
-                value={`group:${g.fingerprint}`}
-                className={itemClass}
-                onSelect={() => pick({ kind: 'group', id: g.fingerprint, label: g.summary, hint: `${g.kind} · ${g.stories} ${g.stories === 1 ? 'story' : 'stories'}` })}
-              >
-                <Row icon={<TextAlignStart size={15} />} label={g.summary} hint={`${g.kind} · ${g.stories}`} />
-              </Command.Item>
-            ))}
-          </Command.Group>
-        ) : null}
+          {result && result.groups.length > 0 ? (
+            <Command.Group heading="Story groups">
+              {result.groups.map((g) => (
+                <Command.Item
+                  key={g.fingerprint}
+                  value={`group:${g.fingerprint}`}
+                  className={itemClass}
+                  onSelect={() => pick({ kind: 'group', id: g.fingerprint, label: g.summary, hint: `${g.kind} · ${g.stories} ${g.stories === 1 ? 'story' : 'stories'}` })}
+                >
+                  <Row icon={<TextAlignStart size={15} />} label={g.summary} hint={`${g.kind} · ${g.stories}`} />
+                </Command.Item>
+              ))}
+            </Command.Group>
+          ) : null}
 
-        {result && result.templates.length > 0 ? (
-          <Command.Group heading="Templates">
-            {result.templates.map((t) => (
-              <Command.Item
-                key={t.template_id}
-                value={`template:${t.template_id}`}
-                className={itemClass}
-                onSelect={() => pick({ kind: 'template', id: t.template_id, label: t.template, hint: t.service })}
-              >
-                <Row icon={<ScrollText size={15} />} label={t.template} hint={t.service} />
-              </Command.Item>
-            ))}
-          </Command.Group>
-        ) : null}
+          {result && result.templates.length > 0 ? (
+            <Command.Group heading="Templates">
+              {result.templates.map((t) => (
+                <Command.Item
+                  key={t.template_id}
+                  value={`template:${t.template_id}`}
+                  className={itemClass}
+                  onSelect={() => pick({ kind: 'template', id: t.template_id, label: t.template, hint: t.service })}
+                >
+                  <Row icon={<ScrollText size={15} />} label={t.template} hint={t.service} />
+                </Command.Item>
+              ))}
+            </Command.Group>
+          ) : null}
+        </div>
 
         {actions.length > 0 ? (
           <Command.Group heading="Actions">

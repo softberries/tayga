@@ -3,6 +3,7 @@ import { Activity, ChartGantt, ScrollText, TextAlignStart, Waypoints } from 'luc
 import type { LucideIcon } from 'lucide-react'
 import { sinceSearch } from '../../app/search'
 import { cx } from '../../lib/cx'
+import { NARROW_QUERY, useMediaQuery } from '../../lib/useMediaQuery'
 import { Tooltip } from '../ui/Tooltip'
 import { useSince } from './TimeRange'
 
@@ -25,6 +26,8 @@ export const SECTIONS: readonly Section[] = [
 export function Rail() {
   const path = useLocation({ select: (l) => l.pathname })
   const search = sinceSearch(useSince())
+  // On the phone bottom bar a tooltip to the right would run off the screen; open it upward.
+  const side = useMediaQuery(NARROW_QUERY) ? 'top' : 'right'
   // The wrapper stretches to the page height and carries the rail's background and border;
   // the nav inside stays in view (sticky). Phones: a bottom bar fixed to the viewport (main gets matching bottom padding).
   return (
@@ -43,7 +46,7 @@ export function Rail() {
         {SECTIONS.map(({ to, label, icon: Icon, match }) => {
           const active = match(path)
           return (
-            <Tooltip key={to} content={label} side="right">
+            <Tooltip key={to} content={label} side={side}>
               <Link
                 to={to}
                 search={search}

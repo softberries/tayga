@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MotionConfig } from 'motion/react'
+import { LazyMotion, MotionConfig, domAnimation } from 'motion/react'
 import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
@@ -22,7 +22,8 @@ import { Skeleton } from './Skeleton'
 import { StaggerItem, StaggerList } from './Stagger'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './Tabs'
 import { ToggleGroup } from './ToggleGroup'
-import { Tooltip, TooltipProvider } from './Tooltip'
+import { Reveal } from './Reveal'
+import { Tooltip, TooltipProvider, TruncationTooltip } from './Tooltip'
 
 const withTooltips = (ui: ReactNode) => render(<TooltipProvider delayDuration={0}>{ui}</TooltipProvider>)
 
@@ -120,6 +121,52 @@ describe('Tooltip', () => {
     )
     act(() => screen.getByRole('button').focus())
     expect(await screen.findByRole('tooltip')).toHaveTextContent('Stories')
+  })
+})
+
+describe('TruncationTooltip', () => {
+  /** jsdom has no layout: report a cut-off (or not) through the size properties. */
+  function layout(scrollWidth: number, clientWidth: number) {
+    vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockReturnValue(scrollWidth)
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(clientWidth)
+  }
+  const cell = () =>
+    withTooltips(
+      <TruncationTooltip content="a very long endpoint name">
+        <button type="button" className="truncate">
+          a very long end…
+        </button>
+      </TruncationTooltip>,
+    )
+
+  it('shows the full text when the text is cut off', async () => {
+    layout(300, 120)
+    cell()
+    act(() => screen.getByRole('button').focus())
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('a very long endpoint name')
+  })
+  it('stays closed when the text fits', async () => {
+    layout(100, 120)
+    cell()
+    act(() => screen.getByRole('button').focus())
+    await new Promise((r) => setTimeout(r, 30))
+    expect(screen.queryByRole('tooltip')).toBeNull()
+  })
+})
+
+describe('Reveal', () => {
+  it('fades in from transparent, and renders at full opacity under reduced motion', () => {
+    const motion = (mode: 'never' | 'always', id: string) => (
+      <LazyMotion features={domAnimation} strict>
+        <MotionConfig reducedMotion={mode}>
+          <Reveal data-testid={id}>x</Reveal>
+        </MotionConfig>
+      </LazyMotion>
+    )
+    render(motion('never', 'r'))
+    expect(screen.getByTestId('r').style.opacity).toBe('0')
+    render(motion('always', 'r2'))
+    expect(screen.getByTestId('r2').style.opacity).toBe('1')
   })
 })
 

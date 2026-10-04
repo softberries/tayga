@@ -27,6 +27,7 @@ import type { Sort } from '../../features/traces/model'
 import { cx } from '../../lib/cx'
 import { dateTime, duration } from '../../lib/format'
 import { NARROW_QUERY, useMediaQuery } from '../../lib/useMediaQuery'
+import { Reveal } from '../../components/ui/Reveal'
 
 /** Error: the trace failed or has an error story. Slow: it has a slow story. */
 const NAMES: Record<ScatterTone, string> = { accent: 'Other traces', slow: 'Slow stories', err: 'Errors and error stories' }
@@ -267,7 +268,9 @@ export function TracesExplorer() {
               }
             />
           ) : (
-            <TraceTable rows={selected} extent={rows} logY={logY} since={since} sort={sort} onSort={setSort} />
+            <Reveal>
+              <TraceTable rows={selected} extent={rows} logY={logY} since={since} sort={sort} onSort={setSort} />
+            </Reveal>
           )}
         </Card>
       ) : traces.isPending ? (

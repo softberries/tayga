@@ -6,6 +6,7 @@ import type { Since } from '../../app/search'
 import { TimeSeries } from '../../components/charts/TimeSeries'
 import { Card, PanelTitle } from '../../components/ui/Card'
 import { EmptyState } from '../../components/ui/EmptyState'
+import { Reveal } from '../../components/ui/Reveal'
 import { Skeleton } from '../../components/ui/Skeleton'
 import { ErrorBanner } from '../stories/ErrorBanner'
 import { SectionNote, StaleNote } from './Notes'
@@ -67,7 +68,8 @@ export function PipelineChart({ spec, since, refetchInterval }: { spec: ChartSpe
       ) : empty ? (
         <EmptyState className="h-[190px] py-4" icon={<Activity size={18} />} title={COLLECTING} />
       ) : (
-        <TimeSeries
+        <Reveal>
+          <TimeSeries
             series={lines}
             height={190}
             format={spec.format}
@@ -77,6 +79,7 @@ export function PipelineChart({ spec, since, refetchInterval }: { spec: ChartSpe
             splitNumber={4}
             legend={spec.series.length > 1}
           />
+        </Reveal>
       )}
     </Card>
   )

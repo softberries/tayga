@@ -211,6 +211,9 @@ describe('log alerts', () => {
     renderApp('/logs/alerts')
     const table = await screen.findByRole('table', { name: 'Log alerts' })
     const long = alerts.reduce((a, b) => (b.template.length > a.template.length ? b : a))
+    // jsdom has no layout: report the text as cut off, so the tooltip may open.
+    vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockReturnValue(400)
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(100)
     await user.hover(within(table).getAllByRole('link', { name: long.template })[0] as HTMLElement)
     expect((await screen.findAllByRole('tooltip'))[0]).toHaveTextContent(long.template)
   })

@@ -144,6 +144,21 @@ describe('palette search states', () => {
     expect(screen.getByRole('status')).toHaveTextContent('Searching…')
   })
 
+  it('keeps a steady results area from the first keystroke, through loading and results', async () => {
+    const user = userEvent.setup()
+    const calls = deferredSearch()
+    await openPalette()
+    await user.keyboard('{Meta>}k{/Meta}')
+    const input = await screen.findByRole('combobox')
+    expect(screen.getByTestId('palette-server').className).not.toContain('min-h')
+    await user.type(input, 'ab')
+    expect(screen.getByTestId('palette-server').className).toContain('min-h-36')
+    await waitFor(() => expect(calls.map((c) => c.q)).toEqual(['ab']))
+    act(() => calls[0]!.resolve(view('alpha')))
+    expect(await screen.findByRole('option', { name: /alpha/ })).toBeInTheDocument()
+    expect(screen.getByTestId('palette-server').className).toContain('min-h-36')
+  })
+
   it('clearing the box shows only Recent and pages, no old groups', async () => {
     const user = userEvent.setup()
     await openPalette()

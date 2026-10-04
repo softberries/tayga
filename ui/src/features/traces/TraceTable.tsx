@@ -17,6 +17,7 @@ import { serviceColor } from '../../lib/serviceColor'
 import { NARROW_QUERY, useMediaQuery } from '../../lib/useMediaQuery'
 import { barFraction, plotMs, sortRows, toneOf } from './model'
 import type { Sort, SortKey } from './model'
+import { TruncationTooltip } from '../../components/ui/Tooltip'
 
 const COLS = '112px minmax(0, 1fr) minmax(150px, 240px) 52px 56px 76px'
 /** Header row height: the sticky header sits inside the scroller, above the rows. */
@@ -164,10 +165,11 @@ export function TraceTable({ rows, extent, logY, since, sort, onSort, height = 5
                     params={{ traceId: t.trace_id }}
                     search={sinceSearch(since)}
                     className="flex min-w-0 items-baseline gap-1.5 rounded-badge hover:underline"
-                    title={`${t.endpoint_service} · ${t.endpoint_name}`}
                   >
                     <span className="shrink-0 text-xs text-muted">{t.endpoint_service}</span>
-                    <span className="min-w-0 truncate font-mono text-xs text-ink">{t.endpoint_name}</span>
+                    <TruncationTooltip content={`${t.endpoint_service} · ${t.endpoint_name}`}>
+                      <span className="min-w-0 truncate font-mono text-xs text-ink">{t.endpoint_name}</span>
+                    </TruncationTooltip>
                   </Link>
                 </span>
                 <span role="cell" style={{ gridArea: 'dur' }} className="flex min-w-0 items-center gap-2">

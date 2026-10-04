@@ -20,6 +20,7 @@ import { AlertsTable } from '../../features/logs/AlertsTable'
 import { AlertsTimeline } from '../../features/logs/AlertsTimeline'
 import { sinceSearch } from '../../app/search'
 import { TIMELINE_STEP, sortAlerts, stepWord } from '../../features/logs/model'
+import { Reveal } from '../../components/ui/Reveal'
 
 const KINDS = [
   { value: 'all', label: 'All' },
@@ -121,7 +122,9 @@ export function LogAlertsPage() {
             </li>
           </ul>
         </div>
-        {alerts.data ? <AlertsTimeline alerts={alerts.data} since={since} nowMs={alerts.dataUpdatedAt} /> : <Skeleton className="h-[170px]" />}
+        {alerts.data ? <Reveal>
+            <AlertsTimeline alerts={alerts.data} since={since} nowMs={alerts.dataUpdatedAt} />
+          </Reveal> : <Skeleton className="h-[170px]" />}
       </Card>
 
       <Card className="overflow-hidden">
@@ -149,7 +152,9 @@ export function LogAlertsPage() {
             }
           />
         ) : (
-          <AlertsTable alerts={data} since={since} nowMs={alerts.dataUpdatedAt} />
+          <Reveal>
+            <AlertsTable alerts={data} since={since} nowMs={alerts.dataUpdatedAt} />
+          </Reveal>
         )}
       </Card>
     </div>

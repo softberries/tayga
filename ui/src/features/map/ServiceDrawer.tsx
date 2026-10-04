@@ -27,6 +27,7 @@ import { endpointOf, SINCE_SECS, splitSummary } from '../stories/model'
 import { isFailingEdge } from '../stories/mapLayout'
 import { HealthRing } from './ServiceNode'
 import { errText, neighbours, nodeOf, rateText } from './model'
+import { TruncationTooltip } from '../../components/ui/Tooltip'
 
 export const DRAWER_KEY = 'tayga-map-drawer-width'
 const GROUPS_SHOWN = 5
@@ -183,9 +184,9 @@ function Stories({ groups, since, service, nowMs }: { groups: readonly StoryGrou
           >
             <span className="flex min-w-0 items-center gap-2">
               <Badge kind={g.kind === 'error' ? 'error' : 'slow'}>{g.kind}</Badge>
-              <span className="min-w-0 truncate font-medium text-ink" title={g.summary}>
-                {splitSummary(g.summary).title}
-              </span>
+              <TruncationTooltip content={g.summary}>
+                <span className="min-w-0 truncate font-medium text-ink">{splitSummary(g.summary).title}</span>
+              </TruncationTooltip>
             </span>
             <span className="tabular truncate font-mono text-[11.5px] text-muted">
               {compact(g.stories)} {g.stories === 1 ? 'story' : 'stories'} · {endpointOf(g)} · {ago(g.last_seen_ns, nowMs)}

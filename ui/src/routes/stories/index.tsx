@@ -23,6 +23,7 @@ import { KpiTiles, KpiTilesSkeleton } from '../../features/stories/KpiTiles'
 import { MiniMap } from '../../features/stories/MiniMap'
 import { doubleSince } from '../../features/stories/model'
 import { useMediaQuery } from '../../lib/useMediaQuery'
+import { Reveal } from '../../components/ui/Reveal'
 
 function TableSkeleton() {
   return (
@@ -96,17 +97,19 @@ export function StoriesHome() {
           description={`Nothing failed or ran slow in the last ${since}. A longer time range may show older stories.`}
         />
       ) : (
-        <GroupsTable
-          groups={groups.data}
-          search={search}
-          since={since}
-          nowMs={groups.dataUpdatedAt}
-          onSearch={onSearch}
-          selected={selected?.fingerprint}
-          onSelect={onSelect}
-          onOpen={onOpen}
-          onVisible={setVisible}
-        />
+        <Reveal>
+          <GroupsTable
+            groups={groups.data}
+            search={search}
+            since={since}
+            nowMs={groups.dataUpdatedAt}
+            onSearch={onSearch}
+            selected={selected?.fingerprint}
+            onSelect={onSelect}
+            onOpen={onOpen}
+            onVisible={setVisible}
+          />
+        </Reveal>
       )}
     </Card>
   )
@@ -120,7 +123,9 @@ export function StoriesHome() {
         ) : map.isError ? (
           <ErrorBanner what="the service map" error={map.error} onRetry={() => void map.refetch()} />
         ) : (
-          <MiniMap map={map.data} since={since} />
+          <Reveal>
+            <MiniMap map={map.data} since={since} />
+          </Reveal>
         )}
       </Card>
       <Card className="flex min-w-0 flex-col gap-2.5 px-4 py-3.5">
@@ -138,7 +143,9 @@ export function StoriesHome() {
         ) : alerts.isError ? (
           <ErrorBanner what="log alerts" error={alerts.error} onRetry={() => void alerts.refetch()} />
         ) : (
-          <AlertsPanel alerts={alerts.data} since={since} nowMs={alerts.dataUpdatedAt} />
+          <Reveal>
+            <AlertsPanel alerts={alerts.data} since={since} nowMs={alerts.dataUpdatedAt} />
+          </Reveal>
         )}
       </Card>
     </div>

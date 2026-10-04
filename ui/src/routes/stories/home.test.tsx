@@ -133,7 +133,6 @@ describe('stories home', () => {
     const rows = await bodyRows()
     groups.forEach((g, i) => {
       const ep = within(rows[i] as HTMLElement).getByText(endpointOf(g))
-      expect(ep).toHaveAttribute('title', endpointOf(g))
       expect(ep).toHaveClass('shrink-0')
     })
   })

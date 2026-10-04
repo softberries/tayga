@@ -38,6 +38,7 @@ import { SortHeader } from '../../components/ui/SortHeader'
 import { cx } from '../../lib/cx'
 import { ago } from '../../lib/format'
 import { SINCE_SECS, bucketWord, denseSeries, endpointOf, peak, splitSummary } from './model'
+import { TruncationTooltip } from '../../components/ui/Tooltip'
 
 const features = tableFeatures({
   rowSortingFeature,
@@ -358,29 +359,26 @@ export function GroupsTable({ groups, search, since, nowMs, onSearch, selected, 
                     >
                       {g.kind}
                     </span>
-                    <span className="truncate font-medium" title={g.summary}>
-                      {title}
-                    </span>
+                    <TruncationTooltip content={g.summary}>
+                      <span className="truncate font-medium">{title}</span>
+                    </TruncationTooltip>
                   </span>
                   {/* The endpoint never truncates away: groups with the same title differ there.
                       Phones show it on its own line above the detail. */}
                   <span className="flex min-w-0 flex-col gap-0.5 text-xs text-muted sm:flex-row sm:gap-1">
                     {detail ? (
                       <>
-                        <span className="min-w-0 truncate" title={detail}>
-                          {detail}
-                        </span>
+                        <TruncationTooltip content={detail}>
+                          <span className="min-w-0 truncate">{detail}</span>
+                        </TruncationTooltip>
                         <span aria-hidden className="hidden shrink-0 sm:inline">
                           ·
                         </span>
                       </>
                     ) : null}
-                    <span
-                      className="order-first min-w-0 shrink-0 truncate font-mono sm:order-none sm:max-w-[65%]"
-                      title={endpointOf(g)}
-                    >
-                      {endpointOf(g)}
-                    </span>
+                    <TruncationTooltip content={endpointOf(g)}>
+                      <span className="order-first min-w-0 shrink-0 truncate font-mono sm:order-none sm:max-w-[65%]">{endpointOf(g)}</span>
+                    </TruncationTooltip>
                   </span>
                 </span>
                 <span role="gridcell" className="hidden sm:block">

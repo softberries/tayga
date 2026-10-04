@@ -71,6 +71,27 @@ describe('rail', () => {
   })
 })
 
+describe('rail tooltips', () => {
+  const realMatchMedia = window.matchMedia
+  afterEach(() => {
+    window.matchMedia = realMatchMedia
+  })
+  const narrow = (on: boolean) => {
+    window.matchMedia = ((q: string) => ({ ...realMatchMedia(q), matches: on && q.includes('max-width') })) as typeof window.matchMedia
+  }
+  it.each([
+    [true, 'top'],
+    [false, 'right'],
+  ])('on a phone width %s the tooltip opens %s', async (isNarrow, side) => {
+    narrow(isNarrow)
+    renderApp('/')
+    const link = await screen.findByRole('link', { name: 'Pipeline health' })
+    act(() => link.focus())
+    const tip = await screen.findAllByText('Pipeline health')
+    expect(tip.some((el) => el.closest('[data-side]')?.getAttribute('data-side') === side)).toBe(true)
+  })
+})
+
 describe('time range', () => {
   it('binds to ?since and is kept across navigation', async () => {
     const user = userEvent.setup()

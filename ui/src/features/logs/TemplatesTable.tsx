@@ -20,6 +20,7 @@ import { NARROW_QUERY, useMediaQuery } from '../../lib/useMediaQuery'
 import { SINCE_SECS, denseSeries, peak } from '../stories/model'
 import { sortTemplates } from './model'
 import type { TemplateSort, TemplateSortKey } from './model'
+import { TruncationTooltip } from '../../components/ui/Tooltip'
 
 const COLS = '140px minmax(0, 1fr) 72px 120px 84px 80px'
 const AREAS = '"svc tmpl count spark first alert"'
@@ -147,15 +148,16 @@ export function TemplatesTable({ rows, since, nowMs, sort, onSort, height = 'min
                   <span className="truncate">{t.service}</span>
                 </span>
                 <span role="cell" style={{ gridArea: 'tmpl' }} className="min-w-0">
-                  <Link
-                    to="/logs/templates/$templateId"
-                    params={{ templateId: t.template_id }}
-                    search={sinceSearch(since)}
-                    title={t.template}
-                    className="block truncate rounded-badge font-mono text-xs text-ink hover:underline"
-                  >
-                    {t.template}
-                  </Link>
+                  <TruncationTooltip content={t.template}>
+                    <Link
+                      to="/logs/templates/$templateId"
+                      params={{ templateId: t.template_id }}
+                      search={sinceSearch(since)}
+                      className="block truncate rounded-badge font-mono text-xs text-ink hover:underline"
+                    >
+                      {t.template}
+                    </Link>
+                  </TruncationTooltip>
                 </span>
                 <span role="cell" style={{ gridArea: 'count' }} className="tabular text-right font-mono text-xs" title={String(t.count)}>
                   {compact(t.count)}

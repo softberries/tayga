@@ -18,6 +18,7 @@ import { Skeleton } from '../../components/ui/Skeleton'
 import { TemplatesTable } from '../../features/logs/TemplatesTable'
 import type { TemplateSort } from '../../features/logs/model'
 import { ErrorBanner } from '../../features/stories/ErrorBanner'
+import { Reveal } from '../../components/ui/Reveal'
 
 /** Search results are requested this long after the last keystroke. */
 export const SEARCH_DEBOUNCE_MS = 300
@@ -148,7 +149,9 @@ export function LogTemplatesPage() {
             }
           />
         ) : data ? (
-          <TemplatesTable rows={data} since={since} nowMs={templates.dataUpdatedAt} sort={sort} onSort={setSort} />
+          <Reveal>
+            <TemplatesTable rows={data} since={since} nowMs={templates.dataUpdatedAt} sort={sort} onSort={setSort} />
+          </Reveal>
         ) : null}
       </Card>
       {templates.isError && data ? (

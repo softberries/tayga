@@ -1,5 +1,6 @@
 import { Badge } from '../../components/ui/Badge'
 import type { BadgeKind } from '../../components/ui/Badge'
+import { Reveal } from '../../components/ui/Reveal'
 import { Skeleton } from '../../components/ui/Skeleton'
 import { useNow } from '../../lib/useNow'
 import { JOBS, jobStatus, scrapeAge, shortJob } from './model'
@@ -25,22 +26,24 @@ export function StatusStrip({ views }: { views: readonly (SeriesView | undefined
     )
   }
   return (
-    <ul aria-label="Job status" className="m-0 flex list-none flex-wrap gap-3 p-0">
-      {JOBS.map((job, i) => jobStatus(job, views[i], nowMs)).map((s) => (
-        <li
-          key={s.job}
-          data-state={s.state}
-          className="flex min-w-[10.5rem] flex-1 flex-col gap-1.5 rounded-field border border-panel-line bg-panel px-3.5 py-2.5 shadow-panel"
-        >
-          <div className="flex items-center justify-between gap-2">
-            <span className="font-mono text-[13px] font-medium text-ink">{shortJob(s.job)}</span>
-            <Badge kind={KIND[s.state]} shape="pill" glow={s.state === 'down'} pulse={s.state === 'down'}>
-              {LABEL[s.state]}
-            </Badge>
-          </div>
-          <span className="text-xs text-muted">{scrapeAge(s, nowMs)}</span>
-        </li>
-      ))}
-    </ul>
+    <Reveal>
+      <ul aria-label="Job status" className="m-0 flex list-none flex-wrap gap-3 p-0">
+        {JOBS.map((job, i) => jobStatus(job, views[i], nowMs)).map((s) => (
+          <li
+            key={s.job}
+            data-state={s.state}
+            className="flex min-w-[10.5rem] flex-1 flex-col gap-1.5 rounded-field border border-panel-line bg-panel px-3.5 py-2.5 shadow-panel"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-mono text-[13px] font-medium text-ink">{shortJob(s.job)}</span>
+              <Badge kind={KIND[s.state]} shape="pill" glow={s.state === 'down'} pulse={s.state === 'down'}>
+                {LABEL[s.state]}
+              </Badge>
+            </div>
+            <span className="text-xs text-muted">{scrapeAge(s, nowMs)}</span>
+          </li>
+        ))}
+      </ul>
+    </Reveal>
   )
 }
