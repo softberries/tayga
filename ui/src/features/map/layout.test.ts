@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest'
 import serviceMap from '../../api/__fixtures__/service-map.json'
 import type { ServiceMapView } from '../../api/types'
 import { NODE_H, NODE_W, elkGraph, layoutGraph } from './layout'
+import { compactNameSize } from './ServiceNode'
 import type { MapGraph } from './layout'
 import { edgeTone, edgeWidth, mapGraph, mapSummary, matchServices, neighbours, routeMidpoint, routePath, servicesOf, topologyKey } from './model'
 
@@ -108,6 +109,17 @@ describe('layoutGraph', () => {
   })
 })
 
+describe('compactNameSize', () => {
+  it('shrinks by the longest hyphen-delimited word', () => {
+    expect(compactNameSize('product-catalog')).toBe(18)
+    expect(compactNameSize('frontend-proxy')).toBe(18)
+    expect(compactNameSize('accounting12')).toBe(18)
+    expect(compactNameSize('recommendation')).toBe(15)
+    expect(compactNameSize('fraud-detectionabcd')).toBe(15)
+    expect(compactNameSize('averyveryverylongname')).toBe(13)
+  })
+})
+
 describe('map model', () => {
   it('scales edge width by calls/min on a clamped log scale', () => {
     expect(edgeWidth(0)).toBe(1.25)
@@ -124,6 +136,9 @@ describe('map model', () => {
     expect(routePath(pts)).toBe('M0 0L30 0Q40 0 40 10L40 40')
     expect(routeMidpoint(pts)).toEqual({ x: 40, y: 0 })
     expect(routePath([])).toBe('')
+    // A straight route: no corners to round.
+    expect(routePath([{ x: 0, y: 5 }, { x: 64, y: 5 }])).toBe('M0 5L64 5')
+    expect(routeMidpoint([{ x: 0, y: 5 }, { x: 64, y: 5 }])).toEqual({ x: 32, y: 5 })
   })
 
   it('tones edges by error rate with the failing-edge threshold', () => {

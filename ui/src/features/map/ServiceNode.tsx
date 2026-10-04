@@ -77,6 +77,16 @@ export function HealthRing({ health, errorRatio, size = 30 }: { health: Health; 
 /** Below this zoom the card switches to its compact form: bigger name, one telling metric. */
 export const COMPACT_ZOOM = 0.85
 
+/**
+ * Compact name size in px, from its longest hyphen-delimited word: names wrap only at
+ * hyphens, so the longest word must fit one line (18 px up to 12 characters, 15 px up to 15,
+ * else 13 px).
+ */
+export function compactNameSize(service: string): number {
+  const longest = Math.max(0, ...service.split('-').map((w) => w.length))
+  return longest <= 12 ? 18 : longest <= 15 ? 15 : 13
+}
+
 /** The metric that explains a degraded service's health. */
 function keyMetric(view: NodeView): string | null {
   if (view.health === 'error') return `${errText(view.error_ratio)} err`
@@ -120,7 +130,8 @@ function ServiceNodeImpl({ data }: NodeProps<ServiceNodeType>) {
         {compact ? (
           <span className="flex min-w-0 flex-1 flex-col gap-0.5">
             <span
-              className="line-clamp-2 text-[18px] font-semibold leading-[1.15] break-words"
+              className="line-clamp-2 pr-3 font-semibold leading-[1.15]"
+              style={{ fontSize: compactNameSize(service) }}
               title={service}
             >
               {service}
