@@ -2,13 +2,13 @@ import { screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderApp, stubApi } from '../../test/renderApp'
 
-// The Traces page throws while rendering; every other page renders its placeholder.
+// The Pipeline page throws while rendering; every other page renders its placeholder.
 vi.mock('../../pages/placeholders', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../pages/placeholders')>()
   return {
     ...real,
-    TracesPage: () => {
-      throw new Error('traces page exploded')
+    PipelinePage: () => {
+      throw new Error('pipeline page exploded')
     },
   }
 })
@@ -28,9 +28,9 @@ function expectShell() {
 describe('error boundaries', () => {
   it('a page that throws fails inside the shell', async () => {
     stubApi({ '/service-map': { body: { edges: [], nodes: [] } } })
-    renderApp('/traces')
+    renderApp('/pipeline')
     const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent('traces page exploded')
+    expect(alert).toHaveTextContent('pipeline page exploded')
     expect(within(alert).getByRole('button', { name: 'Try again' })).toBeInTheDocument()
     expectShell()
     expect(screen.getByRole('main')).toContainElement(alert)
@@ -38,7 +38,7 @@ describe('error boundaries', () => {
 
   it('other pages still render after navigating away', async () => {
     stubApi({ '/service-map': { body: { edges: [], nodes: [] } } })
-    const { router } = renderApp('/traces')
+    const { router } = renderApp('/pipeline')
     await screen.findByRole('alert')
     await router.navigate({ to: '/map' })
     expect(await screen.findByText('This page is built in Task 9.')).toBeInTheDocument()

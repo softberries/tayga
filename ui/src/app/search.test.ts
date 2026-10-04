@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { HEX32, U64, sinceCovering, validateHomeSearch, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch } from './search'
+import { HEX32, U64, formatRect, parseRect, sinceCovering, validateHomeSearch, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch, validateTracesSearch } from './search'
 
 describe('validateRootSearch', () => {
   it('keeps a valid non-default since', () => {
@@ -83,5 +83,31 @@ describe('validateHomeSearch', () => {
     })
     expect(validateHomeSearch({ group: 42 }).group).toBe('42')
     expect(validateHomeSearch({ group: 2 ** 60 }).group).toBeUndefined()
+  })
+})
+
+describe('traces explorer search', () => {
+  it('keeps valid filters and parses router numbers and flags', () => {
+    expect(
+      validateTracesSearch({ service: 'payment', endpoint: 'POST /api/checkout', min_ms: 5, max_ms: '100', errors: true, log: 1, sel: '1000_2000_40_60' }),
+    ).toEqual({ service: 'payment', endpoint: 'POST /api/checkout', min_ms: 5, max_ms: 100, errors: true, log: true, sel: '1000_2000_40_60' })
+  })
+  it('drops invalid values: fractional or negative ms, max below min, bad flags and rects', () => {
+    expect(validateTracesSearch({ min_ms: 1.5, max_ms: -3, errors: 'maybe', log: 0, sel: 'a_b_c_d' })).toStrictEqual({
+      service: undefined,
+      endpoint: undefined,
+      min_ms: undefined,
+      max_ms: undefined,
+      errors: undefined,
+      log: undefined,
+      sel: undefined,
+    })
+    expect(validateTracesSearch({ min_ms: 100, max_ms: 5 })).toMatchObject({ min_ms: 100, max_ms: undefined })
+  })
+  it('a rect round-trips through the URL, normalized to min before max', () => {
+    expect(parseRect('2000_1000_60_40')).toEqual({ t0: 1000, t1: 2000, d0: 40, d1: 60 })
+    expect(formatRect({ t0: 1000.4, t1: 1999.2, d0: 40.12345, d1: 60 })).toBe('1000_2000_40.123_60')
+    expect(validateTracesSearch({ sel: '2000_1000_60_40' }).sel).toBe('1000_2000_40_60')
+    expect(parseRect('1_2_3')).toBeUndefined()
   })
 })

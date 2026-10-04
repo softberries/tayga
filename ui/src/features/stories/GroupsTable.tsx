@@ -18,7 +18,7 @@ import {
   useTable,
 } from '@tanstack/react-table'
 import type { ColumnFiltersState, SortingState } from '@tanstack/react-table'
-import { ArrowDown, ArrowUp, ChevronDown, Search, X } from 'lucide-react'
+import { ChevronDown, Search, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, ReactNode } from 'react'
 import type { StoryGroup } from '../../api/types'
@@ -34,6 +34,7 @@ import {
   DropdownMenuTrigger,
 } from '../../components/ui/DropdownMenu'
 import { EmptyState } from '../../components/ui/EmptyState'
+import { SortHeader } from '../../components/ui/SortHeader'
 import { cx } from '../../lib/cx'
 import { ago } from '../../lib/format'
 import { SINCE_SECS, bucketWord, denseSeries, endpointOf, peak, splitSummary } from './model'
@@ -152,7 +153,7 @@ function ValueChip({
   )
 }
 
-function SortHeader({
+function GroupSortHeader({
   id,
   sorting,
   onSort,
@@ -168,19 +169,9 @@ function SortHeader({
   const s = sorting[0]
   const dir = s?.id === id ? (s.desc ? 'descending' : 'ascending') : 'none'
   return (
-    <div role="columnheader" aria-sort={dir} className={className}>
-      <button
-        type="button"
-        onClick={() => onSort(id)}
-        className={cx(
-          'inline-flex cursor-pointer items-center gap-1 rounded-badge text-[11px] uppercase tracking-[0.06em] hover:text-ink',
-          dir === 'none' ? 'text-muted' : 'text-ink',
-        )}
-      >
-        {children}
-        {dir === 'descending' ? <ArrowDown aria-hidden size={11} /> : dir === 'ascending' ? <ArrowUp aria-hidden size={11} /> : null}
-      </button>
-    </div>
+    <SortHeader dir={dir} onSort={() => onSort(id)} className={className}>
+      {children}
+    </SortHeader>
   )
 }
 
@@ -309,18 +300,18 @@ export function GroupsTable({ groups, search, since, nowMs, onSearch, selected, 
         >
           <div role="row" className={cx('z-10 grid sm:sticky sm:top-0 items-center gap-3.5 border-b border-line-soft bg-panel py-2 pr-4', COLS)}>
             <span role="columnheader" aria-label="Kind" />
-            <SortHeader id="title" sorting={sorting} onSort={onSort}>
+            <GroupSortHeader id="title" sorting={sorting} onSort={onSort}>
               Group
-            </SortHeader>
+            </GroupSortHeader>
             <div role="columnheader" className="hidden text-[11px] uppercase tracking-[0.06em] text-muted sm:block">
               Trend
             </div>
-            <SortHeader id="stories" sorting={sorting} onSort={onSort} className="text-right">
+            <GroupSortHeader id="stories" sorting={sorting} onSort={onSort} className="text-right">
               Stories
-            </SortHeader>
-            <SortHeader id="last" sorting={sorting} onSort={onSort} className="hidden text-right sm:block">
+            </GroupSortHeader>
+            <GroupSortHeader id="last" sorting={sorting} onSort={onSort} className="hidden text-right sm:block">
               Last seen
-            </SortHeader>
+            </GroupSortHeader>
           </div>
           {rows.map((r, i) => {
             const g = r.original

@@ -1,4 +1,5 @@
 import { Suspense, lazy, useMemo } from 'react'
+import type { EChartsType } from 'echarts/core'
 import { echartsTheme } from '../../theme/echartsTheme'
 import { useAppliedTheme } from '../../theme/useAppliedTheme'
 import { Skeleton } from '../ui/Skeleton'
@@ -13,6 +14,11 @@ export interface EChartProps {
   onEvents?: Record<string, (params: unknown) => void>
   /** Text alternative for screen readers (spec §5: every chart has a text summary). */
   summary: string
+  /**
+   * Called with each new ECharts instance (first render and after a theme switch re-creates
+   * it), for actions such as activating the brush. Keep it stable: it is not re-bound.
+   */
+  onReady?: (chart: EChartsType) => void
 }
 
 /**
@@ -20,7 +26,7 @@ export interface EChartProps {
  * whenever `<html data-theme>` changes; echarts-for-react disposes and re-creates the chart
  * when the theme prop changes, so colors follow the theme switch.
  */
-export function EChart({ option, height, onEvents, summary }: EChartProps) {
+export function EChart({ option, height, onEvents, summary, onReady }: EChartProps) {
   const applied = useAppliedTheme()
   // `applied` is the cache key: the theme object reads the variables of the applied theme.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -30,7 +36,7 @@ export function EChart({ option, height, onEvents, summary }: EChartProps) {
       <figcaption className="sr-only">{summary}</figcaption>
       <div aria-hidden>
         <Suspense fallback={<Skeleton style={{ height }} />}>
-          <Impl option={option} theme={theme} height={height} onEvents={onEvents} summary={summary} />
+          <Impl option={option} theme={theme} height={height} onEvents={onEvents} summary={summary} onReady={onReady} />
         </Suspense>
       </div>
     </figure>

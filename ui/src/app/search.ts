@@ -119,3 +119,65 @@ export function validateHomeSearch(s: Record<string, unknown>): HomeSearch {
     group: typeof group === 'string' && U64.test(group) ? group : undefined,
   }
 }
+
+/** A non-negative whole number of milliseconds (the API takes whole ms), capped at a day. */
+const wholeMs = (v: unknown) => {
+  const n = typeof v === 'string' && /^\d{1,9}$/.test(v) ? Number(v) : v
+  return typeof n === 'number' && Number.isSafeInteger(n) && n >= 0 && n <= 86_400_000 ? n : undefined
+}
+/** `?flag=1`, `?flag=true`: the router parses either to a number or boolean. */
+const flag = (v: unknown) => (v === true || v === 1 || v === '1' || v === 'true' ? true : undefined)
+
+/**
+ * A rectangle selected on the duration scatter: unix ms `t0..t1` and duration ms `d0..d1`,
+ * written to the URL as `t0_t1_d0_d1`.
+ */
+export interface DurationRect {
+  t0: number
+  t1: number
+  d0: number
+  d1: number
+}
+
+export function formatRect(r: DurationRect): string {
+  const n = (v: number) => String(Math.round(v * 1000) / 1000)
+  return [Math.floor(r.t0), Math.ceil(r.t1), n(r.d0), n(r.d1)].join('_')
+}
+
+export function parseRect(v: unknown): DurationRect | undefined {
+  if (typeof v !== 'string' || v.length > 80) return undefined
+  const p = v.split('_').map(Number)
+  if (p.length !== 4 || !p.every(Number.isFinite)) return undefined
+  const [a, b, c, d] = p as [number, number, number, number]
+  return { t0: Math.min(a, b), t1: Math.max(a, b), d0: Math.min(c, d), d1: Math.max(c, d) }
+}
+
+/**
+ * `/traces` (explorer) search: the API filters (service, endpoint, duration bounds in whole
+ * ms, errors only), the log-scale toggle, and the scatter's brush selection (`sel`).
+ */
+export interface TracesSearch {
+  service?: string
+  endpoint?: string
+  min_ms?: number
+  max_ms?: number
+  errors?: true
+  log?: true
+  sel?: string
+}
+
+export function validateTracesSearch(s: Record<string, unknown>): TracesSearch {
+  const min = wholeMs(s.min_ms)
+  const max = wholeMs(s.max_ms)
+  const sel = parseRect(s.sel)
+  return {
+    service: str(s.service, 200),
+    endpoint: str(s.endpoint, 400),
+    min_ms: min,
+    // A hand-written URL with min above max would be a 400: keep the lower bound only.
+    max_ms: max !== undefined && (min === undefined || max >= min) ? max : undefined,
+    errors: flag(s.errors),
+    log: flag(s.log),
+    sel: sel ? formatRect(sel) : undefined,
+  }
+}

@@ -82,7 +82,7 @@ describe('time range', () => {
     await user.click(screen.getByRole('link', { name: 'Traces' }))
     await waitFor(() => expect(router.state.location.pathname).toBe('/traces'))
     expect(router.state.location.search).toEqual({ since: '24h' })
-    expect(within(screen.getByRole('radiogroup')).getByRole('radio', { name: '24h' })).toHaveAttribute('data-state', 'on')
+    expect(within(screen.getByRole('radiogroup', { name: 'Time range' })).getByRole('radio', { name: '24h' })).toHaveAttribute('data-state', 'on')
   })
 
   it('reads ?since from the URL', async () => {

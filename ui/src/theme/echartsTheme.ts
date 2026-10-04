@@ -1,7 +1,7 @@
 /**
  * ECharts theme built from the live CSS variables, so charts follow the active theme.
  * Call it again after a theme switch (key charts on `useTheme().resolved`). The object is
- * structurally an ECharts theme; echarts itself is added with the first chart (Task 8).
+ * structurally an ECharts theme.
  */
 
 function cssVar(style: CSSStyleDeclaration, name: string): string {

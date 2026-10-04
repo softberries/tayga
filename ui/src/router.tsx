@@ -9,7 +9,7 @@ import {
   redirect,
   retainSearchParams,
 } from '@tanstack/react-router'
-import { HEX32, U64, validateHomeSearch, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch } from './app/search'
+import { HEX32, U64, validateHomeSearch, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch, validateTracesSearch } from './app/search'
 import type { RootSearch } from './app/search'
 import { AppShell } from './components/shell/AppShell'
 import { NotFound } from './pages/NotFound'
@@ -69,7 +69,8 @@ const tracesRoute = createRoute({
 const tracesIndexRoute = createRoute({
   getParentRoute: () => tracesRoute,
   path: '/',
-  component: page('TracesPage'),
+  validateSearch: validateTracesSearch,
+  component: lazyRouteComponent(() => import('./routes/traces/index'), 'TracesExplorer'),
 })
 
 const traceRoute = createRoute({
