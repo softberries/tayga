@@ -181,6 +181,15 @@ export const TraceViewSchema = z.strictObject({
   story_id: z.nullable(str),
 })
 
+/** `GET /traces/{id}/log-templates` element: the template each log of the trace matched. */
+export const TraceLogTemplateSchema = z.strictObject({
+  log_id: str,
+  template_id: str,
+  template: str,
+  /** `new` or `spike` when the template had an active alert at the trace's time. */
+  alert: z.nullable(AlertKindSchema),
+})
+
 export const EdgeViewSchema = z.strictObject({
   parent: str,
   child: str,

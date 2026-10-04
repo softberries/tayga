@@ -33,3 +33,53 @@ export const U64 = /^[0-9]{1,20}$/
 export function sinceSearch(since: Since): RootSearch {
   return { since: since === DEFAULT_SINCE ? undefined : since }
 }
+
+/** 16 hex characters (span ids). */
+export const HEX16 = /^[0-9a-fA-F]{16}$/
+
+export type SpanFilter = 'errors' | 'critical'
+
+/** `/traces/:id` search: the open span, waterfall search text and row filter. */
+export interface TraceSearch {
+  span?: string
+  q?: string
+  only?: SpanFilter
+}
+
+/** A non-empty string param, capped; the router parses `?q=42` as a number, so accept that too. */
+const str = (v: unknown, max: number) => {
+  const t = typeof v === 'number' && Number.isFinite(v) ? String(v) : v
+  return typeof t === 'string' && t !== '' ? t.slice(0, max) : undefined
+}
+
+export function validateTraceSearch(s: Record<string, unknown>): TraceSearch {
+  return {
+    span: typeof s.span === 'string' && HEX16.test(s.span) ? s.span.toLowerCase() : undefined,
+    q: str(s.q, 200),
+    only: s.only === 'errors' || s.only === 'critical' ? s.only : undefined,
+  }
+}
+
+/** Minimum log severity shown: info (9+), warn (13+), error (17+); absent shows all. */
+export const SEVERITY_MIN = { info: 9, warn: 13, error: 17 } as const
+export type SeverityFilter = keyof typeof SEVERITY_MIN
+
+/** `/stories/:id` search: the trace params plus the log table's service and severity filters. */
+export interface StorySearch extends TraceSearch {
+  log_service?: string
+  sev?: SeverityFilter
+}
+
+export function validateStorySearch(s: Record<string, unknown>): StorySearch {
+  const sev = typeof s.sev === 'string' && Object.hasOwn(SEVERITY_MIN, s.sev) ? (s.sev as SeverityFilter) : undefined
+  return { ...validateTraceSearch(s), log_service: str(s.log_service, 200), sev }
+}
+
+/** `/map` search: the service whose drawer is open. */
+export interface MapSearch {
+  service?: string
+}
+
+export function validateMapSearch(s: Record<string, unknown>): MapSearch {
+  return { service: str(s.service, 200) }
+}

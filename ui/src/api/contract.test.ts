@@ -27,6 +27,7 @@ import storyGroups from './__fixtures__/story-groups.json'
 import storySlow from './__fixtures__/story-slow.json'
 import story from './__fixtures__/story.json'
 import traceErrorPayment from './__fixtures__/trace-error-payment.json'
+import traceLogTemplates from './__fixtures__/trace-log-templates.json'
 import trace from './__fixtures__/trace.json'
 import tracesSearch from './__fixtures__/traces-search.json'
 import * as S from './schemas'
@@ -39,6 +40,7 @@ const cases: Array<[string, ZodType, unknown]> = [
   ['stories/{id} (slow, baseline diff)', S.StoryViewSchema, storySlow],
   ['traces/{id}', S.TraceViewSchema, trace],
   ['traces/{id} (140 spans)', S.TraceViewSchema, traceErrorPayment],
+  ['traces/{id}/log-templates', z.array(S.TraceLogTemplateSchema), traceLogTemplates],
   ['service-map', S.ServiceMapSchema, serviceMap],
   ['log-alerts', z.array(S.LogAlertViewSchema), logAlerts],
   ['log-templates', z.array(S.LogTemplateViewSchema), logTemplates],

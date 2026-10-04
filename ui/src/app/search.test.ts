@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { HEX32, U64, validateRootSearch } from './search'
+import { HEX32, U64, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch } from './search'
 
 describe('validateRootSearch', () => {
   it('keeps a valid non-default since', () => {
@@ -18,5 +18,35 @@ describe('validateRootSearch', () => {
     expect(HEX32.test('334c8a31')).toBe(false)
     expect(U64.test('11039615203255878215')).toBe(true)
     expect(U64.test('12a')).toBe(false)
+  })
+})
+
+describe('page search params', () => {
+  it('trace: span id, search text and filter', () => {
+    expect(validateTraceSearch({ span: '910F3FCFB9A67DDC', q: 'pay', only: 'errors' })).toEqual({
+      span: '910f3fcfb9a67ddc',
+      q: 'pay',
+      only: 'errors',
+    })
+    expect(validateTraceSearch({ span: 'nope', q: '', only: 'all' })).toStrictEqual({
+      span: undefined,
+      q: undefined,
+      only: undefined,
+    })
+    expect(validateTraceSearch({ q: 42 }).q).toBe('42')
+    expect(validateTraceSearch({ q: 'x'.repeat(500) }).q).toHaveLength(200)
+  })
+  it('story: adds log service and severity', () => {
+    expect(validateStorySearch({ log_service: 'payment', sev: 'warn', only: 'critical' })).toMatchObject({
+      log_service: 'payment',
+      sev: 'warn',
+      only: 'critical',
+    })
+    expect(validateStorySearch({ sev: 'loud' }).sev).toBeUndefined()
+    expect(validateStorySearch({ sev: 'toString' }).sev).toBeUndefined()
+  })
+  it('map: service', () => {
+    expect(validateMapSearch({ service: 'checkout' })).toEqual({ service: 'checkout' })
+    expect(validateMapSearch({})).toStrictEqual({ service: undefined })
   })
 })

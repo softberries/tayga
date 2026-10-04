@@ -22,6 +22,7 @@ import type {
   StoryGroup,
   StoryView,
   TraceHit,
+  TraceLogTemplate,
   TraceView,
 } from './types'
 
@@ -42,6 +43,8 @@ export const api = {
     q<StoriesSeries>('stories-series', '/stories/series', p),
   story: (id: string) => q<StoryView>('story', `/stories/${encodeURIComponent(id)}`),
   trace: (id: string) => q<TraceView>('trace', `/traces/${encodeURIComponent(id)}`),
+  traceLogTemplates: (id: string) =>
+    q<TraceLogTemplate[]>('trace', `/traces/${encodeURIComponent(id)}/log-templates`),
   traceSearch: (p: {
     since: Since
     service?: string

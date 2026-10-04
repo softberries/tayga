@@ -9,7 +9,7 @@ import {
   redirect,
   retainSearchParams,
 } from '@tanstack/react-router'
-import { HEX32, U64, validateRootSearch } from './app/search'
+import { HEX32, U64, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch } from './app/search'
 import type { RootSearch } from './app/search'
 import { AppShell } from './components/shell/AppShell'
 import { NotFound } from './pages/NotFound'
@@ -52,6 +52,7 @@ const storyRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: 'stories/$storyId',
   staticData: { crumb: 'Story', crumbParam: 'storyId' },
+  validateSearch: validateStorySearch,
   beforeLoad: ({ params }) => {
     if (!HEX32.test(params.storyId)) throw notFound()
   },
@@ -74,6 +75,7 @@ const traceRoute = createRoute({
   getParentRoute: () => tracesRoute,
   path: '$traceId',
   staticData: { crumb: 'Trace', crumbParam: 'traceId' },
+  validateSearch: validateTraceSearch,
   beforeLoad: ({ params }) => {
     if (!HEX32.test(params.traceId)) throw notFound()
   },
@@ -84,6 +86,7 @@ const mapRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: 'map',
   staticData: { crumb: 'Service map' },
+  validateSearch: validateMapSearch,
   component: page('MapPage'),
 })
 

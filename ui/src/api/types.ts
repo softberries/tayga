@@ -44,6 +44,7 @@ import type {
   TemplateHitSchema,
   TraceHitSchema,
   TraceLogSchema,
+  TraceLogTemplateSchema,
   TraceSpanSchema,
   TraceViewSchema,
 } from './schemas'
@@ -73,6 +74,7 @@ export type StoryView = z.infer<typeof StoryViewSchema>
 export type SpanEvent = z.infer<typeof SpanEventSchema>
 export type TraceSpan = z.infer<typeof TraceSpanSchema>
 export type TraceLog = z.infer<typeof TraceLogSchema>
+export type TraceLogTemplate = z.infer<typeof TraceLogTemplateSchema>
 export type TraceView = z.infer<typeof TraceViewSchema>
 export type EdgeView = z.infer<typeof EdgeViewSchema>
 export type NodeView = z.infer<typeof NodeViewSchema>

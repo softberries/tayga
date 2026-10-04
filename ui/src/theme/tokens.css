@@ -154,6 +154,17 @@
   --tg-chart-5: #6b4fc8;
   --tg-chart-6: #0e7c86;
 
+  /* Service identity dots (waterfall, chips): hashed by name; no red or amber, which mean
+     error and slow. Non-text marks, at least 3:1 on panel. */
+  --tg-svc-1: #2e64c8;
+  --tg-svc-2: #0e7c86;
+  --tg-svc-3: #1f7a4d;
+  --tg-svc-4: #6b4fc8;
+  --tg-svc-5: #b23a7f;
+  --tg-svc-6: #6b7f12;
+  --tg-svc-7: #4f6d8a;
+  --tg-svc-8: #4453b8;
+
   /* Brand and call-to-action gradients are the same in both themes. */
   --tg-brand-from: #2b6cb0;
   --tg-brand-to: #7cc4ff;
@@ -224,6 +235,15 @@
 
   --tg-chart-5: #b79cff;
   --tg-chart-6: #5ed6d6;
+
+  --tg-svc-1: #6fa8ff;
+  --tg-svc-2: #5ed6d6;
+  --tg-svc-3: #7fd1a8;
+  --tg-svc-4: #b79cff;
+  --tg-svc-5: #f59ac8;
+  --tg-svc-6: #c3d96b;
+  --tg-svc-7: #8fb6d9;
+  --tg-svc-8: #8c9eff;
 
   --tg-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 10px 28px rgba(0, 0, 0, 0.35);
   --tg-shadow-lg: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 18px 48px rgba(0, 0, 0, 0.5);
