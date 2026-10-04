@@ -1892,6 +1892,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tayga-drain"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "tayga-analysis",
+]
+
+[[package]]
 name = "tayga-e2e"
 version = "0.1.0"
 dependencies = [

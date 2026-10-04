@@ -38,6 +38,7 @@ tayga-api = { path = "crates/tayga-api" }
 tayga-common = { path = "crates/tayga-common" }
 tayga-model = { path = "crates/tayga-model" }
 tayga-analysis = { path = "crates/tayga-analysis" }
+tayga-drain = { path = "crates/tayga-drain" }
 tayga-kafka = { path = "crates/tayga-kafka" }
 tayga-store = { path = "crates/tayga-store" }
 tayga-devtools = { path = "crates/tayga-devtools" }
