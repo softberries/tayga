@@ -7,6 +7,7 @@ use tayga_api::recorder::{self, Target};
 use tayga_api::repo::ChRepo;
 use tayga_api::routes::{ApiMetrics, api_router};
 use tayga_api::routes_v2::{self, ClientConfig, LagCache};
+use tayga_api::spa;
 use tayga_api::ui::{UiLinks, ui_router};
 use tayga_kafka::KafkaSettings;
 use tayga_store::ClickHouseSettings;
@@ -79,7 +80,9 @@ async fn main() -> anyhow::Result<()> {
                 grafana_url: settings.grafana_url,
             },
         ))
-        .merge(tayga_common::metrics::router(registry));
+        .merge(tayga_common::metrics::router(registry))
+        // Last: only paths no other route matched fall through to the app.
+        .merge(spa::router());
     let listener = tokio::net::TcpListener::bind(settings.http_addr).await?;
     tracing::info!(addr = %settings.http_addr, "tayga-api listening");
     axum::serve(listener, app)

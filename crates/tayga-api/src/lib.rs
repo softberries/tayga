@@ -7,6 +7,7 @@ pub mod repo;
 pub mod routes;
 pub mod routes_v2;
 pub mod series;
+pub mod spa;
 pub mod svg;
 #[cfg(test)]
 pub(crate) mod testrepo;
