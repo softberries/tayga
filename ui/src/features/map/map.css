@@ -83,7 +83,12 @@
   color: var(--tg-faint);
 }
 
-/* Controls sit above the attribution line in the bottom-right corner. */
-.tg-map .react-flow__panel.bottom.right.tg-map-controls {
+/* Controls and minimap sit above the attribution line in the bottom-right corner, the
+   controls to the left of the minimap on wide screens. */
+.tg-map .react-flow__panel.bottom.right.tg-map-controls,
+.tg-map .react-flow__panel.bottom.right.tg-map-minimap {
   margin-bottom: 26px;
+}
+.tg-map .react-flow__panel.bottom.right.tg-map-controls-beside {
+  margin-right: calc(168px + 15px + 10px);
 }

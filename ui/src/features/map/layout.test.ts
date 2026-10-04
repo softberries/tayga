@@ -7,7 +7,7 @@ import serviceMap from '../../api/__fixtures__/service-map.json'
 import type { ServiceMapView } from '../../api/types'
 import { NODE_H, NODE_W, elkGraph, layoutGraph } from './layout'
 import type { MapGraph } from './layout'
-import { edgeTone, edgeWidth, mapGraph, mapSummary, matchServices, neighbours, servicesOf, topologyKey } from './model'
+import { edgeTone, edgeWidth, mapGraph, mapSummary, matchServices, neighbours, routeMidpoint, routePath, servicesOf, topologyKey } from './model'
 
 const fixture = serviceMap as ServiceMapView
 
@@ -56,11 +56,32 @@ describe('layoutGraph', () => {
       for (let j = i + 1; j < list.length; j++) expect(overlaps(list[i]!, list[j]!)).toBe(false)
   })
 
+  it('routes every call between the cards, never across one', async () => {
+    const g = mapGraph(fixture)
+    const { positions, routes } = await layoutGraph(g)
+    const boxes = Object.values(positions)
+    for (const [s, t] of g.links) {
+      const route = routes[`${s}->${t}`]
+      expect(route?.length).toBeGreaterThanOrEqual(2)
+      for (let i = 1; i < route!.length; i++) {
+        const a = route![i - 1]!
+        const b = route![i]!
+        // Orthogonal segments: a segment crosses a card when it passes through its interior.
+        for (const p of boxes) {
+          const crossesX = Math.max(a.x, b.x) > p.x + 1 && Math.min(a.x, b.x) < p.x + NODE_W - 1
+          const crossesY = Math.max(a.y, b.y) > p.y + 1 && Math.min(a.y, b.y) < p.y + NODE_H - 1
+          expect(crossesX && crossesY, `${s}->${t} crosses a card`).toBe(false)
+        }
+      }
+    }
+  })
+
   it('is deterministic for a fixed graph', async () => {
     const g = mapGraph(fixture)
     const a = await layoutGraph(g)
     const b = await layoutGraph(g)
     expect(b.positions).toEqual(a.positions)
+    expect(b.routes).toEqual(a.routes)
     expect([b.width, b.height]).toEqual([a.width, a.height])
   })
 
@@ -92,6 +113,17 @@ describe('map model', () => {
     expect(edgeWidth(0)).toBe(1.25)
     expect(edgeWidth(10)).toBeGreaterThan(edgeWidth(1))
     expect(edgeWidth(1e9)).toBe(6)
+  })
+
+  it('draws routes with rounded corners and finds their midpoint', () => {
+    const pts = [
+      { x: 0, y: 0 },
+      { x: 40, y: 0 },
+      { x: 40, y: 40 },
+    ]
+    expect(routePath(pts)).toBe('M0 0L30 0Q40 0 40 10L40 40')
+    expect(routeMidpoint(pts)).toEqual({ x: 40, y: 0 })
+    expect(routePath([])).toBe('')
   })
 
   it('tones edges by error rate with the failing-edge threshold', () => {

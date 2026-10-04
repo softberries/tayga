@@ -14,10 +14,17 @@ import groups from '../api/__fixtures__/story-groups.json'
 import type { ServiceMapView } from '../api/types'
 import { clearOutage } from '../app/apiStatus'
 import { logSignals } from '../features/map/ServiceDrawer'
+import { layoutGraph } from '../features/map/layout'
+import { setReducedMotion } from '../test/setup'
 import { renderApp, stubApi } from '../test/renderApp'
 import type { Routes } from '../test/renderApp'
 
 vi.mock('../components/charts/EChartImpl', () => ({ default: () => <div data-testid="echart" /> }))
+// The real layout, counted.
+vi.mock('../features/map/layout', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../features/map/layout')>()
+  return { ...real, layoutGraph: vi.fn(real.layoutGraph) }
+})
 
 /** The fixture with payment and checkout failing and shipping slow, as in the demo. */
 function degraded(): ServiceMapView {
@@ -98,7 +105,7 @@ describe('service map', () => {
     expect(await node('load-generator')).toHaveAccessibleName(/no server spans/)
     expect(screen.getAllByRole('button', { name: /Open details\.$/ })).toHaveLength(19)
     expect(screen.getByText('19 services · 3 degraded · 4 failing calls')).toBeInTheDocument()
-    expect(screen.getByText(/^Service map: 17 services; degraded: checkout \(error\), payment \(error\), shipping \(slow\)/)).toBeInTheDocument()
+    expect(screen.getByText(/^Service map: 19 services; degraded: checkout \(error\), payment \(error\), shipping \(slow\); callers without spans of their own: frontend-web, load-generator;/)).toBeInTheDocument()
     expect(screen.getByRole('list', { name: 'Legend' })).toHaveTextContent('failing calls')
     await waitFor(() => expect(container.querySelectorAll('.react-flow__edge').length).toBeGreaterThan(0))
     expect(container.querySelectorAll('[data-tone="err"] path.tg-flow')).toHaveLength(4)
@@ -141,6 +148,54 @@ describe('service map', () => {
     await waitFor(() => expect(router.state.location.search).not.toHaveProperty('service'))
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     expect(await node('checkout')).toHaveFocus()
+  })
+
+  it('keyboard focus on a card outside the canvas pans it into view', async () => {
+    setReducedMotion(true)
+    stubApi(routes())
+    renderApp('/map')
+    const quote = await node('quote')
+    const viewport = document.querySelector<HTMLElement>('.react-flow__viewport')!
+    await waitFor(() => expect(viewport.style.transform).toMatch(/translate/))
+    const before = viewport.style.transform
+    const rect = (x: number, y: number, w: number, h: number) =>
+      ({ x, y, left: x, top: y, width: w, height: h, right: x + w, bottom: y + h, toJSON: () => ({}) }) as DOMRect
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      if (this.classList.contains('react-flow')) return rect(0, 0, 1000, 600)
+      // The quote card sits past the canvas's right edge.
+      if (this === quote) return rect(1400, 200, 190, 76)
+      return rect(0, 0, 0, 0)
+    })
+    act(() => quote.focus())
+    await waitFor(() => expect(viewport.style.transform).not.toBe(before))
+    // Its centre moved by (500 - 1495, 300 - 238).
+    const x = (t: string) => Number(/translate\(([-\d.]+)px/.exec(t)?.[1])
+    expect(x(viewport.style.transform) - x(before)).toBeCloseTo(-995, 0)
+  })
+
+  it('a refresh with the same topology keeps the layout; a new call relays it out', async () => {
+    const lay = vi.mocked(layoutGraph)
+    lay.mockClear()
+    const fetch = stubApi(routes())
+    const { queryClient } = renderApp('/map')
+    await node('payment')
+    expect(lay).toHaveBeenCalledTimes(1)
+
+    // Same services and calls, new numbers.
+    const busier = degraded()
+    for (const n of busier.nodes) if (n.service === 'payment') n.error_ratio = 0.5
+    stubApi(routes({ '/service-map': { body: busier } }))
+    await act(() => queryClient.invalidateQueries({ queryKey: ['service-map'] }))
+    await waitFor(() => expect(screen.getByRole('button', { name: /^payment, errors: .* 50 % errors/ })).toBeInTheDocument())
+    expect(lay).toHaveBeenCalledTimes(1)
+
+    // A call that was not there before.
+    const wider = degraded()
+    wider.edges.push({ parent: 'quote', child: 'email', calls: 1, errors: 0, error_rate: 0, avg_duration_ns: 1 })
+    stubApi(routes({ '/service-map': { body: wider } }))
+    await act(() => queryClient.invalidateQueries({ queryKey: ['service-map'] }))
+    await waitFor(() => expect(lay).toHaveBeenCalledTimes(2))
+    expect(fetch).toHaveBeenCalled()
   })
 
   it('search highlights matching services and dims the rest', async () => {

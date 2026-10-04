@@ -55,7 +55,7 @@ describe('stories home', () => {
     expect(screen.getByText(`${groups.length} groups · sorted by stories`)).toBeInTheDocument()
     // KPI tiles from /overview, the map preview and the 5 newest alerts.
     expect(screen.getByRole('list', { name: 'Summary' })).toHaveTextContent(String(overview.error_stories))
-    expect(screen.getByRole('link', { name: /^Service map: 17 services/ })).toHaveAttribute('href', '/map')
+    expect(screen.getByRole('link', { name: /^Service map: 19 services/ })).toHaveAttribute('href', '/map')
     expect(screen.getAllByRole('link', { name: /spike|new/ }).filter((a) => a.getAttribute('href')?.startsWith('/logs/templates/'))).toHaveLength(5)
   })
 

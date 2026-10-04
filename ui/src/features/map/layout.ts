@@ -7,13 +7,15 @@ import ElkApi from 'elkjs/lib/elk-api.js'
 import type { ELK, ElkNode } from 'elkjs/lib/elk-api.js'
 
 /** Service card size in px; ELK reserves exactly this box per node. */
-export const NODE_W = 220
+export const NODE_W = 190
 export const NODE_H = 76
 
 export const ELK_OPTIONS: Record<string, string> = {
   'elk.algorithm': 'layered',
   'elk.direction': 'RIGHT',
-  'elk.layered.spacing.nodeNodeBetweenLayers': '96',
+  'elk.layered.spacing.nodeNodeBetweenLayers': '64',
+  // Edges are drawn along ELK's routes, so they run between the cards, never across them.
+  'elk.edgeRouting': 'ORTHOGONAL',
   'elk.spacing.nodeNode': '28',
   'elk.spacing.componentComponent': '56',
   'elk.layered.nodePlacement.strategy': 'BRANDES_KOEPF',
@@ -37,6 +39,8 @@ export interface Pos {
 export interface MapLayout {
   /** Top-left corner of each service's card. */
   positions: Record<string, Pos>
+  /** Each link's route by edge id (`caller->callee`): start, bend points, end. */
+  routes: Record<string, Pos[]>
   width: number
   height: number
   /** Wall-clock layout time in ms (worker round trip included). */
@@ -48,14 +52,22 @@ export function elkGraph(graph: MapGraph): ElkNode {
     id: 'root',
     layoutOptions: ELK_OPTIONS,
     children: graph.services.map((id) => ({ id, width: NODE_W, height: NODE_H })),
-    edges: graph.links.map(([s, t]) => ({ id: `${s}->${t}`, sources: [s], targets: [t] })),
+    edges: graph.links.map(([s, t]) => ({ id: edgeId(s, t), sources: [s], targets: [t] })),
   }
 }
+
+export const edgeId = (caller: string, callee: string) => `${caller}->${callee}`
 
 export function positionsOf(result: ElkNode): Omit<MapLayout, 'ms'> {
   const positions: Record<string, Pos> = {}
   for (const c of result.children ?? []) positions[c.id] = { x: c.x ?? 0, y: c.y ?? 0 }
-  return { positions, width: result.width ?? 0, height: result.height ?? 0 }
+  const routes: Record<string, Pos[]> = {}
+  for (const e of result.edges ?? []) {
+    const points: Pos[] = []
+    for (const s of e.sections ?? []) points.push(s.startPoint, ...(s.bendPoints ?? []), s.endPoint)
+    if (points.length >= 2) routes[e.id] = points.map(({ x, y }) => ({ x, y }))
+  }
+  return { positions, routes, width: result.width ?? 0, height: result.height ?? 0 }
 }
 
 interface Engine {

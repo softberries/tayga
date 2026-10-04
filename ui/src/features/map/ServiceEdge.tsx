@@ -1,5 +1,6 @@
 /**
- * Call edge: a bezier whose width follows calls/min and whose color follows the error rate.
+ * Call edge along ELK's route (orthogonal, rounded corners; a bezier when there is no route
+ * yet), so it runs between the cards. Width follows calls/min, color the error rate.
  * Failing calls are dashed and flow (CSS `stroke-dashoffset`; static under reduced motion).
  * Hovering shows calls, error % and average latency; clicking pins that label.
  */
@@ -9,7 +10,8 @@ import { memo, useState } from 'react'
 import type { EdgeView } from '../../api/types'
 import { cx } from '../../lib/cx'
 import { compact, duration } from '../../lib/format'
-import { TONE_STROKE, errText } from './model'
+import type { Pos } from './layout'
+import { TONE_STROKE, errText, routeMidpoint, routePath } from './model'
 import type { EdgeTone } from './model'
 
 export interface ServiceEdgeData extends Record<string, unknown> {
@@ -21,6 +23,8 @@ export interface ServiceEdgeData extends Record<string, unknown> {
   pinned: boolean
   /** A search is active and neither end matches it. */
   dimmed: boolean
+  /** ELK's route in flow coordinates; absent while a new topology is being laid out. */
+  route?: readonly Pos[]
 }
 
 export type ServiceEdgeType = Edge<ServiceEdgeData, 'service'>
@@ -34,8 +38,10 @@ function ServiceEdgeImpl({ id, sourceX, sourceY, targetX, targetY, sourcePositio
   const [hover, setHover] = useState(false)
   // The label keeps its size at any zoom.
   const zoom = useStore((s) => s.transform[2])
-  const [path, labelX, labelY] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition })
+  const [bezier, bx, by] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition })
   if (!data) return null
+  const mid = data.route ? routeMidpoint(data.route) : { x: bx, y: by }
+  const path = data.route ? routePath(data.route) : bezier
   const failing = data.tone === 'err'
   const show = hover || data.pinned
   return (
@@ -64,7 +70,11 @@ function ServiceEdgeImpl({ id, sourceX, sourceY, targetX, targetY, sourcePositio
           <div
             role="tooltip"
             className="tg-map-label pointer-events-none absolute z-10 whitespace-nowrap rounded-control border border-panel-line bg-panel px-2 py-1 font-mono text-[11px] text-ink shadow-panel"
-            style={{ transform: `translate(${labelX}px, ${labelY}px) translate(-50%, -50%) scale(${1 / zoom})` }}
+            // Above the line's midpoint, so it covers neither the line's ends nor the cards.
+            style={{
+              transform: `translate(${mid.x}px, ${mid.y}px) scale(${1 / zoom}) translate(-50%, calc(-100% - 10px))`,
+              transformOrigin: '0 0',
+            }}
           >
             <span className="text-muted">
               {data.edge.parent} → {data.edge.child}

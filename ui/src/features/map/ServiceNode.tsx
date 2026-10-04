@@ -3,7 +3,7 @@
  * Degraded services glow and show a pulsing dot (static under reduced motion). The card is a
  * real button that opens the service drawer, so the map is keyboard reachable.
  */
-import { Handle, Position } from '@xyflow/react'
+import { Handle, Position, useStore } from '@xyflow/react'
 import type { Node, NodeProps } from '@xyflow/react'
 import { memo } from 'react'
 import type { Health, NodeView } from '../../api/types'
@@ -23,6 +23,8 @@ export interface ServiceNodeData extends Record<string, unknown> {
   /** Its drawer is open. */
   active: boolean
   onOpen: (service: string) => void
+  /** Keyboard focus reached the card: bring it into view. */
+  onFocusCard: (service: string) => void
 }
 
 export type ServiceNodeType = Node<ServiceNodeData, 'service'>
@@ -37,7 +39,10 @@ export function nodeLabel(service: string, view: NodeView | null): string {
   )
 }
 
-/** Ring: the health color, with an arc for the share of failed calls. */
+/**
+ * Ring: the health color, with an err arc for the share of failed calls. On a failing service
+ * the ring itself is the neutral track, so the arc stays visible.
+ */
 export function HealthRing({ health, errorRatio, size = 30 }: { health: Health; errorRatio: number; size?: number }) {
   const r = size / 2 - 3
   const c = 2 * Math.PI * r
@@ -48,8 +53,8 @@ export function HealthRing({ health, errorRatio, size = 30 }: { health: Health; 
         cx={size / 2}
         cy={size / 2}
         r={r}
-        strokeWidth={health === 'ok' ? 2 : 2.5}
-        style={{ stroke: HEALTH_COLOR[health] }}
+        strokeWidth={health === 'ok' ? 2 : health === 'error' ? 3.5 : 2.5}
+        style={{ stroke: health === 'error' ? 'var(--tg-track)' : HEALTH_COLOR[health] }}
         className={cx(health === 'error' ? 'fill-err-soft' : health === 'slow' ? 'fill-slow-soft' : 'fill-node')}
       />
       {arc > 0 ? (
@@ -69,10 +74,23 @@ export function HealthRing({ health, errorRatio, size = 30 }: { health: Health; 
   )
 }
 
+/** Below this zoom the card switches to its compact form: bigger name, one telling metric. */
+export const COMPACT_ZOOM = 0.85
+
+/** The metric that explains a degraded service's health. */
+function keyMetric(view: NodeView): string | null {
+  if (view.health === 'error') return `${errText(view.error_ratio)} err`
+  if (view.health === 'slow') return `p99 ${duration(view.p99_ns)}`
+  return null
+}
+
 function ServiceNodeImpl({ data }: NodeProps<ServiceNodeType>) {
-  const { service, view, match, dimmed, active, onOpen } = data
+  const { service, view, match, dimmed, active, onOpen, onFocusCard } = data
   const health: Health = view?.health ?? 'ok'
   const degraded = health !== 'ok'
+  // A boolean selector: cards re-render only when the zoom crosses the threshold.
+  const compact = useStore((s) => s.transform[2] < COMPACT_ZOOM)
+  const metric = view ? keyMetric(view) : null
   return (
     <>
       <Handle type="target" position={Position.Left} isConnectable={false} className="tg-map-handle" />
@@ -80,13 +98,16 @@ function ServiceNodeImpl({ data }: NodeProps<ServiceNodeType>) {
         type="button"
         data-service={service}
         data-health={health}
+        data-compact={compact || undefined}
         aria-label={nodeLabel(service, view)}
         aria-current={active ? 'true' : undefined}
         onClick={() => onOpen(service)}
+        onFocus={() => onFocusCard(service)}
         style={{ width: NODE_W, height: NODE_H }}
         className={cx(
-          'tg-map-node relative flex cursor-pointer items-center gap-3 rounded-card border bg-panel px-3 text-left text-ink shadow-panel',
+          'tg-map-node relative flex cursor-pointer items-center rounded-card border bg-panel text-left text-ink shadow-panel',
           'transition-[opacity,box-shadow,border-color] duration-200 hover:border-accent',
+          compact ? 'gap-2 px-2.5' : 'gap-2.5 px-2.5',
           health === 'error' && 'tg-map-node-err border-err',
           health === 'slow' && 'tg-map-node-slow border-slow',
           health === 'ok' && 'border-panel-line',
@@ -95,30 +116,49 @@ function ServiceNodeImpl({ data }: NodeProps<ServiceNodeType>) {
           dimmed && 'opacity-35',
         )}
       >
-        <HealthRing health={health} errorRatio={view?.error_ratio ?? 0} />
-        <span className="flex min-w-0 flex-1 flex-col gap-1">
-          <span className="truncate text-[13px] font-semibold leading-tight" title={service}>
-            {service}
-          </span>
-          {view ? (
-            <span className="tabular flex items-baseline gap-2 font-mono text-[11px] leading-tight text-muted">
-              <span title="Calls per second">{rateText(view.rate)}</span>
-              <span title="Error ratio" className={cx(view.error_ratio > 0 && 'text-err')}>
-                {errText(view.error_ratio)}
-              </span>
-              <span title="p99 latency" className={cx('truncate', health === 'slow' && 'text-slow')}>
-                p99 {duration(view.p99_ns)}
-              </span>
+        <HealthRing health={health} errorRatio={view?.error_ratio ?? 0} size={compact ? 24 : 28} />
+        {compact ? (
+          <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span
+              className="line-clamp-2 text-[18px] font-semibold leading-[1.15] break-words"
+              title={service}
+            >
+              {service}
             </span>
-          ) : (
-            <span className="text-[11px] leading-tight text-muted">caller only · no server spans</span>
-          )}
-        </span>
+            {metric ? (
+              <span className={cx('tabular truncate font-mono text-[15px] leading-tight', health === 'error' ? 'text-err' : 'text-slow')}>
+                {metric}
+              </span>
+            ) : null}
+          </span>
+        ) : (
+          <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="truncate text-[13px] font-semibold leading-tight" title={service}>
+              {service}
+            </span>
+            {view ? (
+              <span className="tabular flex flex-col font-mono text-[11px] leading-[1.35] text-muted">
+                <span className="truncate">
+                  <span title="Calls per second">{rateText(view.rate)}</span>
+                  {' · '}
+                  <span title="Error ratio" className={cx(view.error_ratio > 0 && 'text-err')}>
+                    {errText(view.error_ratio)} err
+                  </span>
+                </span>
+                <span title="p99 latency" className={cx('truncate', health === 'slow' && 'text-slow')}>
+                  p99 {duration(view.p99_ns)}
+                </span>
+              </span>
+            ) : (
+              <span className="text-[11px] leading-tight text-muted">caller only · no server spans</span>
+            )}
+          </span>
+        )}
         {degraded ? (
           <span
             aria-hidden
             className={cx(
-              'absolute right-2.5 top-2.5 size-2 rounded-full',
+              'absolute right-2 top-2 size-2 rounded-full',
               health === 'error' ? 'tg-pulse bg-err' : 'tg-pulse-slow bg-slow',
             )}
           />

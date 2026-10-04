@@ -9,7 +9,7 @@ import '../features/map/map.css'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { Background, BackgroundVariant, Controls, MiniMap, ReactFlow, ReactFlowProvider, useReactFlow } from '@xyflow/react'
-import type { EdgeTypes, NodeTypes } from '@xyflow/react'
+import type { EdgeTypes, FitViewOptions, NodeTypes } from '@xyflow/react'
 import { ExternalLink, Network, Search } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api/queries'
@@ -27,9 +27,9 @@ import { ServiceEdge } from '../features/map/ServiceEdge'
 import type { ServiceEdgeType } from '../features/map/ServiceEdge'
 import { ServiceNode } from '../features/map/ServiceNode'
 import type { ServiceNodeType } from '../features/map/ServiceNode'
-import { NODE_H, NODE_W, layoutGraph } from '../features/map/layout'
+import { NODE_H, NODE_W, edgeId, layoutGraph } from '../features/map/layout'
 import type { MapLayout } from '../features/map/layout'
-import { HEALTH_COLOR, callsPerMin, edgeTone, edgeWidth, mapGraph, mapSummary, matchServices, topologyKey } from '../features/map/model'
+import { HEALTH_COLOR, TONE_STROKE, callsPerMin, edgeTone, edgeWidth, mapGraph, mapSummary, matchServices, topologyKey } from '../features/map/model'
 import { describeMap } from '../features/stories/MiniMap'
 import { ErrorBanner } from '../features/stories/ErrorBanner'
 import { cx } from '../lib/cx'
@@ -38,8 +38,19 @@ import { useAppliedTheme } from '../theme/useAppliedTheme'
 
 const nodeTypes: NodeTypes = { service: ServiceNode }
 const edgeTypes: EdgeTypes = { service: ServiceEdge }
-/** Fit the whole map, but no further out than readable cards (phones pan instead). */
-const fitOptions = (narrow: boolean) => ({ padding: 0.12, maxZoom: 1, minZoom: narrow ? 0.6 : 0.15 })
+const MINIMAP = { width: 168, height: 104 } as const
+/**
+ * Fit the whole map, but no further out than readable cards (phones pan instead). On wide
+ * screens the bottom band is kept clear for the legend, minimap and controls.
+ */
+const fitOptions = (narrow: boolean): FitViewOptions => ({
+  padding: narrow ? 0.12 : { top: '24px', left: '24px', right: '24px', bottom: `${MINIMAP.height + 44}px` as const },
+  maxZoom: 1,
+  minZoom: narrow ? 0.6 : 0.15,
+})
+
+/** The service drawer's panel (the Sheet's aside), found by its class. */
+export const DRAWER_CLASS = 'tg-service-drawer'
 
 /** `{grafana_url}/d/tayga-service-map` when the API reports an http(s) Grafana URL. */
 export function grafanaMapUrl(base: string | null | undefined): string | null {
@@ -63,7 +74,13 @@ function Legend() {
         <svg aria-hidden width="22" height="6" className="overflow-visible">
           <path d="M0 3H22" strokeWidth={2} strokeDasharray="5 3" style={{ stroke: 'var(--tg-err)' }} />
         </svg>
-        failing calls
+        failing calls (≥1 % errors)
+      </li>
+      <li className="flex items-center gap-1.5">
+        <svg aria-hidden width="22" height="6" className="overflow-visible">
+          <path d="M0 3H22" strokeWidth={2} style={{ stroke: TONE_STROKE.warn }} />
+        </svg>
+        some errors (&lt;1 %)
       </li>
       <li>line width = calls/min</li>
     </ul>
@@ -89,6 +106,34 @@ function Canvas({ map, layout, since, matches, active, onOpen }: CanvasProps) {
   const fit = useMemo(() => fitOptions(narrow), [narrow])
   const duration = reduce ? 0 : 300
 
+  /**
+   * Centers a card in the visible part of the canvas (left of the drawer when it is open)
+   * when any of it is outside that area. Used when the drawer opens and on keyboard focus.
+   */
+  const reveal = useCallback(
+    (service: string) => {
+      const card = document.querySelector<HTMLElement>(`.tg-map [data-service="${CSS.escape(service)}"]`)
+      const pane = document.querySelector<HTMLElement>('.react-flow.tg-map')
+      if (!card || !pane) return
+      const view = pane.getBoundingClientRect()
+      let right = view.right
+      const drawer = document.querySelector<HTMLElement>(`.${DRAWER_CLASS}`)
+      if (drawer) {
+        const left = window.innerWidth - drawer.offsetWidth
+        // On phones the drawer covers the canvas; centre on the whole canvas instead.
+        if (left - view.left > view.width * 0.4) right = Math.min(right, left - 16)
+      }
+      const r = card.getBoundingClientRect()
+      const inside = r.left >= view.left && r.right <= right && r.top >= view.top && r.bottom <= view.bottom
+      if (inside) return
+      const dx = (view.left + right) / 2 - (r.left + r.right) / 2
+      const dy = (view.top + view.bottom) / 2 - (r.top + r.bottom) / 2
+      const vp = getViewport()
+      void setViewport({ ...vp, x: vp.x + dx, y: vp.y + dy }, { duration })
+    },
+    [getViewport, setViewport, duration],
+  )
+
   const nodes = useMemo<ServiceNodeType[]>(() => {
     const views = new Map(map.nodes.map((n) => [n.service, n]))
     return Object.entries(layout.positions)
@@ -109,18 +154,19 @@ function Canvas({ map, layout, since, matches, active, onOpen }: CanvasProps) {
           dimmed: searching && !matches.has(service),
           active: service === active,
           onOpen,
+          onFocusCard: reveal,
         },
       }))
       // Tab order follows the picture: left to right, then top to bottom.
       .sort((a, b) => a.position.x - b.position.x || a.position.y - b.position.y)
-  }, [map.nodes, layout, matches, searching, active, onOpen])
+  }, [map.nodes, layout, matches, searching, active, onOpen, reveal])
 
   const edges = useMemo<ServiceEdgeType[]>(
     () =>
       map.edges
         .filter((e) => e.parent !== e.child && layout.positions[e.parent] && layout.positions[e.child])
         .map((e) => {
-          const id = `${e.parent}->${e.child}`
+          const id = edgeId(e.parent, e.child)
           const perMin = callsPerMin(e.calls, since)
           const tone = edgeTone(e)
           return {
@@ -128,8 +174,6 @@ function Canvas({ map, layout, since, matches, active, onOpen }: CanvasProps) {
             type: 'service' as const,
             source: e.parent,
             target: e.child,
-            // Failing edges draw on top.
-            zIndex: tone === 'err' ? 1 : 0,
             data: {
               edge: e,
               perMin,
@@ -137,39 +181,33 @@ function Canvas({ map, layout, since, matches, active, onOpen }: CanvasProps) {
               tone,
               pinned: pinned === id,
               dimmed: searching && !matches.has(e.parent) && !matches.has(e.child),
+              route: layout.routes[id],
             },
           }
-        }),
+        })
+        // Failing edges last, so they draw over the others (all edges stay under the cards).
+        .sort((a, b) => Number(a.data.tone === 'err') - Number(b.data.tone === 'err')),
     [map.edges, layout, since, pinned, searching, matches],
   )
 
-  /** Pans a card hidden behind the drawer into the visible part of the canvas. */
-  const reveal = useCallback(
-    (service: string) => {
-      const card = document.querySelector<HTMLElement>(`.tg-map [data-service="${CSS.escape(service)}"]`)
-      const panel = document.querySelector<HTMLElement>('[role="dialog"]')
-      if (!card || !panel) return
-      const panelLeft = window.innerWidth - panel.offsetWidth
-      // On phones the drawer covers the page; nothing to reveal.
-      if (panelLeft < window.innerWidth * 0.4) return
-      const overlap = card.getBoundingClientRect().right - (panelLeft - 32)
-      if (overlap <= 0) return
-      const vp = getViewport()
-      void setViewport({ ...vp, x: vp.x - overlap }, { duration })
-    },
-    [getViewport, setViewport, duration],
-  )
   const activeRef = useRef(active)
   useEffect(() => {
     activeRef.current = active
   }, [active])
+
+  // Phones start on the degraded services, when there are any; wide screens fit everything.
+  const degraded = useMemo(
+    () => map.nodes.filter((n) => n.health !== 'ok' && layout.positions[n.service]).map((n) => ({ id: n.service })),
+    [map.nodes, layout],
+  )
+  const focusDegraded = narrow && degraded.length > 0
 
   // Fit on load and when the topology changes, then keep the open service in view.
   const fitted = useRef(false)
   useEffect(() => {
     let live = true
     fitted.current = false
-    void fitView({ ...fit, duration: 0 }).then(() => {
+    void fitView({ ...fit, ...(focusDegraded ? { nodes: degraded, minZoom: 0.6 } : {}), duration: 0 }).then(() => {
       if (!live) return
       fitted.current = true
       if (activeRef.current) reveal(activeRef.current)
@@ -177,7 +215,9 @@ function Canvas({ map, layout, since, matches, active, onOpen }: CanvasProps) {
     return () => {
       live = false
     }
-  }, [layout, fit, fitView, reveal])
+    // `degraded` changes with every refresh; refit only for a new layout or screen size.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layout, fit, fitView, reveal, focusDegraded])
 
   useEffect(() => {
     if (!active || !fitted.current) return
@@ -207,13 +247,19 @@ function Canvas({ map, layout, since, matches, active, onOpen }: CanvasProps) {
       className="tg-map"
     >
       <Background variant={BackgroundVariant.Lines} gap={32} />
-      <Controls position="bottom-right" showInteractive={false} fitViewOptions={{ ...fit, duration }} className="tg-map-controls" />
+      <Controls
+        position="bottom-right"
+        showInteractive={false}
+        fitViewOptions={{ ...fit, duration }}
+        className={cx('tg-map-controls', !narrow && 'tg-map-controls-beside')}
+      />
       {narrow ? null : (
         <MiniMap
-          position="top-right"
+          position="bottom-right"
           pannable
           zoomable
           ariaLabel="Service map overview"
+          style={MINIMAP}
           nodeColor={(n) => HEALTH_COLOR[(n as ServiceNodeType).data.view?.health ?? 'ok']}
           nodeBorderRadius={6}
           className="tg-map-minimap"

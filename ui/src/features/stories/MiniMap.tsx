@@ -11,7 +11,7 @@ import { sinceSearch } from '../../app/search'
 import type { Since } from '../../app/search'
 import { cx } from '../../lib/cx'
 import { NARROW_QUERY, useMediaQuery } from '../../lib/useMediaQuery'
-import { MINI, isFailingEdge, layoutMiniMap } from './mapLayout'
+import { MINI, isFailingEdge, layoutMiniMap, servicesOf } from './mapLayout'
 
 /** Label size in viewBox units: about 9 px on a desktop card. */
 const LABEL_SIZE = 13
@@ -29,8 +29,12 @@ const label = (s: string) => (s.length > LABEL_CHARS ? `${s.slice(0, LABEL_CHARS
 export function describeMap(map: ServiceMapView): string {
   const bad = map.nodes.filter((n) => n.health !== 'ok')
   const failing = map.edges.filter((e) => isFailingEdge(e) && e.parent !== e.child)
-  const parts = [`${map.nodes.length} services`]
+  const services = servicesOf(map)
+  const withSpans = new Set(map.nodes.map((n) => n.service))
+  const callerOnly = services.filter((s) => !withSpans.has(s))
+  const parts = [`${services.length} services`]
   parts.push(bad.length ? `degraded: ${bad.map((n) => `${n.service} (${n.health})`).join(', ')}` : 'all healthy')
+  if (callerOnly.length) parts.push(`callers without spans of their own: ${callerOnly.join(', ')}`)
   if (failing.length) parts.push(`failing calls: ${failing.map((e) => `${e.parent} to ${e.child}`).join(', ')}`)
   return `Service map: ${parts.join('; ')}.`
 }

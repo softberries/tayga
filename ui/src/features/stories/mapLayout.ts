@@ -34,6 +34,16 @@ export const MINI = { r: 9, colGap: 132, rowGap: 40, padX: 66, padY: 22, labelGa
 /** An edge fails when at least 1 % of its calls returned an error. */
 export const FAILING_EDGE_RATE = 0.01
 
+/** Every service: nodes plus services seen only as callers or callees, by name. */
+export function servicesOf(map: ServiceMapView): string[] {
+  const s = new Set(map.nodes.map((n) => n.service))
+  for (const e of map.edges) {
+    s.add(e.parent)
+    s.add(e.child)
+  }
+  return [...s].sort()
+}
+
 export function isFailingEdge(e: Pick<EdgeView, 'errors' | 'error_rate'>): boolean {
   return e.errors > 0 && e.error_rate >= FAILING_EDGE_RATE
 }

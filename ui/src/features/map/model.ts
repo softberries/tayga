@@ -6,18 +6,10 @@ import type { EdgeView, Health, NodeView, ServiceMapView } from '../../api/types
 import type { Since } from '../../app/search'
 import { compact, percent } from '../../lib/format'
 import { SINCE_SECS } from '../stories/model'
-import { isFailingEdge } from '../stories/mapLayout'
-import type { MapGraph } from './layout'
+import { isFailingEdge, servicesOf } from '../stories/mapLayout'
+import type { MapGraph, Pos } from './layout'
 
-/** Every service on the map: nodes plus services seen only as callers or callees, by name. */
-export function servicesOf(map: ServiceMapView): string[] {
-  const s = new Set(map.nodes.map((n) => n.service))
-  for (const e of map.edges) {
-    s.add(e.parent)
-    s.add(e.child)
-  }
-  return [...s].sort()
-}
+export { servicesOf } from '../stories/mapLayout'
 
 export function mapGraph(map: ServiceMapView): MapGraph {
   const seen = new Set<string>()
@@ -124,4 +116,49 @@ export function mapSummary(map: ServiceMapView): string {
   parts.push(degraded ? `${degraded} degraded` : 'all healthy')
   if (failing) parts.push(`${failing} failing ${failing === 1 ? 'call' : 'calls'}`)
   return parts.join(' · ')
+}
+
+/**
+ * SVG path along an ELK route (orthogonal segments), each corner rounded with radius up to
+ * `r` (less where a segment is shorter).
+ */
+export function routePath(points: readonly Pos[], r = 10): string {
+  const [first, ...rest] = points
+  if (!first) return ''
+  let d = `M${first.x} ${first.y}`
+  for (let i = 0; i < rest.length; i++) {
+    const p = rest[i] as Pos
+    const next = rest[i + 1]
+    const prev = (i === 0 ? first : rest[i - 1]) as Pos
+    if (!next) {
+      d += `L${p.x} ${p.y}`
+      break
+    }
+    const inLen = Math.hypot(p.x - prev.x, p.y - prev.y)
+    const outLen = Math.hypot(next.x - p.x, next.y - p.y)
+    const k = Math.min(r, inLen / 2, outLen / 2)
+    if (k < 0.5) {
+      d += `L${p.x} ${p.y}`
+      continue
+    }
+    const a = { x: p.x - ((p.x - prev.x) / inLen) * k, y: p.y - ((p.y - prev.y) / inLen) * k }
+    const b = { x: p.x + ((next.x - p.x) / outLen) * k, y: p.y + ((next.y - p.y) / outLen) * k }
+    d += `L${a.x} ${a.y}Q${p.x} ${p.y} ${b.x} ${b.y}`
+  }
+  return d
+}
+
+/** The point halfway along a route, by length. */
+export function routeMidpoint(points: readonly Pos[]): Pos {
+  let total = 0
+  for (let i = 1; i < points.length; i++) total += Math.hypot(points[i]!.x - points[i - 1]!.x, points[i]!.y - points[i - 1]!.y)
+  let left = total / 2
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1]!
+    const b = points[i]!
+    const len = Math.hypot(b.x - a.x, b.y - a.y)
+    if (left <= len && len > 0) return { x: a.x + ((b.x - a.x) * left) / len, y: a.y + ((b.y - a.y) * left) / len }
+    left -= len
+  }
+  return points[0] ?? { x: 0, y: 0 }
 }

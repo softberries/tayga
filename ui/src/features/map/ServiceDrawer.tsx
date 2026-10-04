@@ -360,6 +360,7 @@ export function ServiceDrawer({ service, map, since, onClose, onCloseAutoFocus }
         if (!open) onClose()
       }}
       storageKey={DRAWER_KEY}
+      className="tg-service-drawer"
       onCloseAutoFocus={onCloseAutoFocus}
       // Focus the panel itself (its title is announced), not the resize handle.
       onOpenAutoFocus={(e) => {
