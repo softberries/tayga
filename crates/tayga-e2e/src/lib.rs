@@ -11,6 +11,14 @@ pub const SCENARIO_TIMEOUT: Duration = Duration::from_secs(180);
 /// slow story can take several minutes. One clean-baseline run saw 10 orders, none
 /// international, in 180 s.
 pub const SHIPPING_TIMEOUT: Duration = Duration::from_secs(600);
+/// Log detection runs every 60 s and the spike rule needs 10 hits in 5 min.
+pub const LOG_SPIKE_TIMEOUT: Duration = Duration::from_secs(600);
+pub const NEW_TEMPLATE_TIMEOUT: Duration = Duration::from_secs(180);
+/// The logminer's per-service warmup (`new_template_warmup_min`): a service's templates are
+/// reported as new only once it has had a template for this long.
+pub const PROBE_WARMUP: Duration = Duration::from_secs(15 * 60);
+/// First run only: how long to wait for the probe service's seed template to age past the warmup.
+pub const PROBE_WARMUP_TIMEOUT: Duration = Duration::from_secs(17 * 60);
 pub const POLL_EVERY: Duration = Duration::from_secs(5);
 /// Spec §15 target for flag-to-story latency; reported, not asserted.
 pub const TARGET_LATENCY: Duration = Duration::from_secs(60);
@@ -84,6 +92,24 @@ impl Api {
     pub async fn groups(&self, query: &str) -> anyhow::Result<Vec<Value>> {
         Ok(self
             .get(&format!("/api/v1/story-groups?{query}"))
+            .await?
+            .as_array()
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    pub async fn log_alerts(&self, query: &str) -> anyhow::Result<Vec<Value>> {
+        Ok(self
+            .get(&format!("/api/v1/log-alerts?{query}"))
+            .await?
+            .as_array()
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    pub async fn log_templates(&self, query: &str) -> anyhow::Result<Vec<Value>> {
+        Ok(self
+            .get(&format!("/api/v1/log-templates?{query}"))
             .await?
             .as_array()
             .cloned()
@@ -165,6 +191,87 @@ pub async fn wait_for_group(
     )
 }
 
+/// Polls log alerts matching `query` until one with `last_at_ns > after_ns` satisfies `pred`.
+/// Returns it and the wait.
+pub async fn wait_for_alert(
+    api: &Api,
+    query: &str,
+    after_ns: i64,
+    timeout: Duration,
+    pred: impl Fn(&Value) -> bool,
+) -> anyhow::Result<(Value, Duration)> {
+    let start = Instant::now();
+    let mut last_seen: Vec<String> = Vec::new();
+    let mut last_err: Option<String> = None;
+    while start.elapsed() < timeout {
+        match api.log_alerts(query).await {
+            Ok(alerts) => {
+                last_seen = alerts
+                    .iter()
+                    .map(|a| {
+                        format!(
+                            "{} | {} | {} | last_at_ns={}",
+                            a["kind"], a["service"], a["template"], a["last_at_ns"]
+                        )
+                    })
+                    .collect();
+                let found = alerts
+                    .into_iter()
+                    .find(|a| a["last_at_ns"].as_i64().is_some_and(|n| n > after_ns) && pred(a));
+                if let Some(a) = found {
+                    return Ok((a, start.elapsed()));
+                }
+            }
+            Err(e) => {
+                eprintln!("[e2e] poll error (continuing): {e}");
+                last_err = Some(e.to_string());
+            }
+        }
+        tokio::time::sleep(POLL_EVERY).await;
+    }
+    anyhow::bail!(
+        "no matching log alert within {timeout:?} (last poll error: {last_err:?}); last alerts seen:\n{}",
+        last_seen.join("\n")
+    )
+}
+
+/// Whether any template was first seen at least `warmup` before `now_ns`.
+pub fn has_template_older_than(templates: &[Value], now_ns: i64, warmup: Duration) -> bool {
+    let cutoff = now_ns.saturating_sub(i64::try_from(warmup.as_nanos()).unwrap_or(i64::MAX));
+    templates
+        .iter()
+        .any(|t| t["first_seen_ns"].as_i64().is_some_and(|f| f <= cutoff))
+}
+
+/// Polls `service`'s templates until one is at least `PROBE_WARMUP` old. Returns the wait.
+pub async fn wait_for_service_warmup(
+    api: &Api,
+    service: &str,
+    timeout: Duration,
+) -> anyhow::Result<Duration> {
+    let start = Instant::now();
+    let query = format!("service={service}&since=7d");
+    let mut announced = false;
+    loop {
+        match api.log_templates(&query).await {
+            Ok(t) if has_template_older_than(&t, now_ns(), PROBE_WARMUP) => {
+                return Ok(start.elapsed());
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("[e2e] poll error (continuing): {e}"),
+        }
+        if !announced {
+            println!("[e2e] first run: waiting for the probe service warmup, up to 16 min");
+            announced = true;
+        }
+        anyhow::ensure!(
+            start.elapsed() < timeout,
+            "service {service} has no template older than {PROBE_WARMUP:?} after {timeout:?}"
+        );
+        tokio::time::sleep(Duration::from_secs(15)).await;
+    }
+}
+
 pub fn report(name: &str, waited: Duration) {
     let verdict = if waited <= TARGET_LATENCY {
         "within"
@@ -187,5 +294,16 @@ mod tests {
         assert_eq!(since_flip(now_ns() + 5_000_000_000), "1s", "future flip");
         let s = since_flip(now_ns() - 90_500_000_000);
         assert!(s == "91s" || s == "92s", "{s}");
+    }
+
+    #[test]
+    fn warmup_needs_a_template_at_least_that_old() {
+        let now = 100 * 60 * 1_000_000_000_i64;
+        let warmup = Duration::from_secs(15 * 60);
+        let at =
+            |mins_ago: i64| serde_json::json!({ "first_seen_ns": now - mins_ago * 60_000_000_000 });
+        assert!(has_template_older_than(&[at(1), at(15)], now, warmup));
+        assert!(!has_template_older_than(&[at(1), at(14)], now, warmup));
+        assert!(!has_template_older_than(&[], now, warmup));
     }
 }

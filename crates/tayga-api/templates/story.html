@@ -32,9 +32,9 @@
 {% endif %}
 {% if logs.is_empty() %}<div class="empty">{% if log_total == 0 %}No logs are linked to this trace. Services only appear here when they log with the trace context.{% else %}No logs from {{ log_filter }} in this trace.{% endif %}</div>{% else %}
 <table>
-<tr><th style="width:110px">Time (UTC)</th><th>Service</th><th>Span</th><th>Severity</th><th>Body</th></tr>
+<tr><th style="width:110px">Time (UTC)</th><th>Service</th><th>Span</th><th>Severity</th><th>Body</th><th>Template</th></tr>
 {% for l in logs %}
-<tr><td class="muted mono">{{ l.time }}</td><td>{{ l.service }}</td><td class="muted">{{ l.span }}</td><td>{{ l.severity }}</td><td class="mono">{{ l.body }}</td></tr>
+<tr><td class="muted mono">{{ l.time }}</td><td>{{ l.service }}</td><td class="muted">{{ l.span }}</td><td>{{ l.severity }}</td><td class="mono">{{ l.body }}</td><td class="mono">{% match l.template %}{% when Some with (t) %}<a href="/templates/{{ t.id }}" title="{{ t.full }}">{{ t.text }}</a>{% if let Some(a) = t.alert %} <span class="badge {{ a }}">{{ a }}</span>{% endif %}{% when None %}<span class="muted">—</span>{% endmatch %}</td></tr>
 {% endfor %}
 </table>
 {% endif %}

@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Log templates · Tayga{% endblock %}
+{% block content %}
+<form class="filters" method="get" action="/templates">
+  <label>Since <input name="since" value="{{ since }}" size="4"></label>
+  <label>Service <input name="service" value="{{ service }}" size="16"></label>
+  <label>Search <input name="q" value="{{ q }}" size="24"></label>
+  <button type="submit">Apply</button>
+</form>
+{% if rows.is_empty() %}
+<div class="empty">No log templates in this window.</div>
+{% else %}
+<table>
+<tr><th>Service</th><th>Template</th><th>Count</th><th>First seen</th><th></th></tr>
+{% for r in rows %}
+<tr>
+  <td>{{ r.service }}</td>
+  <td class="mono"><a href="/templates/{{ r.template_id }}?since={{ since_param }}">{{ r.template }}</a></td>
+  <td>{{ r.count }}</td>
+  <td class="muted">{{ r.first_seen }}</td>
+  <td>{% if r.alerting %}<span class="badge alerting">alerting</span>{% endif %}</td>
+</tr>
+{% endfor %}
+</table>
+{% endif %}
+{% endblock %}

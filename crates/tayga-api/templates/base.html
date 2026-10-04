@@ -15,6 +15,7 @@ th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); 
 th { color:var(--muted); font-weight:500; }
 .badge { display:inline-block; padding:1px 6px; border-radius:4px; color:#fff; font-size:12px; }
 .badge.error { background:var(--err); } .badge.slow { background:var(--slow); }
+.badge.new { background:var(--crit); } .badge.spike { background:var(--err); } .badge.alerting { background:var(--slow); } .badge.active { background:var(--err); }
 .muted { color:var(--muted); } .mono { font-family: ui-monospace, monospace; font-size:12px; }
 .spark { color: var(--err); vertical-align: middle; }
 form.filters { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
@@ -32,7 +33,7 @@ tr.rc td { background:#fdecea; }
 </style>
 </head>
 <body>
-<header><a href="/">Tayga</a><a href="/">Story groups</a><a href="/service-map">Service map</a></header>
+<header><a href="/">Tayga</a><a href="/">Story groups</a><a href="/service-map">Service map</a><a href="/alerts">Log alerts</a><a href="/templates">Templates</a></header>
 <main>{% block content %}{% endblock %}</main>
 </body>
 </html>

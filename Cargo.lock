@@ -1882,6 +1882,7 @@ dependencies = [
  "clap",
  "clickhouse",
  "flate2",
+ "prost",
  "rand 0.10.3",
  "rdkafka",
  "reqwest",
@@ -1889,6 +1890,14 @@ dependencies = [
  "tayga-analysis",
  "tayga-model",
  "tokio",
+]
+
+[[package]]
+name = "tayga-drain"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "tayga-analysis",
 ]
 
 [[package]]
@@ -1937,6 +1946,24 @@ dependencies = [
  "serde_json",
  "tayga-model",
  "tokio",
+]
+
+[[package]]
+name = "tayga-logminer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "prometheus-client",
+ "rdkafka",
+ "serde",
+ "serde_json",
+ "tayga-common",
+ "tayga-drain",
+ "tayga-kafka",
+ "tayga-model",
+ "tayga-store",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

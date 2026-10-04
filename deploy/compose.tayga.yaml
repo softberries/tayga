@@ -23,6 +23,8 @@ services:
     container_name: tayga-ingest
     command: ["tayga-ingest"]
     environment: *tayga-env
+    ports:
+      - "127.0.0.1:14318:4318"
     restart: unless-stopped
     depends_on:
       redpanda:
@@ -52,6 +54,18 @@ services:
       tayga-migrate:
         condition: service_completed_successfully
 
+  tayga-logminer:
+    image: tayga:dev
+    container_name: tayga-logminer
+    command: ["tayga-logminer"]
+    environment: *tayga-env
+    restart: unless-stopped
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      tayga-migrate:
+        condition: service_completed_successfully
+
   tayga-api:
     image: tayga:dev
     container_name: tayga-api
@@ -72,7 +86,7 @@ services:
     container_name: tayga-prometheus
     command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d"]
     volumes:
-      - ${TAYGA_ROOT}/deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ${TAYGA_ROOT}/deploy/prometheus:/etc/prometheus:ro
     ports:
       - "127.0.0.1:19090:9090"
     restart: unless-stopped

@@ -1,8 +1,8 @@
 //! Read side over the tables written by the writer and the assembler.
 
 use crate::model::*;
-use crate::params::{GroupFilter, bucket_secs};
-use std::collections::HashMap;
+use crate::params::{AlertFilter, GroupFilter, TemplateFilter, bucket_secs};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use tayga_store::ClickHouseSettings;
 
@@ -25,6 +25,42 @@ pub trait Repo: Send + Sync + 'static {
         &self,
         since_secs: u32,
     ) -> impl Future<Output = anyhow::Result<Vec<EdgeView>>> + Send;
+    fn log_alerts(
+        &self,
+        f: &AlertFilter,
+    ) -> impl Future<Output = anyhow::Result<Vec<LogAlertView>>> + Send;
+    fn log_templates(
+        &self,
+        f: &TemplateFilter,
+    ) -> impl Future<Output = anyhow::Result<Vec<LogTemplateView>>> + Send;
+    fn log_template(
+        &self,
+        template_id: &str,
+        since_secs: u32,
+    ) -> impl Future<Output = anyhow::Result<Option<LogTemplateDetail>>> + Send;
+    fn trace_log_templates(
+        &self,
+        trace_id: &str,
+    ) -> impl Future<Output = anyhow::Result<Vec<TraceLogTemplate>>> + Send;
+}
+
+/// A template counts as alerting while one of its alerts was last seen this recently.
+const ALERT_ACTIVE_MIN: u32 = 10;
+/// A trace's log matches an alert that started at most this long after the log.
+/// Alerts are kept 7 days (TTL), so this window shows all of them.
+const MAX_ALERT_AGE_SECS: u32 = 7 * 24 * 3600;
+const ALERT_LEAD_MIN: u32 = 5;
+
+/// Picks the alert kind per template id, `spike` over `new` when both match.
+pub fn prefer_spike(rows: Vec<(String, String)>) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    for (template_id, kind) in rows {
+        let e = out.entry(template_id).or_insert_with(|| kind.clone());
+        if kind == "spike" {
+            *e = kind;
+        }
+    }
+    out
 }
 
 /// Attaches bucketed counts to their groups, preserving group order.
@@ -112,7 +148,82 @@ impl ChRepo {
         let rows: Vec<GroupBucketRow> = bind(query).bind(&top).fetch_all().await?;
         Ok(merge_buckets(groups, rows, step))
     }
+
+    /// The subset of `trace_ids` that has an error story (story_id equals trace_id).
+    async fn story_ids_among<'a>(
+        &self,
+        trace_ids: impl Iterator<Item = &'a str>,
+    ) -> anyhow::Result<HashSet<String>> {
+        let mut traces: Vec<&str> = trace_ids.collect();
+        traces.sort_unstable();
+        traces.dedup();
+        if traces.is_empty() {
+            return Ok(HashSet::new());
+        }
+        Ok(self
+            .client
+            .query("SELECT story_id FROM error_stories FINAL WHERE story_id IN ?")
+            .bind(&traces)
+            .fetch_all::<String>()
+            .await?
+            .into_iter()
+            .collect())
+    }
+
+    /// Alerts newest first, resolving which example traces have an error story.
+    async fn alerts(
+        &self,
+        since_secs: u32,
+        kind: &str,
+        service: &str,
+        template_id: &str,
+        limit: u32,
+    ) -> anyhow::Result<Vec<LogAlertView>> {
+        let rows: Vec<LogAlertRow> = self
+            .client
+            .query(&format!(
+                "SELECT alert_id, toString(kind) AS kind, toString(template_id) AS template_id, service, template, \
+                 toUnixTimestamp64Nano(started_at) AS started_at_ns, toUnixTimestamp64Nano(last_at) AS last_at_ns, \
+                 window_count, peak_count, baseline_per_window, \
+                 toUInt8(last_at > now64(9) - toIntervalMinute({ALERT_ACTIVE_MIN})) AS active, example_trace_ids \
+                 FROM (SELECT * FROM log_alerts FINAL WHERE last_at > now64(9) - toIntervalSecond(?) \
+                 AND (? = '' OR toString(kind) = ?) AND (? = '' OR service = ?) AND (? = '' OR toString(template_id) = ?)) \
+                 ORDER BY last_at DESC LIMIT {limit}"
+            ))
+            .bind(since_secs)
+            .bind(kind)
+            .bind(kind)
+            .bind(service)
+            .bind(service)
+            .bind(template_id)
+            .bind(template_id)
+            .fetch_all()
+            .await?;
+        let stories = self
+            .story_ids_among(
+                rows.iter()
+                    .flat_map(|r| r.example_trace_ids.iter().map(String::as_str)),
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| LogAlertView::from_row(r, &stories))
+            .collect())
+    }
 }
+
+/// Templates with at least one hit in the window, as a subquery so the outer aliases never
+/// shadow the filter columns.
+const TEMPLATES_IN_WINDOW: &str = "SELECT toString(t.template_id) AS template_id, t.service AS service, \
+     t.template AS template, h.hits AS count, toUnixTimestamp64Nano(t.first_seen) AS first_seen_ns, \
+     toUnixTimestamp64Nano(t.last_seen) AS last_seen_ns, t.max_severity AS max_severity, \
+     toUInt8(t.template_id IN (SELECT template_id FROM log_alerts FINAL \
+       WHERE last_at > now64(9) - toIntervalMinute({ACTIVE}))) AS alerting \
+     FROM (SELECT template_id, uniqExact(log_id) AS hits FROM log_template_hits \
+       WHERE ts > now64(9) - toIntervalSecond(?) AND (? = '' OR service = ?) GROUP BY template_id) AS h \
+     INNER JOIN (SELECT * FROM log_templates FINAL WHERE (? = '' OR service = ?) \
+       AND (? = '' OR positionCaseInsensitive(template, ?) > 0)) AS t ON t.template_id = h.template_id \
+     ORDER BY count DESC LIMIT 200";
 
 impl Repo for ChRepo {
     async fn story_groups(&self, f: &GroupFilter) -> anyhow::Result<Vec<GroupView>> {
@@ -174,7 +285,7 @@ impl Repo for ChRepo {
         let logs: Vec<TraceLogRow> = self
             .client
             .query(
-                "SELECT toUnixTimestamp64Nano(ts) AS ts_ns, span_id, service_name, severity_number, severity_text, body \
+                "SELECT toString(log_id) AS log_id, toUnixTimestamp64Nano(ts) AS ts_ns, span_id, service_name, severity_number, severity_text, body \
                  FROM logs WHERE trace_id = ? ORDER BY ts LIMIT 1 BY log_id LIMIT 1000",
             )
             .bind(trace_id)
@@ -185,6 +296,158 @@ impl Repo for ChRepo {
             spans,
             logs,
         })
+    }
+
+    async fn log_alerts(&self, f: &AlertFilter) -> anyhow::Result<Vec<LogAlertView>> {
+        self.alerts(
+            f.since_secs,
+            f.kind.as_deref().unwrap_or_default(),
+            f.service.as_deref().unwrap_or_default(),
+            "",
+            200,
+        )
+        .await
+    }
+
+    async fn log_templates(&self, f: &TemplateFilter) -> anyhow::Result<Vec<LogTemplateView>> {
+        let service = f.service.as_deref().unwrap_or_default();
+        let q = f.q.as_deref().unwrap_or_default();
+        let rows: Vec<LogTemplateRow> = self
+            .client
+            .query(&TEMPLATES_IN_WINDOW.replace("{ACTIVE}", &ALERT_ACTIVE_MIN.to_string()))
+            .bind(f.since_secs)
+            .bind(service)
+            .bind(service)
+            .bind(service)
+            .bind(service)
+            .bind(q)
+            .bind(q)
+            .fetch_all()
+            .await?;
+        Ok(rows.into_iter().map(LogTemplateView::from_row).collect())
+    }
+
+    async fn log_template(
+        &self,
+        template_id: &str,
+        since_secs: u32,
+    ) -> anyhow::Result<Option<LogTemplateDetail>> {
+        let step = bucket_secs(since_secs);
+        let rows: Vec<TemplateDetailRow> = self
+            .client
+            .query(&format!(
+                "SELECT toString(t.template_id) AS template_id, t.service AS service, t.template AS template, \
+                 t.count AS count, toUnixTimestamp64Nano(t.first_seen) AS first_seen_ns, \
+                 toUnixTimestamp64Nano(t.last_seen) AS last_seen_ns, t.max_severity AS max_severity, \
+                 toUInt8(t.template_id IN (SELECT template_id FROM log_alerts FINAL \
+                   WHERE last_at > now64(9) - toIntervalMinute({ALERT_ACTIVE_MIN}))) AS alerting, t.sample AS sample \
+                 FROM (SELECT * FROM log_templates FINAL WHERE template_id = toUInt64(?) LIMIT 1) AS t"
+            ))
+            .bind(template_id)
+            .fetch_all()
+            .await?;
+        let Some(found) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let sample = found.sample;
+        let row = LogTemplateRow {
+            template_id: found.template_id,
+            service: found.service,
+            template: found.template,
+            count: found.count,
+            first_seen_ns: found.first_seen_ns,
+            last_seen_ns: found.last_seen_ns,
+            max_severity: found.max_severity,
+            alerting: found.alerting,
+        };
+        let buckets: Vec<TemplateBucketRow> = self
+            .client
+            .query(
+                "SELECT toUInt32(toStartOfInterval(ts, toIntervalSecond(?))) AS bucket, uniqExact(log_id) AS hits \
+                 FROM log_template_hits WHERE template_id = toUInt64(?) AND ts > now64(9) - toIntervalSecond(?) \
+                 GROUP BY bucket ORDER BY bucket",
+            )
+            .bind(step)
+            .bind(template_id)
+            .bind(since_secs)
+            .fetch_all()
+            .await?;
+        let hits: Vec<TemplateHitRow> = self
+            .client
+            .query(
+                "SELECT toUnixTimestamp64Nano(ts) AS ts_ns, trace_id, span_id, severity_number \
+                 FROM log_template_hits WHERE template_id = toUInt64(?) \
+                 ORDER BY ts DESC LIMIT 1 BY log_id LIMIT 20",
+            )
+            .bind(template_id)
+            .fetch_all()
+            .await?;
+        let stories = self
+            .story_ids_among(hits.iter().map(|h| h.trace_id.as_str()))
+            .await?;
+        let recent = hits
+            .into_iter()
+            .map(|h| TemplateHitView::from_row(h, &stories))
+            .collect();
+        let alerts = self
+            .alerts(MAX_ALERT_AGE_SECS, "", "", template_id, 20)
+            .await?;
+        let mut template = LogTemplateView::from_row(row);
+        // The window's distinct hits, not the lifetime counter kept on the template row.
+        template.count = buckets.iter().map(|b| b.hits).sum();
+        Ok(Some(LogTemplateDetail {
+            template,
+            sample,
+            bucket_secs: step,
+            buckets: buckets.into_iter().map(|b| (b.bucket, b.hits)).collect(),
+            recent,
+            alerts,
+        }))
+    }
+
+    async fn trace_log_templates(&self, trace_id: &str) -> anyhow::Result<Vec<TraceLogTemplate>> {
+        let rows: Vec<TraceTemplateRow> = self
+            .client
+            .query(
+                "SELECT toString(h.log_id) AS log_id, toString(h.template_id) AS template_id, t.template AS template, \
+                 toUnixTimestamp64Nano(h.ts) AS ts_ns \
+                 FROM (SELECT log_id, template_id, ts FROM log_template_hits WHERE trace_id = ? LIMIT 1 BY log_id) AS h \
+                 INNER JOIN (SELECT template_id, template FROM log_templates FINAL) AS t ON t.template_id = h.template_id \
+                 ORDER BY h.ts, h.log_id LIMIT 1000",
+            )
+            .bind(trace_id)
+            .fetch_all()
+            .await?;
+        let Some(trace_ns) = rows.iter().map(|r| r.ts_ns).min() else {
+            return Ok(Vec::new());
+        };
+        let mut ids: Vec<&str> = rows.iter().map(|r| r.template_id.as_str()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        // Active at the trace's time: started by then (or shortly after) and not yet over.
+        let alerts: Vec<(String, String)> = self
+            .client
+            .query(&format!(
+                "SELECT toString(template_id) AS template_id, toString(kind) AS kind FROM log_alerts FINAL \
+                 WHERE toString(template_id) IN ? \
+                 AND started_at <= fromUnixTimestamp64Nano(?) + toIntervalMinute({ALERT_LEAD_MIN}) \
+                 AND last_at >= fromUnixTimestamp64Nano(?) - toIntervalMinute({ALERT_ACTIVE_MIN})"
+            ))
+            .bind(&ids)
+            .bind(trace_ns)
+            .bind(trace_ns)
+            .fetch_all()
+            .await?;
+        let kinds = prefer_spike(alerts);
+        Ok(rows
+            .into_iter()
+            .map(|r| TraceLogTemplate {
+                alert: kinds.get(&r.template_id).cloned(),
+                log_id: r.log_id,
+                template_id: r.template_id,
+                template: r.template,
+            })
+            .collect())
     }
 
     async fn service_map(&self, since_secs: u32) -> anyhow::Result<Vec<EdgeView>> {
@@ -221,6 +484,20 @@ mod tests {
             last_seen_ns: 0,
             sample_story_id: "x".into(),
         }
+    }
+
+    #[test]
+    fn spike_wins_over_new() {
+        let m = prefer_spike(vec![
+            ("1".into(), "new".into()),
+            ("1".into(), "spike".into()),
+            ("2".into(), "spike".into()),
+            ("2".into(), "new".into()),
+            ("3".into(), "new".into()),
+        ]);
+        assert_eq!(m["1"], "spike");
+        assert_eq!(m["2"], "spike");
+        assert_eq!(m["3"], "new");
     }
 
     #[test]

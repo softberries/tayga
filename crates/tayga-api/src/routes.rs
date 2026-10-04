@@ -1,6 +1,9 @@
 //! JSON API (spec §10).
 
-use crate::params::{group_filter, parse_fingerprint, parse_hex_id, parse_since, since_or};
+use crate::params::{
+    alert_filter, group_filter, parse_fingerprint, parse_hex_id, parse_since, since_or,
+    template_filter,
+};
 use crate::repo::Repo;
 use axum::Json;
 use axum::Router;
@@ -81,6 +84,20 @@ pub struct GroupsQuery {
 }
 
 #[derive(Deserialize, Default)]
+pub struct AlertsQuery {
+    pub since: Option<String>,
+    pub kind: Option<String>,
+    pub service: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct TemplatesQuery {
+    pub since: Option<String>,
+    pub service: Option<String>,
+    pub q: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
 pub struct SinceQuery {
     pub since: Option<String>,
 }
@@ -92,6 +109,13 @@ pub fn api_router<R: Repo>(repo: Arc<R>, metrics: ApiMetrics) -> Router {
         .route("/api/v1/stories/{story_id}", get(story::<R>))
         .route("/api/v1/traces/{trace_id}", get(trace::<R>))
         .route("/api/v1/service-map", get(service_map::<R>))
+        .route("/api/v1/log-alerts", get(log_alerts::<R>))
+        .route("/api/v1/log-templates", get(log_templates::<R>))
+        .route("/api/v1/log-templates/{id}", get(log_template::<R>))
+        .route(
+            "/api/v1/traces/{trace_id}/log-templates",
+            get(trace_log_templates::<R>),
+        )
         .route("/healthz", get(|| async { "ok" }))
         .with_state(AppState { repo, metrics })
 }
@@ -165,6 +189,64 @@ async fn service_map<R: Repo>(
         .await
         .map_err(|e| s.unavailable(e))?;
     Ok(Json(edges).into_response())
+}
+
+async fn log_alerts<R: Repo>(
+    State(s): State<AppState<R>>,
+    q: Result<Query<AlertsQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Query(q) = q.map_err(|r| ApiError::BadRequest(r.body_text()))?;
+    let f = alert_filter(q.since.as_deref(), q.kind.as_deref(), q.service.as_deref())
+        .map_err(ApiError::BadRequest)?;
+    let alerts = s.repo.log_alerts(&f).await.map_err(|e| s.unavailable(e))?;
+    Ok(Json(alerts).into_response())
+}
+
+async fn log_templates<R: Repo>(
+    State(s): State<AppState<R>>,
+    q: Result<Query<TemplatesQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Query(q) = q.map_err(|r| ApiError::BadRequest(r.body_text()))?;
+    let f = template_filter(q.since.as_deref(), q.service.as_deref(), q.q.as_deref())
+        .map_err(ApiError::BadRequest)?;
+    let templates = s
+        .repo
+        .log_templates(&f)
+        .await
+        .map_err(|e| s.unavailable(e))?;
+    Ok(Json(templates).into_response())
+}
+
+async fn log_template<R: Repo>(
+    State(s): State<AppState<R>>,
+    Path(id): Path<String>,
+    q: Result<Query<SinceQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Query(q) = q.map_err(|r| ApiError::BadRequest(r.body_text()))?;
+    let id = parse_fingerprint(&id).map_err(ApiError::BadRequest)?;
+    let since = parse_since(since_or(q.since.as_deref(), "24h")).map_err(ApiError::BadRequest)?;
+    match s
+        .repo
+        .log_template(&id, since)
+        .await
+        .map_err(|e| s.unavailable(e))?
+    {
+        Some(d) => Ok(Json(d).into_response()),
+        None => Err(ApiError::NotFound),
+    }
+}
+
+async fn trace_log_templates<R: Repo>(
+    State(s): State<AppState<R>>,
+    Path(trace_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let id = parse_hex_id(&trace_id).map_err(ApiError::BadRequest)?;
+    let rows = s
+        .repo
+        .trace_log_templates(&id)
+        .await
+        .map_err(|e| s.unavailable(e))?;
+    Ok(Json(rows).into_response())
 }
 
 #[cfg(test)]
@@ -359,5 +441,187 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    fn template_view() -> LogTemplateView {
+        LogTemplateView {
+            template_id: "17393964261140422938".into(),
+            service: "payment".into(),
+            template: "Payment request failed <*>".into(),
+            count: 9,
+            first_seen_ns: 1,
+            last_seen_ns: 2,
+            max_severity: 17,
+            alerting: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn log_alerts_json_and_filter() {
+        let alert = LogAlertView {
+            alert_id: "a1".into(),
+            kind: "spike".into(),
+            template_id: "17393964261140422938".into(),
+            service: "payment".into(),
+            template: "Payment request failed <*>".into(),
+            started_at_ns: 1,
+            last_at_ns: 2,
+            window_count: 30,
+            peak_count: 31,
+            baseline_per_window: 0.5,
+            active: true,
+            example_traces: vec![
+                ExampleTrace {
+                    trace_id: "ab".repeat(16),
+                    story_id: Some("ab".repeat(16)),
+                },
+                ExampleTrace {
+                    trace_id: "cd".repeat(16),
+                    story_id: None,
+                },
+            ],
+        };
+        let repo = Arc::new(FakeRepo {
+            alerts: vec![alert],
+            ..Default::default()
+        });
+        let (status, json) = get_with(
+            repo.clone(),
+            ApiMetrics::default(),
+            "/api/v1/log-alerts?kind=spike&service=payment&since=",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json[0]["template_id"], "17393964261140422938");
+        assert_eq!(json[0]["active"], true);
+        assert_eq!(json[0]["example_traces"][0]["story_id"], "ab".repeat(16));
+        assert!(json[0]["example_traces"][1]["story_id"].is_null());
+        assert_eq!(
+            repo.last_alert_filter.lock().unwrap().clone(),
+            Some(crate::params::AlertFilter {
+                since_secs: 86_400,
+                kind: Some("spike".into()),
+                service: Some("payment".into()),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn log_templates_json_filter_and_validation() {
+        let repo = Arc::new(FakeRepo {
+            templates: vec![template_view()],
+            ..Default::default()
+        });
+        let (status, json) = get_with(
+            repo.clone(),
+            ApiMetrics::default(),
+            "/api/v1/log-templates?q=%20failed%20&service=payment",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json[0]["template_id"], "17393964261140422938");
+        assert_eq!(json[0]["alerting"], true);
+        assert_eq!(json[0]["count"], 9);
+        let f = repo.last_template_filter.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            (f.since_secs, f.q.as_deref(), f.service.as_deref()),
+            (3600, Some("failed"), Some("payment"))
+        );
+        let long = format!("/api/v1/log-templates?q={}", "a".repeat(201));
+        assert_eq!(
+            get(FakeRepo::default(), &long).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        let ok = format!("/api/v1/log-templates?q={}", "a".repeat(200));
+        assert_eq!(get(FakeRepo::default(), &ok).await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn bad_log_params_are_400() {
+        for uri in [
+            "/api/v1/log-alerts?kind=bogus",
+            "/api/v1/log-alerts?since=9d",
+            "/api/v1/log-templates?since=0s",
+            "/api/v1/log-templates/notanumber",
+            "/api/v1/log-templates/1?since=nope",
+            "/api/v1/traces/xyz/log-templates",
+        ] {
+            assert_eq!(
+                get(FakeRepo::default(), uri).await.0,
+                StatusCode::BAD_REQUEST,
+                "{uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn log_template_detail_404_and_found() {
+        assert_eq!(
+            get(FakeRepo::default(), "/api/v1/log-templates/42").await.0,
+            StatusCode::NOT_FOUND
+        );
+        let repo = FakeRepo {
+            template_detail: Some(LogTemplateDetail {
+                template: template_view(),
+                sample: "Payment request failed 500".into(),
+                bucket_secs: 60,
+                buckets: vec![(60, 3)],
+                recent: vec![TemplateHitView {
+                    ts_ns: 5,
+                    trace_id: "ab".repeat(16),
+                    span_id: "01".repeat(8),
+                    severity_number: 17,
+                    story_id: None,
+                }],
+                alerts: vec![],
+            }),
+            ..Default::default()
+        };
+        let (status, json) = get(repo, "/api/v1/log-templates/17393964261140422938?since=").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["template"]["template_id"], "17393964261140422938");
+        assert_eq!(json["sample"], "Payment request failed 500");
+        assert_eq!(json["buckets"][0][1], 3);
+        assert_eq!(json["recent"][0]["severity_number"], 17);
+    }
+
+    #[tokio::test]
+    async fn trace_log_templates_json() {
+        let uri = format!("/api/v1/traces/{}/log-templates", "ab".repeat(16));
+        let (status, json) = get(FakeRepo::default(), &uri).await;
+        assert_eq!((status, json), (StatusCode::OK, serde_json::json!([])));
+        let repo = FakeRepo {
+            trace_templates: vec![TraceLogTemplate {
+                log_id: "99".into(),
+                template_id: "17393964261140422938".into(),
+                template: "t".into(),
+                alert: Some("new".into()),
+            }],
+            ..Default::default()
+        };
+        let (status, json) = get(repo, &uri).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json[0]["log_id"], "99");
+        assert_eq!(json[0]["alert"], "new");
+    }
+
+    #[tokio::test]
+    async fn log_routes_repo_failure_is_503() {
+        for uri in [
+            "/api/v1/log-alerts".to_string(),
+            "/api/v1/log-templates".to_string(),
+            "/api/v1/log-templates/42".to_string(),
+            format!("/api/v1/traces/{}/log-templates", "ab".repeat(16)),
+        ] {
+            let metrics = ApiMetrics::default();
+            let repo = FakeRepo {
+                fail: true,
+                ..Default::default()
+            };
+            let (status, json) = get_with(Arc::new(repo), metrics.clone(), &uri).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}");
+            assert_eq!(json["error"], "storage unavailable");
+            assert_eq!(metrics.repo_errors.get(), 1);
+        }
     }
 }

@@ -14,5 +14,5 @@ RUN cargo build --release --workspace --bins
 
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/tayga-ingest /app/target/release/tayga-writer /app/target/release/tayga-assembler /app/target/release/tayga-api /usr/local/bin/
+COPY --from=builder /app/target/release/tayga-ingest /app/target/release/tayga-writer /app/target/release/tayga-assembler /app/target/release/tayga-api /app/target/release/tayga-logminer /usr/local/bin/
 ENV RUST_LOG=info

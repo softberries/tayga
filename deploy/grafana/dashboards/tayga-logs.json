@@ -1,0 +1,206 @@
+{
+  "uid": "tayga-logs",
+  "title": "Tayga \u00b7 Logs",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": true,
+  "tags": [
+    "tayga"
+  ],
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "timezone": "browser",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Log alerts by kind",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "tayga-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "tayga-clickhouse"
+          },
+          "editorType": "sql",
+          "rawSql": "SELECT toStartOfHour(started_at) AS time, toString(kind) AS kind, count() AS alerts FROM tayga.log_alerts FINAL WHERE $__timeFilter(started_at) GROUP BY time, kind ORDER BY time",
+          "queryType": "timeseries",
+          "format": 0
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 2,
+      "title": "Recent alerts",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "tayga-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "tayga-clickhouse"
+          },
+          "editorType": "sql",
+          "rawSql": "SELECT toString(kind) AS kind, service, template, peak_count, round(baseline_per_window, 1) AS baseline, started_at, last_at FROM tayga.log_alerts FINAL WHERE $__timeFilter(last_at) ORDER BY last_at DESC LIMIT 50",
+          "queryType": "table",
+          "format": 1
+        }
+      ],
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "links": [
+            {
+              "title": "Open alerts",
+              "url": "http://localhost:8090/alerts?since=7d",
+              "targetBlank": true
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 3,
+      "title": "New templates per service",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "tayga-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "tayga-clickhouse"
+          },
+          "editorType": "sql",
+          "rawSql": "SELECT toStartOfHour(first_seen) AS time, service, count() AS templates FROM tayga.log_templates FINAL WHERE $__timeFilter(first_seen) GROUP BY time, service ORDER BY time",
+          "queryType": "timeseries",
+          "format": 0
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "drawStyle": "bars",
+            "fillOpacity": 60
+          }
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 4,
+      "title": "Top templates",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "tayga-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "tayga-clickhouse"
+          },
+          "editorType": "sql",
+          "rawSql": "SELECT t.service AS service, t.template AS template, h.logs AS logs FROM (SELECT template_id, uniqExact(log_id) AS logs FROM tayga.log_template_hits WHERE $__timeFilter(ts) GROUP BY template_id ORDER BY logs DESC LIMIT 20) AS h INNER JOIN (SELECT template_id, service, template FROM tayga.log_templates FINAL) AS t ON t.template_id = h.template_id ORDER BY logs DESC",
+          "queryType": "table",
+          "format": 1
+        }
+      ],
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 5,
+      "title": "Logs mined/s",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tayga-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "sum(rate(tayga_logminer_logs_mined_total[1m]))",
+          "legendFormat": "logs/s",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  }
+}

@@ -154,3 +154,93 @@ async fn raw_span_counts_match_jaeger() -> anyhow::Result<()> {
     assert!(mismatches.is_empty(), "mismatches: {mismatches:?}");
     Ok(())
 }
+
+/// A 100% payment failure makes the "Payment request failed" template spike. The template is
+/// older than the 65-minute spike-age rule, so it is reported as a spike, not as new.
+/// Detection runs every 60 s, so the wait is long.
+#[tokio::test]
+#[ignore = "end-to-end: requires `make up`"]
+async fn log_spike_on_payment_failure() -> anyhow::Result<()> {
+    let api = Api::new(API);
+    let query = "kind=spike&service=payment&since=1h";
+    // An alert still open from an earlier run would only be updated by the logminer, never
+    // started anew, so the scenario could not tell whether the flag had any effect.
+    let open = api
+        .log_alerts(query)
+        .await?
+        .into_iter()
+        .any(|a| s(&a, "template").contains("Payment request failed") && a["active"] == true);
+    anyhow::ensure!(
+        !open,
+        "a payment spike alert is still active from an earlier run; wait ~10 minutes for it to lapse and re-run"
+    );
+    let flipped = now_ns();
+    let _flag = FlagGuard::set("paymentFailure", "100%")?;
+    let (alert, waited) = wait_for_alert(&api, query, flipped, LOG_SPIKE_TIMEOUT, |a| {
+        s(a, "template").contains("Payment request failed")
+            && a["started_at_ns"].as_i64().is_some_and(|n| n > flipped)
+    })
+    .await?;
+    println!("[e2e] log_spike: alert after {:.0}s", waited.as_secs_f64());
+    let traces = alert["example_traces"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        traces.iter().any(|t| !t["story_id"].is_null()),
+        "no example trace links to a story: {traces:?}"
+    );
+    Ok(())
+}
+
+/// Emits a probe log under the dedicated `tayga-e2e-probe` service, never a demo service:
+/// `{word} probe … probe marker` with a random 12-letter `word` and 2 to 56 `probe`s (spec
+/// §12.7). Drain routes on the token count, then on `word`, so each run adds one child to one of
+/// ~55 length nodes; that is ~4,000 runs (simulated: first node full at 4,000–4,650) within the 30-day template TTL before a node fills and
+/// probes start merging. The new-template rule needs the service to have had a template for
+/// 15 min, so every run also emits the constant seed `tayga e2e probe seed`, and the first run
+/// waits up to 16 min for that seed to age.
+#[tokio::test]
+#[ignore = "end-to-end: requires `make up`"]
+async fn new_template_from_probe() -> anyhow::Result<()> {
+    use tayga_devtools::emit::{
+        PROBE_SEED, PROBE_SERVICE, emit_log, probe_body, random_probe_repeats, random_trace_id,
+        random_word,
+    };
+    const INGEST: &str = "http://localhost:14318";
+    let api = Api::new(API);
+    emit_log(INGEST, PROBE_SERVICE, PROBE_SEED, &random_trace_id(), 9).await?;
+    let warmed = wait_for_service_warmup(&api, PROBE_SERVICE, PROBE_WARMUP_TIMEOUT).await?;
+    println!(
+        "[e2e] new_template: probe service warm after {:.0}s",
+        warmed.as_secs_f64()
+    );
+
+    let word = random_word(12);
+    let body = probe_body(&word, random_probe_repeats());
+    let trace = random_trace_id();
+    let trace_hex: String = trace.iter().map(|b| format!("{b:02x}")).collect();
+    let flipped = now_ns();
+    emit_log(INGEST, PROBE_SERVICE, &body, &trace, 9).await?;
+    let (alert, waited) = wait_for_alert(
+        &api,
+        &format!("kind=new&service={PROBE_SERVICE}&since=1h"),
+        flipped,
+        NEW_TEMPLATE_TIMEOUT,
+        |a| s(a, "template") == body,
+    )
+    .await?;
+    println!(
+        "[e2e] new_template: alert after {:.0}s",
+        waited.as_secs_f64()
+    );
+    let traces = alert["example_traces"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        traces.iter().any(|t| s(t, "trace_id") == trace_hex),
+        "example_traces {traces:?} should contain {trace_hex}"
+    );
+    Ok(())
+}
