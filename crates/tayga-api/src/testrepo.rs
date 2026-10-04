@@ -1,5 +1,5 @@
 use crate::model::*;
-use crate::params::GroupFilter;
+use crate::params::{AlertFilter, GroupFilter, TemplateFilter};
 use crate::repo::Repo;
 use std::sync::Mutex;
 
@@ -10,8 +10,14 @@ pub struct FakeRepo {
     pub story: Option<StoryView>,
     pub trace: Option<TraceView>,
     pub edges: Vec<EdgeView>,
+    pub alerts: Vec<LogAlertView>,
+    pub templates: Vec<LogTemplateView>,
+    pub template_detail: Option<LogTemplateDetail>,
+    pub trace_templates: Vec<TraceLogTemplate>,
     pub fail: bool,
     pub last_filter: Mutex<Option<GroupFilter>>,
+    pub last_alert_filter: Mutex<Option<AlertFilter>>,
+    pub last_template_filter: Mutex<Option<TemplateFilter>>,
 }
 
 impl FakeRepo {
@@ -49,5 +55,27 @@ impl Repo for FakeRepo {
     async fn service_map(&self, _since: u32) -> anyhow::Result<Vec<EdgeView>> {
         self.check()?;
         Ok(self.edges.clone())
+    }
+    async fn log_alerts(&self, f: &AlertFilter) -> anyhow::Result<Vec<LogAlertView>> {
+        self.check()?;
+        *self.last_alert_filter.lock().unwrap() = Some(f.clone());
+        Ok(self.alerts.clone())
+    }
+    async fn log_templates(&self, f: &TemplateFilter) -> anyhow::Result<Vec<LogTemplateView>> {
+        self.check()?;
+        *self.last_template_filter.lock().unwrap() = Some(f.clone());
+        Ok(self.templates.clone())
+    }
+    async fn log_template(
+        &self,
+        _id: &str,
+        _since: u32,
+    ) -> anyhow::Result<Option<LogTemplateDetail>> {
+        self.check()?;
+        Ok(self.template_detail.clone())
+    }
+    async fn trace_log_templates(&self, _trace_id: &str) -> anyhow::Result<Vec<TraceLogTemplate>> {
+        self.check()?;
+        Ok(self.trace_templates.clone())
     }
 }

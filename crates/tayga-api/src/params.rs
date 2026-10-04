@@ -9,6 +9,24 @@ pub struct GroupFilter {
     pub service: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlertFilter {
+    pub since_secs: u32,
+    /// `new` or `spike`.
+    pub kind: Option<String>,
+    pub service: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemplateFilter {
+    pub since_secs: u32,
+    pub service: Option<String>,
+    /// Case-insensitive substring of the template, trimmed, at most `MAX_Q_CHARS`.
+    pub q: Option<String>,
+}
+
+pub const MAX_Q_CHARS: usize = 200;
+
 /// Sparkline points per window, at most (one more when the window straddles bucket edges).
 pub const SPARK_BUCKETS: u32 = 120;
 
@@ -88,6 +106,47 @@ pub fn group_filter(
     })
 }
 
+/// Alert filter; the default window is 24h.
+pub fn alert_filter(
+    since: Option<&str>,
+    kind: Option<&str>,
+    service: Option<&str>,
+) -> Result<AlertFilter, String> {
+    let since_secs = parse_since(since_or(since, "24h"))?;
+    let kind = kind.filter(|k| !k.is_empty()).map(str::to_string);
+    if let Some(k) = &kind
+        && k != "new"
+        && k != "spike"
+    {
+        return Err(format!("invalid kind {k:?}: expected new or spike"));
+    }
+    Ok(AlertFilter {
+        since_secs,
+        kind,
+        service: service.filter(|s| !s.is_empty()).map(str::to_string),
+    })
+}
+
+/// Template filter; the default window is 1h.
+pub fn template_filter(
+    since: Option<&str>,
+    service: Option<&str>,
+    q: Option<&str>,
+) -> Result<TemplateFilter, String> {
+    let since_secs = parse_since(since_or(since, "1h"))?;
+    let q = q.map(str::trim).filter(|q| !q.is_empty());
+    if let Some(q) = q
+        && q.chars().count() > MAX_Q_CHARS
+    {
+        return Err(format!("q must be at most {MAX_Q_CHARS} characters"));
+    }
+    Ok(TemplateFilter {
+        since_secs,
+        service: service.filter(|s| !s.is_empty()).map(str::to_string),
+        q: q.map(str::to_string),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +223,24 @@ mod tests {
                 .as_deref(),
             Some("payment")
         );
+    }
+
+    #[test]
+    fn alert_and_template_filters() {
+        let a = alert_filter(None, Some(""), None).unwrap();
+        assert_eq!((a.since_secs, a.kind), (86_400, None));
+        assert!(alert_filter(None, Some("error"), None).is_err());
+        assert_eq!(
+            alert_filter(Some("5m"), Some("spike"), Some("payment"))
+                .unwrap()
+                .kind
+                .as_deref(),
+            Some("spike")
+        );
+        let t = template_filter(None, None, Some("  Found  ")).unwrap();
+        assert_eq!((t.since_secs, t.q.as_deref()), (3600, Some("Found")));
+        assert_eq!(template_filter(None, None, Some("   ")).unwrap().q, None);
+        assert!(template_filter(None, None, Some(&"é".repeat(200))).is_ok());
+        assert!(template_filter(None, None, Some(&"é".repeat(201))).is_err());
     }
 }

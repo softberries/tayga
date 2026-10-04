@@ -700,6 +700,7 @@ mod tests {
                 status_message: String::new(),
             }],
             logs: vec![TraceLogRow {
+                log_id: "1".into(),
                 ts_ns: 0,
                 span_id: "a".into(),
                 service_name: "payment".into(),
@@ -727,6 +728,7 @@ mod tests {
 
     fn log(ts_ns: i64, span: &str, service: &str, body: &str) -> TraceLogRow {
         TraceLogRow {
+            log_id: "1".into(),
             ts_ns,
             span_id: span.into(),
             service_name: service.into(),

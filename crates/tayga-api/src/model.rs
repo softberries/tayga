@@ -1,6 +1,7 @@
 //! API rows (ClickHouse result shapes, field names = SQL aliases) and response views.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
 pub struct StoryGroupRow {
@@ -171,12 +172,175 @@ pub struct TraceSpanRow {
 
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
 pub struct TraceLogRow {
+    /// Decimal string of the u64 log id, to join logs to `log_template_hits`.
+    pub log_id: String,
     pub ts_ns: i64,
     pub span_id: String,
     pub service_name: String,
     pub severity_number: u8,
     pub severity_text: String,
     pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
+pub struct LogAlertRow {
+    pub alert_id: String,
+    pub kind: String,
+    pub template_id: String,
+    pub service: String,
+    pub template: String,
+    pub started_at_ns: i64,
+    pub last_at_ns: i64,
+    pub window_count: u64,
+    pub peak_count: u64,
+    pub baseline_per_window: f64,
+    pub active: u8,
+    pub example_trace_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ExampleTrace {
+    pub trace_id: String,
+    /// Set when an error story exists for the trace (story_id equals trace_id).
+    pub story_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LogAlertView {
+    pub alert_id: String,
+    pub kind: String,
+    pub template_id: String,
+    pub service: String,
+    pub template: String,
+    pub started_at_ns: i64,
+    pub last_at_ns: i64,
+    pub window_count: u64,
+    pub peak_count: u64,
+    pub baseline_per_window: f64,
+    pub active: bool,
+    pub example_traces: Vec<ExampleTrace>,
+}
+
+impl LogAlertView {
+    /// `stories` holds the story ids that exist among the example traces.
+    pub fn from_row(r: LogAlertRow, stories: &HashSet<String>) -> Self {
+        Self {
+            alert_id: r.alert_id,
+            kind: r.kind,
+            template_id: r.template_id,
+            service: r.service,
+            template: r.template,
+            started_at_ns: r.started_at_ns,
+            last_at_ns: r.last_at_ns,
+            window_count: r.window_count,
+            peak_count: r.peak_count,
+            baseline_per_window: r.baseline_per_window,
+            active: r.active != 0,
+            example_traces: r
+                .example_trace_ids
+                .into_iter()
+                .map(|t| ExampleTrace {
+                    story_id: stories.contains(&t).then(|| t.clone()),
+                    trace_id: t,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
+pub struct LogTemplateRow {
+    pub template_id: String,
+    pub service: String,
+    pub template: String,
+    pub count: u64,
+    pub first_seen_ns: i64,
+    pub last_seen_ns: i64,
+    pub max_severity: u8,
+    pub alerting: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LogTemplateView {
+    pub template_id: String,
+    pub service: String,
+    pub template: String,
+    pub count: u64,
+    pub first_seen_ns: i64,
+    pub last_seen_ns: i64,
+    pub max_severity: u8,
+    pub alerting: bool,
+}
+
+impl LogTemplateView {
+    pub fn from_row(r: LogTemplateRow) -> Self {
+        Self {
+            template_id: r.template_id,
+            service: r.service,
+            template: r.template,
+            count: r.count,
+            first_seen_ns: r.first_seen_ns,
+            last_seen_ns: r.last_seen_ns,
+            max_severity: r.max_severity,
+            alerting: r.alerting != 0,
+        }
+    }
+}
+
+/// A `LogTemplateRow` plus the sample body, as one row of the detail query.
+#[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
+pub struct TemplateDetailRow {
+    pub template_id: String,
+    pub service: String,
+    pub template: String,
+    pub count: u64,
+    pub first_seen_ns: i64,
+    pub last_seen_ns: i64,
+    pub max_severity: u8,
+    pub alerting: u8,
+    pub sample: String,
+}
+
+#[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
+pub struct TemplateHitView {
+    pub ts_ns: i64,
+    pub trace_id: String,
+    pub span_id: String,
+    pub severity_number: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
+pub struct TemplateBucketRow {
+    pub bucket: u32,
+    pub hits: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LogTemplateDetail {
+    pub template: LogTemplateView,
+    pub sample: String,
+    pub bucket_secs: u32,
+    /// (bucket start in unix seconds, hits), ascending; empty buckets are omitted.
+    pub buckets: Vec<(u32, u64)>,
+    pub recent: Vec<TemplateHitView>,
+    pub alerts: Vec<LogAlertView>,
+}
+
+#[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
+pub struct TraceTemplateRow {
+    pub log_id: String,
+    pub template_id: String,
+    pub template: String,
+    pub ts_ns: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TraceLogTemplate {
+    pub log_id: String,
+    pub template_id: String,
+    pub template: String,
+    /// `new` or `spike` when that template has an alert active at the trace's time.
+    pub alert: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -269,6 +433,29 @@ pub(crate) mod tests {
         );
         let json = serde_json::to_value(&v).unwrap();
         assert_eq!(json["fingerprint"], "17393964261140422938");
+    }
+
+    #[test]
+    fn alert_view_marks_examples_with_stories() {
+        let row = LogAlertRow {
+            alert_id: "a".into(),
+            kind: "spike".into(),
+            template_id: "7".into(),
+            service: "payment".into(),
+            template: "t".into(),
+            started_at_ns: 1,
+            last_at_ns: 2,
+            window_count: 5,
+            peak_count: 6,
+            baseline_per_window: 0.5,
+            active: 1,
+            example_trace_ids: vec!["x".into(), "y".into()],
+        };
+        let stories: HashSet<String> = ["y".to_string()].into();
+        let v = LogAlertView::from_row(row, &stories);
+        assert!(v.active);
+        assert_eq!(v.example_traces[0].story_id, None);
+        assert_eq!(v.example_traces[1].story_id.as_deref(), Some("y"));
     }
 
     #[test]
