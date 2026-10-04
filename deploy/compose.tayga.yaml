@@ -54,6 +54,18 @@ services:
       tayga-migrate:
         condition: service_completed_successfully
 
+  tayga-logminer:
+    image: tayga:dev
+    container_name: tayga-logminer
+    command: ["tayga-logminer"]
+    environment: *tayga-env
+    restart: unless-stopped
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      tayga-migrate:
+        condition: service_completed_successfully
+
   tayga-api:
     image: tayga:dev
     container_name: tayga-api
