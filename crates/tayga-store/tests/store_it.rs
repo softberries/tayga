@@ -523,10 +523,15 @@ async fn data_now_is_the_latest_recent_hit_or_zero() {
         .insert_log_hits(&[
             hit(1, 1, now - 30 * MIN_NS, ""),
             hit(2, 1, now - 5 * MIN_NS, ""),
+            hit(3, 1, now + 60 * MIN_NS, ""),
         ])
         .await
         .unwrap();
-    assert_eq!(store.data_now_ns().await.unwrap(), now - 5 * MIN_NS);
+    assert_eq!(
+        store.data_now_ns().await.unwrap(),
+        now - 5 * MIN_NS,
+        "a log stamped an hour ahead is ignored"
+    );
     drop_db(&s, &store).await;
 }
 

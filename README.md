@@ -90,7 +90,7 @@ To probe the new-template rule by hand (the stack's ingest listens on 14318):
 cargo run -p tayga-devtools -- emit-log --service tayga-e2e-probe --body "hello probe marker"
 ```
 
-The command prints the trace id it used. An alert fires only if the service already had a template 15 minutes before. The e2e `new_template_from_probe` logs under its own service, `tayga-e2e-probe`, never a demo service. Every run emits a constant seed log, `tayga e2e probe seed`, and then a probe `{word} probe … probe marker` with a random 12-letter word and 4 to 58 tokens. The first run on a stack waits up to 16 minutes for the seed template to age past the warmup. Drain routes on the token count, then on the first word, so the probes spread over about 55 nodes of 100 children: about 5,500 runs fit in the 30-day template TTL before probes start merging and the test fails.
+The command prints the trace id it used. An alert fires only if the service already had a template 15 minutes before. The e2e `new_template_from_probe` logs under its own service, `tayga-e2e-probe`, never a demo service. Every run emits a constant seed log, `tayga e2e probe seed`, and then a probe `{word} probe … probe marker` with a random 12-letter word and 4 to 58 tokens. The first run on a stack waits up to 16 minutes for the seed template to age past the warmup. Drain routes on the token count, then on the first word, so the probes spread over about 55 nodes of 100 children: about 4,000 runs (simulated: the first node fills at 4,000–4,650 runs) fit in the 30-day template TTL before probes start merging and the test fails.
 
 ## Developer commands
 

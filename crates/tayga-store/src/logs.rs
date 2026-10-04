@@ -139,8 +139,10 @@ impl Store {
     pub async fn data_now_ns(&self) -> clickhouse::error::Result<i64> {
         self.client()
             .query(
+                // Logs stamped in the future (bad sender clock, crafted OTLP) must not move the
+                // data clock ahead: the new-template watermark only ever advances.
                 "SELECT toUnixTimestamp64Nano(max(ts)) FROM log_template_hits \
-                 WHERE ts > now64(9) - toIntervalDay(3)",
+                 WHERE ts > now64(9) - toIntervalDay(3) AND ts <= now64(9) + toIntervalMinute(1)",
             )
             .fetch_one()
             .await

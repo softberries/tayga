@@ -196,7 +196,7 @@ async fn log_spike_on_payment_failure() -> anyhow::Result<()> {
 /// Emits a probe log under the dedicated `tayga-e2e-probe` service, never a demo service:
 /// `{word} probe … probe marker` with a random 12-letter `word` and 2 to 56 `probe`s (spec
 /// §12.7). Drain routes on the token count, then on `word`, so each run adds one child to one of
-/// ~55 length nodes; that is ~5,500 runs within the 30-day template TTL before a node fills and
+/// ~55 length nodes; that is ~4,000 runs (simulated: first node full at 4,000–4,650) within the 30-day template TTL before a node fills and
 /// probes start merging. The new-template rule needs the service to have had a template for
 /// 15 min, so every run also emits the constant seed `tayga e2e probe seed`, and the first run
 /// waits up to 16 min for that seed to age.

@@ -213,7 +213,8 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
         return Ok(());
     };
     // Data time up to which new templates have been checked; advanced after each detection pass.
-    let mut new_watermark = initial_watermark(&detect_cfg, data_now, now_ns());
+    let now = now_ns();
+    let mut new_watermark = initial_watermark(&detect_cfg, data_clock(data_now, now), now);
 
     let consumer = tayga_kafka::consumer(&settings.kafka, GROUP)?;
     consumer.subscribe(&[&settings.kafka.topic])?;
@@ -453,6 +454,12 @@ async fn detect(
     tracker.expire(detect_cfg, now);
 }
 
+/// The data clock never runs ahead of the wall clock: a log stamped slightly in the future
+/// (within the query's 1-minute allowance) must not push the watermark past real time.
+fn data_clock(raw_ns: i64, now_ns: i64) -> i64 {
+    raw_ns.min(now_ns)
+}
+
 /// Seconds from the newest mined log to the wall clock; `None` before any log was mined.
 fn data_lag_secs(data_now_ns: i64, now_ns: i64) -> Option<f64> {
     (data_now_ns > 0).then(|| (now_ns - data_now_ns) as f64 / 1e9)
@@ -475,7 +482,7 @@ async fn find_alerts(
     now: i64,
     metrics: &LogminerMetrics,
 ) -> anyhow::Result<(Vec<(Alert, bool)>, i64)> {
-    let data_now = store.data_now_ns().await?;
+    let data_now = data_clock(store.data_now_ns().await?, now);
     if let Some(lag) = data_lag_secs(data_now, now) {
         metrics.data_lag_seconds.set(lag);
         if lag > f64::from(cfg.new_template_recent_min) * 60.0 {
@@ -612,6 +619,12 @@ mod tests {
             serde_json::from_str(r#"{"detect_secs": 5, "alerts_topic": "x"}"#).unwrap();
         assert_eq!((s.detect_secs, s.alerts_topic.as_str()), (5, "x"));
         assert_eq!(s.max_batch, 5_000);
+    }
+
+    #[test]
+    fn data_clock_never_runs_ahead_of_the_wall_clock() {
+        assert_eq!(data_clock(5 * MIN_NS, 10 * MIN_NS), 5 * MIN_NS);
+        assert_eq!(data_clock(11 * MIN_NS, 10 * MIN_NS), 10 * MIN_NS);
     }
 
     #[test]
