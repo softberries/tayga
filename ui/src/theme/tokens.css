@@ -1,0 +1,426 @@
+/*
+ * Tayga design tokens: the only place colors, shadows, glows, radii and fonts are defined.
+ * Light lives on :root, dark on [data-theme="dark"]. index.html sets data-theme before the
+ * first paint; ThemeProvider keeps it in sync. Values come from the chosen design
+ * ("A functionality, C look", Merged.dc.html) and spec §5. Components use the Tailwind
+ * utilities mapped in @theme below (bg-panel, text-muted, shadow-panel, ...) or var(--tg-*).
+ */
+
+/* Fonts: self-hosted woff2 from Fontsource (OFL), latin + latin-ext. */
+@font-face {
+  font-family: 'Sora';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url('/fonts/sora-latin-400-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Sora';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url('/fonts/sora-latin-500-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Sora';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url('/fonts/sora-latin-600-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Sora';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url('/fonts/sora-latin-700-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Sora';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url('/fonts/sora-latin-ext-400-normal.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Sora';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url('/fonts/sora-latin-ext-500-normal.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Sora';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url('/fonts/sora-latin-ext-600-normal.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Sora';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url('/fonts/sora-latin-ext-700-normal.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url('/fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url('/fonts/jetbrains-mono-latin-500-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url('/fonts/jetbrains-mono-latin-ext-400-normal.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url('/fonts/jetbrains-mono-latin-ext-500-normal.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* Light theme (and the theme-independent tokens). */
+:root {
+  color-scheme: light;
+
+  --tg-ground: #eef2f8;
+  --tg-rail: #ffffff;
+  --tg-rail-active: #e3edfb;
+  --tg-rail-ring: #c8d8f0;
+  --tg-header: rgba(255, 255, 255, 0.85);
+  --tg-line: #d9e1ec;
+  --tg-line-soft: #e7ecf3;
+  --tg-panel: #ffffff;
+  --tg-panel-line: #dce3ee;
+  --tg-inner: #f5f8fc;
+  --tg-field: #ffffff;
+  --tg-field-line: #cbd5e3;
+  --tg-row-selected: #eaf2fd;
+  --tg-scrim: rgba(14, 26, 46, 0.35);
+
+  --tg-ink: #0e1a2e;
+  --tg-ink-2: #24324a;
+  --tg-muted: #55627a;
+  --tg-faint: #8a96aa;
+
+  --tg-accent: #1f6fd1;
+  --tg-accent-strong: #1f6fd1;
+  --tg-on-accent: #ffffff;
+  --tg-err: #c93a33;
+  --tg-err-soft: #fce8e6;
+  --tg-slow: #9a6408;
+  --tg-slow-soft: #fbf0da;
+  --tg-on-slow: #ffffff;
+  --tg-ok: #1f7a4d;
+  --tg-ok-soft: #e3f3ea;
+
+  --tg-edge: #a8b9d3;
+  --tg-node: #f1f5fb;
+  --tg-node-line: #8da4c6;
+  --tg-track: #e6ecf5;
+
+  /* Chart palette (series order). 1–4 are the semantic colors; 5–6 are extra hues. */
+  --tg-chart-1: var(--tg-accent);
+  --tg-chart-2: var(--tg-err);
+  --tg-chart-3: var(--tg-slow);
+  --tg-chart-4: var(--tg-ok);
+  --tg-chart-5: #6b4fc8;
+  --tg-chart-6: #0e7c86;
+
+  /* Brand and call-to-action gradients are the same in both themes. */
+  --tg-brand-from: #2b6cb0;
+  --tg-brand-to: #7cc4ff;
+  --tg-cta-from: #2b6cb0;
+  --tg-cta-to: #3d8bdb;
+
+  --tg-shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 8px 24px rgba(16, 24, 40, 0.07);
+  --tg-shadow-lg: 0 1px 2px rgba(16, 24, 40, 0.06), 0 16px 40px rgba(16, 24, 40, 0.12);
+  --tg-shadow-rail: 0 0 0 1px var(--tg-rail-ring), 0 6px 14px rgba(31, 111, 209, 0.15);
+  --tg-shadow-inset: inset 0 1px 2px rgba(16, 24, 40, 0.06);
+  --tg-shadow-accent: 0 4px 12px rgba(43, 108, 176, 0.35);
+  --tg-shadow-cta: 0 6px 16px rgba(43, 108, 176, 0.4);
+  --tg-shadow-brand: 0 6px 18px rgba(43, 108, 176, 0.45);
+  --tg-glow-err: 0 0 12px var(--tg-err);
+  --tg-glow-slow: 0 0 12px var(--tg-slow);
+  --tg-glow-accent: 0 0 12px var(--tg-accent);
+
+  --tg-radius-panel: 16px;
+  --tg-radius-card: 14px;
+  --tg-radius-field: 10px;
+  --tg-radius-control: 8px;
+  --tg-radius-chip: 6px;
+  --tg-radius-badge: 5px;
+  --tg-radius-rail: 12px;
+
+  --tg-font-sans: 'Sora', 'Segoe UI', system-ui, sans-serif;
+  --tg-font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --tg-ground: #0a1020;
+  --tg-rail: #080d1a;
+  --tg-rail-active: #16213a;
+  --tg-rail-ring: #24365c;
+  --tg-header: rgba(10, 16, 32, 0.85);
+  --tg-line: #18223a;
+  --tg-line-soft: #131c30;
+  --tg-panel: #0e162a;
+  --tg-panel-line: #1c2944;
+  --tg-inner: #111c33;
+  --tg-field: #111a2e;
+  --tg-field-line: #22304d;
+  --tg-row-selected: #14203a;
+  --tg-scrim: rgba(4, 8, 18, 0.6);
+
+  --tg-ink: #d8e1f0;
+  --tg-ink-2: #c9d4e6;
+  --tg-muted: #8e9bb3;
+  --tg-faint: #56637c;
+
+  --tg-accent: #7cc4ff;
+  --tg-accent-strong: #2b6cb0;
+  --tg-on-accent: #ffffff;
+  --tg-err: #ff6b6b;
+  --tg-err-soft: #2a1420;
+  --tg-slow: #f4b740;
+  --tg-slow-soft: #2b2312;
+  --tg-on-slow: #0a1020;
+  --tg-ok: #7fd1a8;
+  --tg-ok-soft: #10261d;
+
+  --tg-edge: #2e4266;
+  --tg-node: #132038;
+  --tg-node-line: #3b5480;
+  --tg-track: #16213a;
+
+  --tg-chart-5: #b79cff;
+  --tg-chart-6: #5ed6d6;
+
+  --tg-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 10px 28px rgba(0, 0, 0, 0.35);
+  --tg-shadow-lg: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 18px 48px rgba(0, 0, 0, 0.5);
+  --tg-shadow-rail: 0 0 0 1px var(--tg-rail-ring), 0 6px 16px rgba(0, 0, 0, 0.4);
+  --tg-shadow-inset: inset 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+/* Tailwind utilities read the variables at runtime, so one class works in both themes. */
+@theme inline {
+  --color-*: initial;
+  --color-ground: var(--tg-ground);
+  --color-rail: var(--tg-rail);
+  --color-rail-active: var(--tg-rail-active);
+  --color-header: var(--tg-header);
+  --color-line: var(--tg-line);
+  --color-line-soft: var(--tg-line-soft);
+  --color-panel: var(--tg-panel);
+  --color-panel-line: var(--tg-panel-line);
+  --color-inner: var(--tg-inner);
+  --color-field: var(--tg-field);
+  --color-field-line: var(--tg-field-line);
+  --color-row-selected: var(--tg-row-selected);
+  --color-scrim: var(--tg-scrim);
+  --color-ink: var(--tg-ink);
+  --color-ink-2: var(--tg-ink-2);
+  --color-muted: var(--tg-muted);
+  --color-faint: var(--tg-faint);
+  --color-accent: var(--tg-accent);
+  --color-accent-strong: var(--tg-accent-strong);
+  --color-on-accent: var(--tg-on-accent);
+  --color-err: var(--tg-err);
+  --color-err-soft: var(--tg-err-soft);
+  --color-slow: var(--tg-slow);
+  --color-slow-soft: var(--tg-slow-soft);
+  --color-on-slow: var(--tg-on-slow);
+  --color-ok: var(--tg-ok);
+  --color-ok-soft: var(--tg-ok-soft);
+  --color-edge: var(--tg-edge);
+  --color-node: var(--tg-node);
+  --color-node-line: var(--tg-node-line);
+  --color-track: var(--tg-track);
+  --color-brand-from: var(--tg-brand-from);
+  --color-brand-to: var(--tg-brand-to);
+  --color-cta-from: var(--tg-cta-from);
+  --color-cta-to: var(--tg-cta-to);
+
+  --shadow-panel: var(--tg-shadow);
+  --shadow-panel-lg: var(--tg-shadow-lg);
+  --shadow-rail: var(--tg-shadow-rail);
+  --shadow-inset: var(--tg-shadow-inset);
+  --shadow-accent: var(--tg-shadow-accent);
+  --shadow-cta: var(--tg-shadow-cta);
+  --shadow-brand: var(--tg-shadow-brand);
+  --shadow-glow-err: var(--tg-glow-err);
+  --shadow-glow-slow: var(--tg-glow-slow);
+  --shadow-glow-accent: var(--tg-glow-accent);
+
+  --radius-panel: var(--tg-radius-panel);
+  --radius-card: var(--tg-radius-card);
+  --radius-field: var(--tg-radius-field);
+  --radius-control: var(--tg-radius-control);
+  --radius-chip: var(--tg-radius-chip);
+  --radius-badge: var(--tg-radius-badge);
+  --radius-rail: var(--tg-radius-rail);
+
+  --font-sans: var(--tg-font-sans);
+  --font-mono: var(--tg-font-mono);
+}
+
+/* Effects from the design's helmet: live pulse, enter, flowing dashed edge, shimmer. */
+@keyframes tg-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--tg-err) 55%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 10px color-mix(in srgb, var(--tg-err) 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--tg-err) 0%, transparent);
+  }
+}
+@keyframes tg-pulse-accent {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--tg-accent) 55%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 8px color-mix(in srgb, var(--tg-accent) 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--tg-accent) 0%, transparent);
+  }
+}
+@keyframes tg-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes tg-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes tg-dash {
+  to {
+    stroke-dashoffset: -22;
+  }
+}
+@keyframes tg-shimmer {
+  from {
+    background-position: 150% 0;
+  }
+  to {
+    background-position: -50% 0;
+  }
+}
+
+@layer components {
+  .tg-pulse {
+    animation: tg-pulse 1.8s ease-out infinite;
+  }
+  .tg-pulse-accent {
+    animation: tg-pulse-accent 1.8s ease-out infinite;
+  }
+  .tg-in {
+    animation: tg-in 0.45s ease both;
+  }
+  .tg-flow {
+    animation: tg-dash 1.2s linear infinite;
+  }
+  .tg-row {
+    transition:
+      background-color 0.15s ease,
+      transform 0.15s ease;
+  }
+  .tg-row:hover {
+    transform: translateX(2px);
+  }
+  .tg-card {
+    transition:
+      transform 0.2s ease,
+      box-shadow 0.2s ease;
+  }
+  .tg-card:hover {
+    transform: translateY(-2px);
+  }
+  .tg-skeleton {
+    background-color: var(--tg-track);
+    background-image: linear-gradient(
+      90deg,
+      transparent 0%,
+      color-mix(in srgb, var(--tg-panel) 70%, transparent) 50%,
+      transparent 100%
+    );
+    background-size: 200% 100%;
+    background-repeat: no-repeat;
+    animation: tg-shimmer 1.4s ease-in-out infinite;
+  }
+  .tg-brand {
+    background: linear-gradient(135deg, var(--tg-brand-from), var(--tg-brand-to));
+  }
+  .tg-cta {
+    background: linear-gradient(135deg, var(--tg-cta-from), var(--tg-cta-to));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tg-pulse,
+  .tg-pulse-accent,
+  .tg-in,
+  .tg-flow,
+  .tg-skeleton {
+    animation: none;
+  }
+  .tg-row:hover,
+  .tg-card:hover {
+    transform: none;
+  }
+}
+
+/* Theme cross-fade: ThemeProvider adds this class for one switch only. */
+@media (prefers-reduced-motion: no-preference) {
+  html.tg-theme-switching,
+  html.tg-theme-switching *,
+  html.tg-theme-switching *::before,
+  html.tg-theme-switching *::after {
+    transition:
+      background-color 200ms ease,
+      color 200ms ease,
+      border-color 200ms ease,
+      fill 200ms ease,
+      stroke 200ms ease,
+      box-shadow 200ms ease !important;
+  }
+}
