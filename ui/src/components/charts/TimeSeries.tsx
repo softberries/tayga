@@ -1,0 +1,68 @@
+import { useMemo } from 'react'
+import { readChartTokens, withAlpha } from '../../theme/echartsTheme'
+import { useAppliedTheme } from '../../theme/useAppliedTheme'
+import { EChart } from './EChart'
+
+export type SeriesTone = 'accent' | 'err' | 'slow' | 'ok'
+
+export interface TimeSeriesSeries {
+  name: string
+  /** `[time in unix ms, value]`; null values leave a gap. */
+  points: ReadonlyArray<readonly [number, number | null]>
+  /** Semantic color; defaults to the palette order. */
+  tone?: SeriesTone
+  /** `line` (default), `area` (line with a soft fill) or `bar`. */
+  type?: 'line' | 'area' | 'bar'
+}
+
+export interface TimeSeriesProps {
+  series: readonly TimeSeriesSeries[]
+  height?: number
+  /** Vertical marker, e.g. the story's own time (unix ms). */
+  markAt?: number
+  markLabel?: string
+  /** Y-axis and tooltip value formatter. */
+  format?: (v: number) => string
+  /** Screen-reader summary of what the chart shows. */
+  summary: string
+}
+
+/** Shared time-series chart (line, area or bar) on a time axis, themed via echartsTheme. */
+export function TimeSeries({ series, height = 180, markAt, markLabel, format, summary }: TimeSeriesProps) {
+  const applied = useAppliedTheme()
+  const option = useMemo(() => {
+    // Canvas needs real colors: resolve semantic tones from the applied theme's variables.
+    const tokens = applied ? readChartTokens() : null
+    const fmt = format ?? ((v: number) => String(v))
+    return {
+      animationDuration: 300,
+      grid: { left: 8, right: 12, top: 16, bottom: 4, containLabel: true },
+      tooltip: { trigger: 'axis', valueFormatter: (v: unknown) => (typeof v === 'number' ? fmt(v) : '—') },
+      xAxis: { type: 'time' },
+      yAxis: { type: 'value', minInterval: 1, axisLabel: { formatter: (v: number) => fmt(v) } },
+      series: series.map((s, i) => {
+        const color = s.tone && tokens ? tokens[s.tone] : undefined
+        return {
+          name: s.name,
+          type: s.type === 'bar' ? 'bar' : 'line',
+          data: s.points.map(([t, v]) => [t, v]),
+          ...(color ? { itemStyle: { color }, lineStyle: { color } } : {}),
+          showSymbol: false,
+          barMaxWidth: 18,
+          areaStyle: s.type === 'area' ? (color ? { color: withAlpha(color, 0.16) } : { opacity: 0.16 }) : undefined,
+          markLine:
+            i === 0 && markAt !== undefined
+              ? {
+                  symbol: 'none',
+                  silent: true,
+                  label: { formatter: markLabel ?? '', position: 'insideEndTop', color: tokens?.muted },
+                  lineStyle: { type: 'dashed', color: tokens?.faint },
+                  data: [{ xAxis: markAt }],
+                }
+              : undefined,
+        }
+      }),
+    }
+  }, [series, markAt, markLabel, format, applied])
+  return <EChart option={option} height={height} summary={summary} />
+}
