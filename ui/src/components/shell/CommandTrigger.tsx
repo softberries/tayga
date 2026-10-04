@@ -1,9 +1,9 @@
 import { Search } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { DialogContent, DialogRoot } from '../ui/Dialog'
+import { CommandPalette } from './CommandPalette'
 import { Kbd } from '../ui/Kbd'
 
-/** Header search field that opens the ⌘K palette. The palette itself lands in Task 12. */
+/** Header search field that opens the ⌘K palette. */
 export function CommandTrigger() {
   const [open, setOpen] = useState(false)
 
@@ -19,7 +19,7 @@ export function CommandTrigger() {
   }, [])
 
   return (
-    <DialogRoot open={open} onOpenChange={setOpen}>
+    <>
       <button
         type="button"
         onClick={() => setOpen(true)}
@@ -30,9 +30,7 @@ export function CommandTrigger() {
         <span className="flex-1 truncate text-left">Jump to service, trace id, template…</span>
         <Kbd>⌘K</Kbd>
       </button>
-      <DialogContent title="Command palette" description="Search and jump to services, traces, stories and templates.">
-        <p className="m-0 text-muted">The command palette is not built yet.</p>
-      </DialogContent>
-    </DialogRoot>
+      <CommandPalette open={open} onOpenChange={setOpen} />
+    </>
   )
 }

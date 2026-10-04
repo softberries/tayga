@@ -5,7 +5,6 @@
  */
 import { useQueries, useQuery } from '@tanstack/react-query'
 import { Activity } from 'lucide-react'
-import { useMemo } from 'react'
 import { api } from '../api/queries'
 import { useLiveInterval } from '../app/live'
 import { useSince } from '../components/shell/TimeRange'
@@ -13,11 +12,10 @@ import { Card, PanelTitle } from '../components/ui/Card'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Skeleton } from '../components/ui/Skeleton'
 import { StaleNote } from '../features/pipeline/Notes'
-import { useNow } from '../lib/useNow'
 import { LagList } from '../features/pipeline/LagList'
 import { COLLECTING, PipelineChart } from '../features/pipeline/PipelineChart'
 import { StatusStrip } from '../features/pipeline/StatusStrip'
-import { CHARTS, JOBS, STATUS_SINCE, jobStatus } from '../features/pipeline/model'
+import { CHARTS, JOBS, STATUS_SINCE } from '../features/pipeline/model'
 import { ErrorBanner } from '../features/stories/ErrorBanner'
 
 export function PipelinePage() {
@@ -32,16 +30,7 @@ export function PipelinePage() {
   // A Kafka failure (503) is not a storage outage: keep it out of the shell banner.
   const lag = useQuery({ ...api.pipelineLag(), refetchInterval, meta: { outage: false } })
 
-  // Ages advance on a clock, not on fetches, so they stay right with Live off or fetches failing.
-  const now = useNow()
-  const upUpdated = Math.max(...up.map((r) => r.dataUpdatedAt))
   const loaded = up.every((r) => r.data !== undefined)
-  const statuses = useMemo(
-    () => (loaded ? JOBS.map((job, i) => jobStatus(job, up[i]?.data, now)) : undefined),
-    // `up` is a fresh array each render; the data only changes with the update stamps.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [loaded, now, upUpdated],
-  )
   // Charts wait for the job statuses, so an empty history shows one notice, not nine.
   const upPending = up.some((r) => r.isPending)
   const staleUp = up.some((r) => r.isError && r.data !== undefined)
@@ -51,10 +40,10 @@ export function PipelinePage() {
 
   return (
     <div className="flex flex-col gap-3.5">
-      {upError && !statuses ? (
+      {upError && !loaded ? (
         <ErrorBanner what="job status" error={upError.error} onRetry={() => up.forEach((r) => void r.refetch())} />
       ) : (
-        <StatusStrip statuses={statuses} nowMs={now} />
+        <StatusStrip views={loaded ? up.map((r) => r.data) : undefined} />
       )}
 
       {staleUp ? <StaleNote updatedAt={Math.min(...up.filter((r) => r.isError && r.data !== undefined).map((r) => r.dataUpdatedAt))} onRetry={() => up.forEach((r) => void r.refetch())} /> : null}
@@ -67,7 +56,7 @@ export function PipelinePage() {
         <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-2">
           {CHARTS.map((spec) =>
             upPending ? (
-              <Card key={spec.id} aria-busy="true" aria-label={`Loading ${spec.title}`} className="px-4 py-3.5">
+              <Card key={spec.id} role="status" aria-busy="true" aria-label={`Loading ${spec.title}`} className="px-4 py-3.5">
                 <Skeleton className="h-[222px]" />
               </Card>
             ) : (

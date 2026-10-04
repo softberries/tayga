@@ -15,10 +15,12 @@ export interface DialogContentProps {
   className?: string
   /** Hide the visible title (kept for screen readers). */
   hideTitle?: boolean
+  /** No padding and a floating close button, for content that brings its own layout (palette). */
+  bare?: boolean
 }
 
 /** Centered modal: scrim, panel, close button, enter animation (off under reduced motion). */
-export function DialogContent({ title, description, children, className, hideTitle }: DialogContentProps) {
+export function DialogContent({ title, description, children, className, hideTitle, bare }: DialogContentProps) {
   return (
     <D.Portal>
       <D.Overlay className="fixed inset-0 z-40 bg-scrim backdrop-blur-[2px] data-[state=open]:animate-[tg-fade_.15s_ease] motion-reduce:animate-none" />
@@ -26,13 +28,14 @@ export function DialogContent({ title, description, children, className, hideTit
         {...(description ? {} : { 'aria-describedby': undefined })}
         className={cx(
           'fixed left-1/2 top-[12vh] z-50 w-[min(640px,calc(100vw-32px))] -translate-x-1/2',
-          'rounded-panel border border-panel-line bg-panel p-5 text-ink shadow-panel-lg',
+          'rounded-panel border border-panel-line bg-panel text-ink shadow-panel-lg',
+          !bare && 'p-5',
           'data-[state=open]:animate-[tg-in_.2s_ease] motion-reduce:animate-none focus:outline-none',
           className,
         )}
       >
-        <div className="mb-3 flex items-start gap-3">
-          <D.Title className={cx('m-0 flex-1 text-[15px] font-semibold', hideTitle && 'sr-only')}>{title}</D.Title>
+        <div className={cx(bare ? 'absolute right-2.5 top-2.5 z-10' : 'mb-3 flex items-start gap-3')}>
+          <D.Title className={cx('m-0 flex-1 text-[15px] font-semibold', (hideTitle || bare) && 'sr-only')}>{title}</D.Title>
           <D.Close
             aria-label="Close"
             className="inline-flex size-8 cursor-pointer items-center justify-center rounded-control text-muted hover:bg-rail-active hover:text-ink"

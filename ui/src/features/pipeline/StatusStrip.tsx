@@ -1,15 +1,21 @@
 import { Badge } from '../../components/ui/Badge'
 import type { BadgeKind } from '../../components/ui/Badge'
 import { Skeleton } from '../../components/ui/Skeleton'
-import { scrapeAge, shortJob } from './model'
-import type { JobState, JobStatus } from './model'
+import { useNow } from '../../lib/useNow'
+import { JOBS, jobStatus, scrapeAge, shortJob } from './model'
+import type { JobState } from './model'
+import type { SeriesView } from '../../api/types'
 
 const KIND: Record<JobState, BadgeKind> = { up: 'ok', down: 'error', unknown: 'neutral' }
 const LABEL: Record<JobState, string> = { up: 'up', down: 'down', unknown: 'no data' }
 
-/** One chip per scrape job: up or down from the latest `up` sample, a glow when down. */
-export function StatusStrip({ statuses, nowMs }: { statuses: readonly JobStatus[] | undefined; nowMs: number }) {
-  if (!statuses) {
+/**
+ * One chip per scrape job: up or down from the latest `up` sample, a glow when down. It owns
+ * the clock, so ages and staleness advance without re-rendering the page.
+ */
+export function StatusStrip({ views }: { views: readonly (SeriesView | undefined)[] | undefined }) {
+  const nowMs = useNow()
+  if (!views) {
     return (
       <div role="status" aria-busy="true" aria-label="Loading job status" className="flex flex-wrap gap-3">
         {Array.from({ length: 5 }, (_, i) => (
@@ -20,7 +26,7 @@ export function StatusStrip({ statuses, nowMs }: { statuses: readonly JobStatus[
   }
   return (
     <ul aria-label="Job status" className="m-0 flex list-none flex-wrap gap-3 p-0">
-      {statuses.map((s) => (
+      {JOBS.map((job, i) => jobStatus(job, views[i], nowMs)).map((s) => (
         <li
           key={s.job}
           data-state={s.state}

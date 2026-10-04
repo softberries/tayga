@@ -2,6 +2,7 @@ import { Outlet } from '@tanstack/react-router'
 import { Header } from './Header'
 import { OutageBanner } from './OutageBanner'
 import { Rail } from './Rail'
+import { Shortcuts } from './Shortcuts'
 
 export function AppShell() {
   return (
@@ -13,10 +14,11 @@ export function AppShell() {
         Skip to content
       </a>
       <Rail />
+      <Shortcuts />
       <div className="flex min-w-0 flex-1 flex-col">
         <Header />
         <OutageBanner />
-        <main id="main" className="flex min-h-0 flex-1 flex-col px-6 py-[18px]">
+        <main id="main" className="flex min-h-0 flex-1 flex-col px-6 py-[18px] max-sm:px-4">
           <Outlet />
         </main>
       </div>
