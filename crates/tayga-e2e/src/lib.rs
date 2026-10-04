@@ -203,7 +203,7 @@ pub async fn wait_for_alert(
                     .collect();
                 let found = alerts
                     .into_iter()
-                    .find(|a| a["last_at_ns"].as_i64().unwrap_or(0) > after_ns && pred(a));
+                    .find(|a| a["last_at_ns"].as_i64().is_some_and(|n| n > after_ns) && pred(a));
                 if let Some(a) = found {
                     return Ok((a, start.elapsed()));
                 }

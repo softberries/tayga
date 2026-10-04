@@ -162,15 +162,24 @@ async fn raw_span_counts_match_jaeger() -> anyhow::Result<()> {
 #[ignore = "end-to-end: requires `make up`"]
 async fn log_spike_on_payment_failure() -> anyhow::Result<()> {
     let api = Api::new(API);
+    let query = "kind=spike&service=payment&since=1h";
+    // An alert still open from an earlier run would only be updated by the logminer, never
+    // started anew, so the scenario could not tell whether the flag had any effect.
+    let open = api
+        .log_alerts(query)
+        .await?
+        .into_iter()
+        .any(|a| s(&a, "template").contains("Payment request failed") && a["active"] == true);
+    anyhow::ensure!(
+        !open,
+        "a payment spike alert is still active from an earlier run; wait ~10 minutes for it to lapse and re-run"
+    );
     let flipped = now_ns();
     let _flag = FlagGuard::set("paymentFailure", "100%")?;
-    let (alert, waited) = wait_for_alert(
-        &api,
-        "kind=spike&service=payment&since=1h",
-        flipped,
-        LOG_SPIKE_TIMEOUT,
-        |a| s(a, "template").contains("Payment request failed"),
-    )
+    let (alert, waited) = wait_for_alert(&api, query, flipped, LOG_SPIKE_TIMEOUT, |a| {
+        s(a, "template").contains("Payment request failed")
+            && a["started_at_ns"].as_i64().is_some_and(|n| n > flipped)
+    })
     .await?;
     println!("[e2e] log_spike: alert after {:.0}s", waited.as_secs_f64());
     let traces = alert["example_traces"]
@@ -186,7 +195,8 @@ async fn log_spike_on_payment_failure() -> anyhow::Result<()> {
 
 /// Emits a log with a per-run random first word, so Drain creates a fresh template every run
 /// (`<word> <*> marker`; the `e2e` token contains a digit and is masked). The checkout service
-/// is older than 15 min, so the template is reported as a new-template alert (spec section 12.7).
+/// is older than 15 min, so the template is reported as a new-template alert. Each run leaves
+/// one probe template in checkout's template set (spec section 12.7).
 #[tokio::test]
 #[ignore = "end-to-end: requires `make up`"]
 async fn new_template_from_probe() -> anyhow::Result<()> {
