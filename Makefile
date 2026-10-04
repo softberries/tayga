@@ -19,7 +19,7 @@ up:
 	$(COMPOSE) build tayga-migrate
 	$(COMPOSE) up -d
 
-# Grafana and Prometheus (profile "extras"), plus Grafana/Jaeger links in the app.
+# Grafana and Prometheus (profile "extras"), plus the Grafana link in the app.
 up-extras:
 	$(COMPOSE) -f $(TAYGA_ROOT)/deploy/compose.extras.yaml --profile extras up -d
 

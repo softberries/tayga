@@ -22,6 +22,7 @@ pub struct Target {
 }
 
 /// The compose services' metric endpoints.
+/// Keep in sync with `deploy/tayga-api.toml`.
 pub fn default_targets() -> Vec<Target> {
     let t = |job: &str, url: &str| Target {
         job: job.to_string(),

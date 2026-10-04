@@ -4,6 +4,7 @@
 # The recorder scrapes these /metrics endpoints every record_secs, by their
 # compose service names. tayga-api records its own registry in-process
 # (job "tayga-api"), so it is not listed.
+# Keep in sync with recorder::default_targets() in crates/tayga-api/src/recorder.rs.
 
 [[metric_targets]]
 job = "tayga-ingest"

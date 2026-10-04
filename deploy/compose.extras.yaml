@@ -1,8 +1,7 @@
 # Added by `make up-extras` together with `--profile extras`, which starts
 # tayga-prometheus and tayga-grafana (deploy/compose.tayga.yaml). With them
-# running, the app shows "Open in Grafana" and "Open in Jaeger" links.
+# running, the app also shows "Open in Grafana" links.
 services:
   tayga-api:
     environment:
-      TAYGA__JAEGER_URL: http://localhost:8080/jaeger/ui
       TAYGA__GRAFANA_URL: http://localhost:3001
