@@ -120,10 +120,11 @@ impl Api {
         self.get(&format!("/api/v1/stories/{id}")).await
     }
 
+    /// The map's edges (`{"edges": [...], "nodes": [...]}`).
     pub async fn service_map(&self, since: &str) -> anyhow::Result<Vec<Value>> {
         Ok(self
             .get(&format!("/api/v1/service-map?since={since}"))
-            .await?
+            .await?["edges"]
             .as_array()
             .cloned()
             .unwrap_or_default())

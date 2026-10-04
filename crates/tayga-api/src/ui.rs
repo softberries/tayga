@@ -801,7 +801,7 @@ mod tests {
     use super::*;
     use crate::model::tests::record;
     use crate::model::*;
-    use crate::params::{AlertFilter, GroupFilter, TemplateFilter};
+    use crate::params::{AlertFilter, GroupFilter, SeriesQuery, TemplateFilter, TraceFilter};
     use crate::testrepo::FakeRepo;
     use axum::body::Body;
     use axum::http::Request;
@@ -966,6 +966,10 @@ mod tests {
                 duration_ns: 10,
                 status: "error".into(),
                 status_message: String::new(),
+                attrs: vec![],
+                resource: vec![],
+                events: vec![],
+                self_ns: 10,
             }],
             logs: vec![TraceLogRow {
                 log_id: "1".into(),
@@ -976,6 +980,7 @@ mod tests {
                 severity_text: "ERROR".into(),
                 body: "<img src=x onerror=alert(1)>".into(),
             }],
+            story_id: None,
         };
         let repo = FakeRepo {
             story: Some(story),
@@ -1017,6 +1022,10 @@ mod tests {
             duration_ns: 10,
             status: "unset".into(),
             status_message: String::new(),
+            attrs: vec![],
+            resource: vec![],
+            events: vec![],
+            self_ns: 10,
         }
     }
 
@@ -1034,6 +1043,7 @@ mod tests {
                 log(2_500_000, "s2", "payment", "Charge request received."),
                 log(2_000_000, "unknown", "payment", "no span here"),
             ],
+            story_id: None,
         };
         FakeRepo {
             story: Some(StoryView::from_record(record())),
@@ -1099,6 +1109,7 @@ mod tests {
                 trace_id: "ab".repeat(16),
                 spans: vec![span("s1", "load-generator", "POST")],
                 logs: vec![],
+                story_id: None,
             }),
             ..Default::default()
         };
@@ -1528,6 +1539,34 @@ mod tests {
             }
             async fn trace_log_templates(&self, _: &str) -> anyhow::Result<Vec<TraceLogTemplate>> {
                 anyhow::bail!("templates down")
+            }
+            async fn overview(&self, s: u32) -> anyhow::Result<OverviewView> {
+                self.0.overview(s).await
+            }
+            async fn stories_series(&self, f: &GroupFilter) -> anyhow::Result<StoriesSeries> {
+                self.0.stories_series(f).await
+            }
+            async fn traces_search(&self, f: &TraceFilter) -> anyhow::Result<Vec<TraceHitView>> {
+                self.0.traces_search(f).await
+            }
+            async fn services(&self) -> anyhow::Result<Vec<String>> {
+                self.0.services().await
+            }
+            async fn service(&self, n: &str, s: u32) -> anyhow::Result<Option<ServiceView>> {
+                self.0.service(n, s).await
+            }
+            async fn service_graph(&self, s: u32) -> anyhow::Result<ServiceMapView> {
+                self.0.service_graph(s).await
+            }
+            async fn search(&self, q: &str) -> anyhow::Result<SearchView> {
+                self.0.search(q).await
+            }
+            async fn metric_buckets(
+                &self,
+                q: &SeriesQuery,
+                step: u32,
+            ) -> anyhow::Result<Vec<tayga_store::metrics_store::MetricPointRow>> {
+                self.0.metric_buckets(q, step).await
             }
         }
         let metrics = ApiMetrics::default();

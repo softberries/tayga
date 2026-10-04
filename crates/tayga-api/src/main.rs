@@ -6,6 +6,7 @@ use std::time::Duration;
 use tayga_api::recorder::{self, Target};
 use tayga_api::repo::ChRepo;
 use tayga_api::routes::{ApiMetrics, api_router};
+use tayga_api::routes_v2::{self, ClientConfig, LagCache};
 use tayga_api::ui::{UiLinks, ui_router};
 use tayga_kafka::KafkaSettings;
 use tayga_store::ClickHouseSettings;
@@ -62,7 +63,14 @@ async fn main() -> anyhow::Result<()> {
         Duration::from_secs(settings.record_secs),
         stop.clone(),
     );
+    let v2 = routes_v2::router(
+        repo.clone(),
+        metrics.clone(),
+        LagCache::kafka(settings.kafka.brokers.clone(), settings.kafka.topic.clone()),
+        ClientConfig::new(&settings.jaeger_url, &settings.grafana_url),
+    );
     let app = api_router(repo.clone(), metrics.clone())
+        .merge(v2)
         .merge(ui_router(
             repo,
             metrics,

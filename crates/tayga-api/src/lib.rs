@@ -5,6 +5,7 @@ pub mod params;
 pub mod recorder;
 pub mod repo;
 pub mod routes;
+pub mod routes_v2;
 pub mod series;
 pub mod svg;
 #[cfg(test)]

@@ -2,12 +2,15 @@
 //! inserts its own rows with random ids and `now`-based timestamps, reads them back and drops
 //! the database. Runs on the empty `make it` ClickHouse and against the live stack alike.
 
-use tayga_api::params::{AlertFilter, GroupFilter, TemplateFilter};
+use tayga_api::params::{
+    AlertFilter, GroupFilter, SeriesKind, SeriesQuery, TemplateFilter, TraceFilter,
+};
 use tayga_api::repo::{ChRepo, Repo};
 use tayga_store::ClickHouseSettings;
 use tayga_store::logs::{LogAlertRow, LogHitRow, LogTemplateRow};
+use tayga_store::metrics_store::MetricSampleRow;
 use tayga_store::migrate::migrate;
-use tayga_store::rows::{LogRow, ServiceEdgeRow, SpanRow, StoryRow};
+use tayga_store::rows::{LogRow, ServiceEdgeRow, SpanRow, StoryRow, TraceSummaryRow};
 use tayga_store::store::Store;
 
 fn settings() -> ClickHouseSettings {
@@ -468,6 +471,444 @@ async fn reads_seeded_log_templates_alerts_and_trace_links() {
     assert_eq!(c.len(), 1);
     assert_eq!(c[0].alert, None);
     assert!(r.trace_log_templates(&hex32()).await.unwrap().is_empty());
+
+    Store::new(&s)
+        .client()
+        .query(&format!("DROP DATABASE `{}`", s.database))
+        .execute()
+        .await
+        .unwrap();
+}
+
+fn story_row(id: &str, kind: i8, ts: i64, rc_service: &str, summary: &str) -> StoryRow {
+    StoryRow {
+        story_id: id.into(),
+        fingerprint: rand::random(),
+        kind,
+        ts,
+        trace_id: id.into(),
+        endpoint_service: "frontend".into(),
+        endpoint_name: "POST /api/checkout".into(),
+        rc_service: rc_service.into(),
+        rc_span_name: "Charge".into(),
+        rc_span_kind: "server".into(),
+        rc_span_id: "0000000000000002".into(),
+        rc_message: "x".into(),
+        rc_exception_type: String::new(),
+        summary: summary.into(),
+        duration_ns: 1,
+        path_services: vec![],
+        path_spans: "[]".into(),
+        critical_path: "{}".into(),
+        baseline_diff: String::new(),
+        logs: "[]".into(),
+        also_failed: "[]".into(),
+        span_count: 1,
+        flags: vec![],
+    }
+}
+
+fn summary(
+    trace_id: &str,
+    ts: i64,
+    service: &str,
+    name: &str,
+    ms: u64,
+    err: bool,
+) -> TraceSummaryRow {
+    TraceSummaryRow {
+        trace_id: trace_id.into(),
+        ts,
+        endpoint_service: service.into(),
+        endpoint_name: name.into(),
+        duration_ns: ms * 1_000_000,
+        is_error: u8::from(err),
+        op_durations: vec![],
+        span_count: 2,
+    }
+}
+
+/// Server span of `service` at `start` lasting `ms`, failed when `err`, with kind `kind`.
+fn rspan(service: &str, kind: i8, start: i64, ms: u64, err: bool) -> SpanRow {
+    let mut s = span(&hex32(), &hex32()[..16], "", service, start);
+    s.kind = kind;
+    s.duration_ns = ms * 1_000_000;
+    s.status_code = if err { 2 } else { 1 };
+    s
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: make it, or TAYGA_IT_CLICKHOUSE against the live stack"]
+async fn reads_seeded_overview_traces_services_and_search() {
+    let s = settings();
+    migrate(&s).await.unwrap();
+    let store = Store::new(&s);
+    let now = now_ns();
+    let sec = 1_000_000_000_i64;
+    let (t1, t2, t_old) = (hex32(), hex32(), hex32());
+
+    // Trace t1: a frontend root with attributes and an event, and two overlapping children.
+    let mut root = span(&t1, "00000000000000a1", "", "frontend", now - 60 * sec);
+    root.duration_ns = 100;
+    root.span_attrs = vec![("http.method".into(), "POST".into())];
+    root.events_ts = vec![now - 60 * sec + 5];
+    root.events_name = vec!["exception".into()];
+    root.events_attrs = vec![vec![("exception.message".into(), "boom".into())]];
+    let mut c1 = span(
+        &t1,
+        "00000000000000a2",
+        "00000000000000a1",
+        "payment",
+        now - 60 * sec + 10,
+    );
+    c1.duration_ns = 30;
+    let mut c2 = span(
+        &t1,
+        "00000000000000a3",
+        "00000000000000a1",
+        "payment",
+        now - 60 * sec + 30,
+    );
+    c2.duration_ns = 20;
+    // Trace t2 touches `oksvc` but its endpoint is frontend.
+    let mut t2_span = rspan("oksvc", 5, now - 50 * sec, 2, false);
+    t2_span.trace_id = t2.clone();
+
+    let mut spans = vec![root, c1, c2, t2_span];
+    // slowsvc: 200 fast spans 2h ago (the 24h baseline) and one slow span in the window.
+    spans.extend((0..200).map(|_| rspan("slowsvc", 2, now - 7200 * sec, 1, false)));
+    spans.push(rspan("slowsvc", 2, now - 30 * sec, 10, false));
+    // errsvc: 1 of 10 server spans failed (10% >= 5%).
+    spans.extend((0..10).map(|i| rspan("errsvc", 2, now - 20 * sec, 1, i == 0)));
+    // oksvc: consumer spans count as calls.
+    spans.extend((0..4).map(|_| rspan("oksvc", 5, now - 10 * sec, 2, false)));
+    // loadgen: client spans only, so it has no calls.
+    spans.push(rspan("loadgen", 3, now - 10 * sec, 2, false));
+    store.insert_spans(&spans).await.unwrap();
+    let spans_in_hour = spans
+        .iter()
+        .filter(|s| s.start_ts > now - 3600 * sec)
+        .count() as u64;
+
+    store
+        .insert_rows(
+            "trace_summaries",
+            &[
+                summary(
+                    &t1,
+                    now - 60 * sec,
+                    "frontend",
+                    "POST /api/checkout",
+                    5,
+                    true,
+                ),
+                summary(&t2, now - 50 * sec, "frontend", "GET /", 50, false),
+                summary(&t_old, now - 7200 * sec, "frontend", "GET /", 1, true),
+            ],
+        )
+        .await
+        .unwrap();
+    let slow_id = hex32();
+    store
+        .insert_rows(
+            "error_stories",
+            &[
+                story_row(
+                    &t1,
+                    1,
+                    now - 60 * sec,
+                    "payment",
+                    "payment Charge failed: Invalid token",
+                ),
+                story_row(&slow_id, 2, now - 40 * sec, "cart", "cart slow"),
+            ],
+        )
+        .await
+        .unwrap();
+    let alert = |id: &str, last_at: i64| LogAlertRow {
+        alert_id: id.into(),
+        kind: 2,
+        template_id: 1,
+        service: "payment".into(),
+        template: "t".into(),
+        started_at: last_at - 60 * sec,
+        last_at,
+        window_count: 1,
+        peak_count: 1,
+        baseline_per_window: 0.0,
+        example_trace_ids: vec![],
+        version: 1,
+    };
+    store
+        .insert_alerts(&[alert(&hex32(), now), alert(&hex32(), now - 3600 * sec)])
+        .await
+        .unwrap();
+    let tmpl: u64 = rand::random();
+    store
+        .upsert_templates(&[LogTemplateRow {
+            template_id: tmpl,
+            service: "payment".into(),
+            template: "Payment request failed <*>".into(),
+            first_seen: now - 60 * sec,
+            last_seen: now,
+            count: 3,
+            max_severity: 17,
+            sample: "Payment request failed 42".into(),
+            version: 1,
+        }])
+        .await
+        .unwrap();
+    let now_ms = now / 1_000_000;
+    let lag = |ts, v| MetricSampleRow {
+        ts,
+        job: "tayga-logminer".into(),
+        metric: "tayga_logminer_data_lag_seconds".into(),
+        labels: vec![],
+        value: v,
+    };
+    store
+        .insert_metric_samples(&[lag(now_ms - 20_000, 3.0), lag(now_ms - 10_000, 1.5)])
+        .await
+        .unwrap();
+
+    let r = ChRepo::new(&s);
+
+    // Overview.
+    let o = r.overview(3600).await.unwrap();
+    assert_eq!(o.bucket_secs, 60);
+    assert_eq!(
+        (o.error_stories, o.slow_stories, o.active_alerts),
+        (1, 1, 1)
+    );
+    assert_eq!(o.data_lag_secs, Some(1.5));
+    let spans_sum: f64 = o.spans.iter().map(|b| b.1 * 60.0).sum();
+    assert!(
+        (spans_sum - spans_in_hour as f64).abs() < 1e-6,
+        "{spans_sum} vs {spans_in_hour}"
+    );
+    assert!((o.spans_per_sec - spans_in_hour as f64 / 3600.0).abs() < 1e-9);
+    assert!(o.stories.error.iter().all(|b| b.0 % 60 == 0));
+
+    // Stories series with kind and service filters.
+    let gf = |kind: Option<&str>, service: Option<&str>| GroupFilter {
+        since_secs: 3600,
+        kind: kind.map(Into::into),
+        service: service.map(Into::into),
+    };
+    let all = r.stories_series(&gf(None, None)).await.unwrap();
+    assert_eq!((all.error.len(), all.slow.len()), (1, 1));
+    let slow = r.stories_series(&gf(Some("slow"), None)).await.unwrap();
+    assert!(slow.error.is_empty() && slow.slow.len() == 1);
+    let cart = r.stories_series(&gf(None, Some("cart"))).await.unwrap();
+    assert!(cart.error.is_empty() && cart.slow[0].1 == 1);
+
+    // Trace search.
+    let tf = TraceFilter {
+        since_secs: 3600,
+        service: None,
+        touched: false,
+        endpoint: None,
+        min_ns: 0,
+        max_ns: u64::MAX,
+        errors_only: false,
+        limit: 500,
+    };
+    let ids = |v: Vec<tayga_api::model::TraceHitView>| {
+        v.into_iter().map(|h| h.trace_id).collect::<Vec<_>>()
+    };
+    let hits = r.traces_search(&tf).await.unwrap();
+    assert_eq!(hits.len(), 2, "old trace outside the window");
+    assert_eq!(hits[0].trace_id, t2, "newest first");
+    assert_eq!(hits[1].story_id.as_deref(), Some(t1.as_str()));
+    assert!(hits[0].story_id.is_none() && hits[1].is_error);
+    assert_eq!(hits[1].duration_ns, 5_000_000);
+    assert_eq!(
+        ids(r
+            .traces_search(&TraceFilter {
+                errors_only: true,
+                ..tf.clone()
+            })
+            .await
+            .unwrap()),
+        [t1.as_str()]
+    );
+    assert_eq!(
+        ids(r
+            .traces_search(&TraceFilter {
+                min_ns: 10_000_000,
+                ..tf.clone()
+            })
+            .await
+            .unwrap()),
+        [t2.as_str()]
+    );
+    assert_eq!(
+        ids(r
+            .traces_search(&TraceFilter {
+                max_ns: 10_000_000,
+                ..tf.clone()
+            })
+            .await
+            .unwrap()),
+        [t1.as_str()]
+    );
+    assert_eq!(
+        ids(r
+            .traces_search(&TraceFilter {
+                endpoint: Some("GET /".into()),
+                ..tf.clone()
+            })
+            .await
+            .unwrap()),
+        [t2.as_str()]
+    );
+    assert_eq!(
+        ids(r
+            .traces_search(&TraceFilter {
+                limit: 1,
+                ..tf.clone()
+            })
+            .await
+            .unwrap()),
+        [t2.as_str()]
+    );
+    assert_eq!(
+        r.traces_search(&TraceFilter {
+            since_secs: 3 * 3600,
+            ..tf.clone()
+        })
+        .await
+        .unwrap()
+        .len(),
+        3
+    );
+    // Endpoint-service match versus "trace touched the service".
+    let oksvc = |touched| TraceFilter {
+        service: Some("oksvc".into()),
+        touched,
+        ..tf.clone()
+    };
+    assert!(r.traces_search(&oksvc(false)).await.unwrap().is_empty());
+    assert_eq!(
+        ids(r.traces_search(&oksvc(true)).await.unwrap()),
+        [t2.as_str()]
+    );
+    let frontend = TraceFilter {
+        service: Some("frontend".into()),
+        ..tf.clone()
+    };
+    assert_eq!(r.traces_search(&frontend).await.unwrap().len(), 2);
+    assert_eq!(
+        ids(r
+            .traces_search(&TraceFilter {
+                touched: true,
+                ..frontend
+            })
+            .await
+            .unwrap()),
+        [t1.as_str()]
+    );
+
+    // Extended trace.
+    let t = r.trace(&t1).await.unwrap();
+    assert_eq!(t.story_id.as_deref(), Some(t1.as_str()));
+    let root = t
+        .spans
+        .iter()
+        .find(|s| s.span_id == "00000000000000a1")
+        .unwrap();
+    assert_eq!(
+        root.attrs,
+        vec![("http.method".to_string(), "POST".to_string())]
+    );
+    assert_eq!(
+        root.resource,
+        vec![("service.name".to_string(), "frontend".to_string())]
+    );
+    assert_eq!(root.events.len(), 1);
+    assert_eq!(root.events[0].ts_ns, now - 60 * sec + 5);
+    assert_eq!(root.events[0].name, "exception");
+    assert_eq!(root.events[0].attrs[0].1, "boom");
+    // Children cover [10, 50) of the root's 100 ns.
+    assert_eq!(root.self_ns, 60);
+    assert!(r.trace(&t2).await.unwrap().story_id.is_none());
+
+    // Services.
+    let names = r.services().await.unwrap();
+    assert_eq!(
+        names,
+        [
+            "errsvc", "frontend", "loadgen", "oksvc", "payment", "slowsvc"
+        ]
+    );
+    let err = r.service("errsvc", 3600).await.unwrap().expect("exists");
+    assert_eq!((err.calls, err.errors, err.bucket_secs), (10, 1, 60));
+    assert_eq!(
+        err.buckets
+            .iter()
+            .map(|b| b.error_ratio)
+            .fold(0.0, f64::max),
+        0.1
+    );
+    assert!(
+        err.buckets
+            .iter()
+            .all(|b| b.p99_ns > 0.0 && b.p50_ns <= b.p99_ns)
+    );
+    let ok = r.service("oksvc", 3600).await.unwrap().unwrap();
+    assert_eq!(ok.calls, 5, "consumer spans count");
+    let lg = r
+        .service("loadgen", 3600)
+        .await
+        .unwrap()
+        .expect("client-only still exists");
+    assert!(lg.buckets.is_empty() && lg.calls == 0);
+    assert!(r.service("nosuch", 3600).await.unwrap().is_none());
+    assert!(r.service("' OR 1=1 --", 3600).await.unwrap().is_none());
+
+    // Service map nodes and health.
+    let g = r.service_graph(3600).await.unwrap();
+    let node = |name: &str| g.nodes.iter().find(|n| n.service == name).cloned();
+    assert_eq!(node("errsvc").unwrap().health, "error");
+    let slow = node("slowsvc").unwrap();
+    assert_eq!(slow.calls, 1, "the 2h-old spans are only the baseline");
+    assert_eq!(slow.health, "slow", "{slow:?}");
+    assert_eq!(node("oksvc").unwrap().health, "ok");
+    assert!(node("loadgen").is_none(), "no server or consumer spans");
+    assert!(g.edges.is_empty());
+
+    // Search.
+    let found = r.search("SLOWSV").await.unwrap();
+    assert_eq!(found.services, ["slowsvc"]);
+    assert!(found.trace_id.is_none());
+    let found = r.search("payment req").await.unwrap();
+    assert_eq!(found.templates.len(), 1);
+    assert_eq!(found.templates[0].template_id, tmpl.to_string());
+    let found = r.search("invalid TOKEN").await.unwrap();
+    assert_eq!(found.groups.len(), 1);
+    assert_eq!(found.groups[0].kind, "error");
+    assert_eq!(found.groups[0].stories, 1);
+    let found = r.search(&t1.to_uppercase()).await.unwrap();
+    assert_eq!(found.trace_id.as_deref(), Some(t1.as_str()));
+    let none = r.search("' OR 1=1 --").await.unwrap();
+    assert!(none.services.is_empty() && none.templates.is_empty() && none.groups.is_empty());
+
+    // Pipeline series points: the last value per series and step.
+    let pts = r
+        .metric_buckets(
+            &SeriesQuery {
+                since_secs: 3600,
+                metric: "tayga_logminer_data_lag_seconds".into(),
+                job: Some("tayga-logminer".into()),
+                kind: SeriesKind::Gauge,
+                labels: vec![],
+            },
+            3600,
+        )
+        .await
+        .unwrap();
+    assert!(!pts.is_empty() && pts.len() <= 2, "{pts:?}");
+    assert_eq!(pts.last().unwrap().value, 1.5);
 
     Store::new(&s)
         .client()

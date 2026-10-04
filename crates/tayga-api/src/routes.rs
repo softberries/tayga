@@ -29,6 +29,7 @@ pub struct JobLabel {
 pub struct ApiMetrics {
     pub repo_errors: Counter,
     pub scrape_failures: Family<JobLabel, Counter>,
+    pub lag_errors: Counter,
 }
 
 impl ApiMetrics {
@@ -43,6 +44,11 @@ impl ApiMetrics {
             "tayga_api_scrape_failures",
             "Metric scrapes of a recorder target that failed",
             m.scrape_failures.clone(),
+        );
+        registry.register(
+            "tayga_api_lag_errors",
+            "Consumer-lag reads from Kafka that failed",
+            m.lag_errors.clone(),
         );
         m
     }
@@ -197,12 +203,12 @@ async fn service_map<R: Repo>(
 ) -> Result<Response, ApiError> {
     let Query(q) = q.map_err(|r| ApiError::BadRequest(r.body_text()))?;
     let since = parse_since(since_or(q.since.as_deref(), "1h")).map_err(ApiError::BadRequest)?;
-    let edges = s
+    let graph = s
         .repo
-        .service_map(since)
+        .service_graph(since)
         .await
         .map_err(|e| s.unavailable(e))?;
-    Ok(Json(edges).into_response())
+    Ok(Json(graph).into_response())
 }
 
 async fn log_alerts<R: Repo>(
@@ -637,5 +643,86 @@ mod tests {
             assert_eq!(json["error"], "storage unavailable");
             assert_eq!(metrics.repo_errors.get(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn trace_carries_attrs_events_self_time_and_story() {
+        let id = "ab".repeat(16);
+        let repo = FakeRepo {
+            trace: Some(TraceView {
+                trace_id: id.clone(),
+                spans: vec![TraceSpanRow {
+                    span_id: "01".repeat(8),
+                    parent_span_id: String::new(),
+                    service_name: "payment".into(),
+                    span_name: "charge".into(),
+                    kind: "server".into(),
+                    start_ns: 1,
+                    duration_ns: 10,
+                    status: "error".into(),
+                    status_message: "boom".into(),
+                    attrs: vec![("http.method".into(), "POST".into())],
+                    resource: vec![("service.name".into(), "payment".into())],
+                    events: vec![SpanEvent {
+                        ts_ns: 3,
+                        name: "exception".into(),
+                        attrs: vec![("exception.stacktrace".into(), "at x".into())],
+                    }],
+                    self_ns: 4,
+                }],
+                logs: vec![],
+                story_id: Some(id.clone()),
+            }),
+            ..Default::default()
+        };
+        let (status, json) = get(repo, &format!("/api/v1/traces/{id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        let span = &json["spans"][0];
+        assert_eq!(span["attrs"], serde_json::json!([["http.method", "POST"]]));
+        assert_eq!(span["resource"][0][1], "payment");
+        assert_eq!(span["events"][0]["name"], "exception");
+        assert_eq!(span["events"][0]["attrs"][0][0], "exception.stacktrace");
+        assert_eq!(span["self_ns"], 4);
+        assert_eq!(json["story_id"], id);
+    }
+
+    #[tokio::test]
+    async fn service_map_has_edges_and_nodes() {
+        let repo = Arc::new(FakeRepo {
+            edges: vec![EdgeView::from_row(EdgeRow {
+                parent_service: "frontend".into(),
+                child_service: "payment".into(),
+                calls: 4,
+                errors: 1,
+                duration_ns_sum: 40,
+            })],
+            nodes: vec![NodeView::from_row(
+                NodeRow {
+                    service: "payment".into(),
+                    calls: 100,
+                    errors: 10,
+                    p99_ns: 5.0,
+                    baseline_p99_ns: 1.0,
+                },
+                100,
+            )],
+            ..Default::default()
+        });
+        let (status, json) = get_with(
+            repo.clone(),
+            ApiMetrics::default(),
+            "/api/v1/service-map?since=15m",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(*repo.last_since.lock().unwrap(), Some(900));
+        assert_eq!(json["edges"][0]["parent"], "frontend");
+        assert_eq!(json["edges"][0]["error_rate"], 0.25);
+        let node = &json["nodes"][0];
+        assert_eq!(node["service"], "payment");
+        assert_eq!(node["health"], "error");
+        assert_eq!(node["rate"], 1.0);
+        assert_eq!(node["error_ratio"], 0.1);
+        assert_eq!(node["p99_ns"], 5.0);
     }
 }

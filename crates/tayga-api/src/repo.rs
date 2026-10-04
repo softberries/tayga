@@ -1,10 +1,15 @@
 //! Read side over the tables written by the writer and the assembler.
 
 use crate::model::*;
-use crate::params::{AlertFilter, GroupFilter, TemplateFilter, bucket_secs};
+use crate::params::{
+    AlertFilter, GroupFilter, HEALTH_BASELINE_SECS, SeriesQuery, TemplateFilter, TraceFilter,
+    bucket_secs,
+};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use tayga_store::ClickHouseSettings;
+use tayga_store::metrics_store::MetricPointRow;
+use tayga_store::store::Store;
 
 pub trait Repo: Send + Sync + 'static {
     fn story_groups(
@@ -42,6 +47,36 @@ pub trait Repo: Send + Sync + 'static {
         &self,
         trace_id: &str,
     ) -> impl Future<Output = anyhow::Result<Vec<TraceLogTemplate>>> + Send;
+    fn overview(
+        &self,
+        since_secs: u32,
+    ) -> impl Future<Output = anyhow::Result<OverviewView>> + Send;
+    fn stories_series(
+        &self,
+        f: &GroupFilter,
+    ) -> impl Future<Output = anyhow::Result<StoriesSeries>> + Send;
+    fn traces_search(
+        &self,
+        f: &TraceFilter,
+    ) -> impl Future<Output = anyhow::Result<Vec<TraceHitView>>> + Send;
+    fn services(&self) -> impl Future<Output = anyhow::Result<Vec<String>>> + Send;
+    fn service(
+        &self,
+        name: &str,
+        since_secs: u32,
+    ) -> impl Future<Output = anyhow::Result<Option<ServiceView>>> + Send;
+    /// Edges as `service_map`, plus per-node RED and health.
+    fn service_graph(
+        &self,
+        since_secs: u32,
+    ) -> impl Future<Output = anyhow::Result<ServiceMapView>> + Send;
+    fn search(&self, q: &str) -> impl Future<Output = anyhow::Result<SearchView>> + Send;
+    /// The last sample per series and `step_secs` bucket (see `Store::metric_buckets`).
+    fn metric_buckets(
+        &self,
+        q: &SeriesQuery,
+        step_secs: u32,
+    ) -> impl Future<Output = anyhow::Result<Vec<MetricPointRow>>> + Send;
 }
 
 /// A template counts as alerting while one of its alerts was last seen this recently.
@@ -102,7 +137,28 @@ const GROUP_COLUMNS: &str = "toString(fingerprint) AS fingerprint, toString(any(
 
 pub struct ChRepo {
     client: clickhouse::Client,
+    store: Store,
 }
+
+/// Search results per kind (⌘K).
+const SEARCH_LIMIT: u32 = 8;
+/// Story groups are searched over the stories' full retention (7 days).
+const STORY_SEARCH_SECS: u32 = 7 * 24 * 3600;
+/// The overview's data lag only counts when recorded this recently.
+const DATA_LAG_FRESH_SECS: u32 = 300;
+const DATA_LAG_METRIC: &str = "tayga_logminer_data_lag_seconds";
+
+/// Trace search over `trace_summaries`; `{SERVICE}` is the service clause.
+const TRACE_SEARCH: &str = "SELECT trace_id, toUnixTimestamp64Nano(ts) AS ts_ns, endpoint_service, endpoint_name, \
+     duration_ns, is_error, span_count FROM trace_summaries FINAL \
+     WHERE ts > now64(9) - toIntervalSecond(?) AND {SERVICE} \
+     AND (? = '' OR endpoint_name = ?) AND duration_ns >= ? AND duration_ns <= ? \
+     AND (? = 0 OR is_error = 1) ORDER BY ts DESC LIMIT ?";
+/// The trace's endpoint service matches.
+const SERVICE_IS_ENDPOINT: &str = "(? = '' OR endpoint_service = ?)";
+/// The trace has a span of the service in the window.
+const SERVICE_TOUCHED: &str = "trace_id IN (SELECT trace_id FROM spans \
+     WHERE service_name = ? AND start_ts > now64(9) - toIntervalSecond(?))";
 
 impl ChRepo {
     pub fn new(s: &ClickHouseSettings) -> Self {
@@ -110,7 +166,31 @@ impl ChRepo {
             client: clickhouse::Client::default()
                 .with_url(&s.url)
                 .with_database(&s.database),
+            store: Store::new(s),
         }
+    }
+
+    /// Stories per bucket and kind under a group filter.
+    async fn kind_buckets(&self, f: &GroupFilter, step: u32) -> anyhow::Result<StoriesSeries> {
+        let kind = f.kind.as_deref().unwrap_or_default();
+        let service = f.service.as_deref().unwrap_or_default();
+        let rows: Vec<KindBucketRow> = self
+            .client
+            .query(&format!(
+                "SELECT toUInt32(toStartOfInterval(ts, toIntervalSecond(?))) AS bucket, \
+                 toString(kind) AS kind, count() AS n FROM ({FILTERED}) GROUP BY bucket, kind ORDER BY bucket"
+            ))
+            .bind(step)
+            .bind(f.since_secs)
+            .bind(kind)
+            .bind(kind)
+            .bind(service)
+            .bind(service)
+            .bind("")
+            .bind("")
+            .fetch_all()
+            .await?;
+        Ok(StoriesSeries::from_rows(step, rows))
     }
 
     async fn groups(&self, f: &GroupFilter, fingerprint: &str) -> anyhow::Result<Vec<GroupView>> {
@@ -272,16 +352,21 @@ impl Repo for ChRepo {
     }
 
     async fn trace(&self, trace_id: &str) -> anyhow::Result<TraceView> {
-        let spans: Vec<TraceSpanRow> = self
+        let rows: Vec<SpanChRow> = self
             .client
             .query(
                 "SELECT span_id, parent_span_id, service_name, span_name, toString(kind) AS kind, \
-                 toUnixTimestamp64Nano(start_ts) AS start_ns, duration_ns, toString(status_code) AS status, status_message \
+                 toUnixTimestamp64Nano(start_ts) AS start_ns, duration_ns, toString(status_code) AS status, status_message, \
+                 span_attrs AS attrs, resource_attrs AS resource, \
+                 arrayMap(t -> toUnixTimestamp64Nano(t), `events.ts`) AS events_ts_ns, \
+                 `events.name` AS events_name, `events.attrs` AS events_attrs \
                  FROM spans WHERE trace_id = ? ORDER BY start_ts LIMIT 1 BY span_id LIMIT 10000",
             )
             .bind(trace_id)
             .fetch_all()
             .await?;
+        let mut spans: Vec<TraceSpanRow> = rows.into_iter().map(TraceSpanRow::from_ch).collect();
+        fill_self_ns(&mut spans);
         let logs: Vec<TraceLogRow> = self
             .client
             .query(
@@ -291,10 +376,16 @@ impl Repo for ChRepo {
             .bind(trace_id)
             .fetch_all()
             .await?;
+        let story_id = self
+            .story_ids_among(std::iter::once(trace_id))
+            .await?
+            .into_iter()
+            .next();
         Ok(TraceView {
             trace_id: trace_id.to_string(),
             spans,
             logs,
+            story_id,
         })
     }
 
@@ -463,6 +554,219 @@ impl Repo for ChRepo {
             .fetch_all()
             .await?;
         Ok(rows.into_iter().map(EdgeView::from_row).collect())
+    }
+
+    async fn overview(&self, since_secs: u32) -> anyhow::Result<OverviewView> {
+        let step = bucket_secs(since_secs);
+        let stories = self
+            .kind_buckets(
+                &GroupFilter {
+                    since_secs,
+                    kind: None,
+                    service: None,
+                },
+                step,
+            )
+            .await?;
+        let active_alerts: u64 = self
+            .client
+            .query(&format!(
+                "SELECT count() FROM log_alerts FINAL WHERE last_at > now64(9) - toIntervalMinute({ALERT_ACTIVE_MIN})"
+            ))
+            .fetch_one()
+            .await?;
+        let spans: Vec<CountBucketRow> = self
+            .client
+            .query(
+                "SELECT toUInt32(toStartOfInterval(start_ts, toIntervalSecond(?))) AS bucket, count() AS n \
+                 FROM spans WHERE start_ts > now64(9) - toIntervalSecond(?) GROUP BY bucket ORDER BY bucket",
+            )
+            .bind(step)
+            .bind(since_secs)
+            .fetch_all()
+            .await?;
+        let lag: Vec<f64> = self
+            .client
+            .query(
+                "SELECT value FROM metric_samples WHERE metric = ? AND isFinite(value) \
+                 AND ts > now64(3) - toIntervalSecond(?) ORDER BY ts DESC LIMIT 1",
+            )
+            .bind(DATA_LAG_METRIC)
+            .bind(DATA_LAG_FRESH_SECS)
+            .fetch_all()
+            .await?;
+        let total_spans: u64 = spans.iter().map(|b| b.n).sum();
+        Ok(OverviewView {
+            bucket_secs: step,
+            error_stories: stories.error.iter().map(|b| b.1).sum(),
+            slow_stories: stories.slow.iter().map(|b| b.1).sum(),
+            active_alerts,
+            spans_per_sec: total_spans as f64 / f64::from(since_secs.max(1)),
+            data_lag_secs: lag.into_iter().next(),
+            stories,
+            spans: spans
+                .into_iter()
+                .map(|b| (b.bucket, b.n as f64 / f64::from(step)))
+                .collect(),
+        })
+    }
+
+    async fn stories_series(&self, f: &GroupFilter) -> anyhow::Result<StoriesSeries> {
+        self.kind_buckets(f, bucket_secs(f.since_secs)).await
+    }
+
+    async fn traces_search(&self, f: &TraceFilter) -> anyhow::Result<Vec<TraceHitView>> {
+        let service = f.service.as_deref().unwrap_or_default();
+        let endpoint = f.endpoint.as_deref().unwrap_or_default();
+        let touched = f.touched && !service.is_empty();
+        let sql = TRACE_SEARCH.replace(
+            "{SERVICE}",
+            if touched {
+                SERVICE_TOUCHED
+            } else {
+                SERVICE_IS_ENDPOINT
+            },
+        );
+        let mut q = self.client.query(&sql).bind(f.since_secs);
+        q = if touched {
+            q.bind(service).bind(f.since_secs)
+        } else {
+            q.bind(service).bind(service)
+        };
+        let rows: Vec<TraceHitRow> = q
+            .bind(endpoint)
+            .bind(endpoint)
+            .bind(f.min_ns)
+            .bind(f.max_ns)
+            .bind(u8::from(f.errors_only))
+            .bind(f.limit)
+            .fetch_all()
+            .await?;
+        let stories = self
+            .story_ids_among(rows.iter().map(|r| r.trace_id.as_str()))
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| TraceHitView::from_row(r, &stories))
+            .collect())
+    }
+
+    async fn services(&self) -> anyhow::Result<Vec<String>> {
+        Ok(self
+            .client
+            .query(
+                "SELECT DISTINCT toString(service_name) FROM spans \
+                 WHERE start_ts > now64(9) - toIntervalHour(24) ORDER BY 1 LIMIT 500",
+            )
+            .fetch_all()
+            .await?)
+    }
+
+    async fn service(&self, name: &str, since_secs: u32) -> anyhow::Result<Option<ServiceView>> {
+        let step = bucket_secs(since_secs);
+        let rows: Vec<ServiceBucketRow> = self
+            .client
+            .query(
+                "SELECT toUInt32(toStartOfInterval(start_ts, toIntervalSecond(?))) AS bucket, count() AS spans, \
+                 countIf(kind IN ('server', 'consumer')) AS calls, \
+                 countIf(kind IN ('server', 'consumer') AND status_code = 'error') AS errors, \
+                 quantilesIf(0.5, 0.95, 0.99)(duration_ns, kind IN ('server', 'consumer')) AS q \
+                 FROM spans WHERE service_name = ? AND start_ts > now64(9) - toIntervalSecond(?) \
+                 GROUP BY bucket ORDER BY bucket",
+            )
+            .bind(step)
+            .bind(name)
+            .bind(since_secs)
+            .fetch_all()
+            .await?;
+        Ok(ServiceView::from_rows(name, step, rows))
+    }
+
+    async fn service_graph(&self, since_secs: u32) -> anyhow::Result<ServiceMapView> {
+        let edges = self.service_map(since_secs).await?;
+        // The window and the 24h baseline in one scan over the longer of the two.
+        let rows: Vec<NodeRow> = self
+            .client
+            .query(
+                "SELECT toString(service_name) AS service, \
+                 countIf(start_ts > now64(9) - toIntervalSecond(?)) AS calls, \
+                 countIf(start_ts > now64(9) - toIntervalSecond(?) AND status_code = 'error') AS errors, \
+                 quantileIf(0.99)(duration_ns, start_ts > now64(9) - toIntervalSecond(?)) AS p99_ns, \
+                 quantileIf(0.99)(duration_ns, start_ts > now64(9) - toIntervalSecond(?)) AS baseline_p99_ns \
+                 FROM spans WHERE kind IN ('server', 'consumer') AND start_ts > now64(9) - toIntervalSecond(?) \
+                 GROUP BY service HAVING calls > 0 ORDER BY service LIMIT 500",
+            )
+            .bind(since_secs)
+            .bind(since_secs)
+            .bind(since_secs)
+            .bind(HEALTH_BASELINE_SECS)
+            .bind(since_secs.max(HEALTH_BASELINE_SECS))
+            .fetch_all()
+            .await?;
+        Ok(ServiceMapView {
+            edges,
+            nodes: rows
+                .into_iter()
+                .map(|r| NodeView::from_row(r, since_secs))
+                .collect(),
+        })
+    }
+
+    async fn search(&self, q: &str) -> anyhow::Result<SearchView> {
+        let services: Vec<String> = self
+            .client
+            .query(&format!(
+                "SELECT DISTINCT toString(service_name) FROM spans \
+                 WHERE start_ts > now64(9) - toIntervalHour(24) AND positionCaseInsensitiveUTF8(service_name, ?) > 0 \
+                 ORDER BY 1 LIMIT {SEARCH_LIMIT}"
+            ))
+            .bind(q)
+            .fetch_all()
+            .await?;
+        let templates: Vec<SearchTemplate> = self
+            .client
+            .query(&format!(
+                "SELECT toString(template_id) AS template_id, service, template FROM log_templates FINAL \
+                 WHERE positionCaseInsensitiveUTF8(template, ?) > 0 ORDER BY last_seen DESC LIMIT {SEARCH_LIMIT}"
+            ))
+            .bind(q)
+            .fetch_all()
+            .await?;
+        let groups: Vec<SearchGroup> = self
+            .client
+            .query(&format!(
+                "SELECT toString(fingerprint) AS fingerprint, toString(any(kind)) AS kind, \
+                 argMax(summary, ts) AS summary, count() AS stories \
+                 FROM (SELECT fingerprint, kind, summary, ts FROM error_stories FINAL \
+                   WHERE ts > now64(9) - toIntervalSecond({STORY_SEARCH_SECS}) AND positionCaseInsensitiveUTF8(summary, ?) > 0) \
+                 GROUP BY fingerprint ORDER BY stories DESC LIMIT {SEARCH_LIMIT}"
+            ))
+            .bind(q)
+            .fetch_all()
+            .await?;
+        Ok(SearchView {
+            services,
+            templates,
+            groups,
+            trace_id: crate::params::parse_hex_id(q).ok(),
+        })
+    }
+
+    async fn metric_buckets(
+        &self,
+        q: &SeriesQuery,
+        step_secs: u32,
+    ) -> anyhow::Result<Vec<MetricPointRow>> {
+        Ok(self
+            .store
+            .metric_buckets(
+                q.job.as_deref(),
+                &q.metric,
+                &q.labels,
+                q.since_secs,
+                step_secs,
+            )
+            .await?)
     }
 }
 

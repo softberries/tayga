@@ -174,6 +174,10 @@ mod tests {
                 "unset".into()
             },
             status_message: String::new(),
+            attrs: vec![],
+            resource: vec![],
+            events: vec![],
+            self_ns: dur,
         }
     }
 
