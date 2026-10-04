@@ -12,7 +12,7 @@ import groups from '../../api/__fixtures__/story-groups.json'
 import story from '../../api/__fixtures__/story.json'
 import trace from '../../api/__fixtures__/trace.json'
 import { clearOutage } from '../../app/apiStatus'
-import { splitSummary } from '../../features/stories/model'
+import { endpointOf, splitSummary } from '../../features/stories/model'
 import { renderApp, stubApi } from '../../test/renderApp'
 import type { Routes } from '../../test/renderApp'
 
@@ -125,6 +125,58 @@ describe('stories home', () => {
     expect(await within(aside).findByRole('group', { name: 'Trace waterfall (summary)' })).toBeInTheDocument()
     expect(within(aside).getByRole('region', { name: 'Compared with normal' })).toBeInTheDocument()
     expect(within(aside).getByRole('link', { name: /Open story/ })).toHaveAttribute('href', `/stories/${story.story_id}`)
+  })
+
+  it('keeps every endpoint visible, so groups with the same title stay apart', async () => {
+    stubApi(routes())
+    renderApp('/')
+    const rows = await bodyRows()
+    groups.forEach((g, i) => {
+      const ep = within(rows[i] as HTMLElement).getByText(endpointOf(g))
+      expect(ep).toHaveAttribute('title', endpointOf(g))
+      expect(ep).toHaveClass('shrink-0')
+    })
+  })
+
+  it('drops a selected group that is not in the table from the URL', async () => {
+    stubApi(routes())
+    const { router } = renderApp('/?group=123')
+    expect((await bodyRows())[0]).toHaveAttribute('aria-selected', 'true')
+    await waitFor(() => expect(router.state.location.search).not.toHaveProperty('group'))
+  })
+
+  it('loads only the group the selection rests on while arrows are held', async () => {
+    const fetch = stubApi(routes())
+    renderApp('/')
+    const first = (await bodyRows())[0] as HTMLElement
+    await screen.findByRole('list', { name: 'Request path' })
+    act(() => first.focus())
+    // Like a held key: each step lands, then a repeat gap, before the next.
+    for (let i = 1; i <= 3; i++) {
+      fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowDown' })
+      await waitFor(() => expect((screen.getAllByRole('row') as HTMLElement[])[i + 1]).toHaveFocus(), { interval: 5 })
+      // A key-repeat gap: shorter than the settle time, long enough for a zero-delay timer.
+      await act(() => new Promise((r) => setTimeout(r, 40)))
+    }
+    const storyFetches = (id: string) => fetch.mock.calls.filter(([u]) => String(u).includes(`/stories/${id}`)).length
+    const landed = groups[3] as (typeof groups)[number]
+    await waitFor(() => expect(storyFetches(landed.sample_story_id)).toBe(1))
+    expect(storyFetches((groups[1] as (typeof groups)[number]).sample_story_id)).toBe(0)
+    expect(storyFetches((groups[2] as (typeof groups)[number]).sample_story_id)).toBe(0)
+  })
+
+  it('shows an explained dash when the previous window cannot be loaded', async () => {
+    const fetch = stubApi(routes())
+    const inner = fetch.getMockImplementation()!
+    fetch.mockImplementation(async (input: string) =>
+      input.includes('/overview') && input.includes('since=2h')
+        ? new Response(JSON.stringify({ error: 'boom' }), { status: 500 })
+        : inner(input),
+    )
+    renderApp('/')
+    const dashes = await screen.findAllByLabelText('Change unknown: The previous window could not be loaded.')
+    expect(dashes).toHaveLength(2)
+    expect(dashes[0]).toHaveTextContent('—')
   })
 
   it('shows the empty state when the window has no stories', async () => {

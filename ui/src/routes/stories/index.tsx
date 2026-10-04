@@ -5,7 +5,7 @@
  */
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../api/queries'
 import type { StoryGroup } from '../../api/types'
 import { useLiveInterval } from '../../app/live'
@@ -73,6 +73,12 @@ export function StoriesHome() {
   const [visible, setVisible] = useState<StoryGroup[]>([])
   // The URL's group when it is visible, else the top row.
   const selected = visible.find((g) => g.fingerprint === search.group) ?? visible[0]
+  // A selected group that was filtered out or refreshed away leaves the URL, so the URL
+  // always names what the inspector shows. An empty table keeps it (clearing filters restores it).
+  const stale = search.group !== undefined && visible.length > 0 && !visible.some((g) => g.fingerprint === search.group)
+  useEffect(() => {
+    if (stale) onSearch({ group: undefined })
+  }, [stale, onSearch])
 
   const empty = groups.isSuccess && groups.data.length === 0
 

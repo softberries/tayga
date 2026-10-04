@@ -8,7 +8,7 @@ import type { UseQueryResult } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { ArrowRight } from 'lucide-react'
 import { m } from 'motion/react'
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { isApiError } from '../../api/client'
 import { api } from '../../api/queries'
@@ -76,6 +76,8 @@ function Compared({ story }: { story: StoryView }) {
 function WaterfallPreview({ story, trace }: { story: StoryView; trace: UseQueryResult<TraceView> }) {
   const navigate = useNavigate()
   const critical = useMemo(() => story.critical_path.segments.map((s) => s.span_id), [story])
+  // Story scale: the critical path and the root cause, not a long trace's async tail.
+  const zoomTo = useMemo(() => [...critical, story.root_cause.span_id], [critical, story])
   const open = useCallback(
     (span: string) => void navigate({ to: '/stories/$storyId', params: { storyId: story.story_id }, search: { span } }),
     [navigate, story.story_id],
@@ -102,6 +104,7 @@ function WaterfallPreview({ story, trace }: { story: StoryView; trace: UseQueryR
       rootCauseId={story.root_cause.span_id}
       traceId={story.trace_id}
       maxRows={10}
+      initialZoomTo={zoomTo}
       onOpen={open}
     />
   )
@@ -193,8 +196,30 @@ function Frame({ wide, children }: { wide: boolean; children: ReactNode }) {
   )
 }
 
-export function Inspector({ group, pending }: { group: StoryGroup | undefined; pending?: boolean }) {
+/** How long the selection must rest before the inspector loads it (arrow keys held down). */
+export const SETTLE_MS = 150
+
+/**
+ * `group` once it has stayed selected for SETTLE_MS, so stepping through rows does not fetch
+ * every story passed. The first group, and a refreshed copy of the shown one, apply at once.
+ */
+function useSettledGroup(group: StoryGroup | undefined): StoryGroup | undefined {
+  const [settled, setSettled] = useState(group)
+  const immediate = settled === undefined || group === undefined || settled.fingerprint === group.fingerprint
+  // Adopt immediate values during render (React's derived-state pattern), so the next change
+  // is compared with what is actually shown.
+  if (immediate && settled !== group) setSettled(group)
+  useEffect(() => {
+    if (immediate) return
+    const t = window.setTimeout(() => setSettled(group), SETTLE_MS)
+    return () => window.clearTimeout(t)
+  }, [group, immediate])
+  return immediate ? group : settled
+}
+
+export function Inspector({ group: selected, pending }: { group: StoryGroup | undefined; pending?: boolean }) {
   const wide = useMediaQuery(WIDE_QUERY)
+  const group = useSettledGroup(selected)
   return (
     <Frame wide={wide}>
       {pending ? (

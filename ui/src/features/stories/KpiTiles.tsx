@@ -7,6 +7,7 @@ import type { SparkTone } from '../../components/charts/Spark'
 import { Card } from '../../components/ui/Card'
 import { CountUp } from '../../components/ui/CountUp'
 import { Skeleton } from '../../components/ui/Skeleton'
+import { Tooltip } from '../../components/ui/Tooltip'
 import { StaggerItem, StaggerList } from '../../components/ui/Stagger'
 import { compact } from '../../lib/format'
 import {
@@ -25,6 +26,8 @@ interface Tile {
   value: number
   format?: (n: number) => string
   delta: string
+  /** Explains a delta that could not be computed. */
+  deltaHint?: string
   tone: SparkTone
   values: number[]
   summary: string
@@ -48,6 +51,8 @@ export function buildTiles(
   alerts: readonly LogAlertView[] | undefined,
   since: Since,
   nowMs: number,
+  /** The previous-window query failed: show "—" instead of waiting forever. */
+  doubledFailed = false,
 ): Tile[] {
   const win = SINCE_SECS[since]
   const per = bucketWord(o.bucket_secs)
@@ -56,12 +61,20 @@ export function buildTiles(
   const spans = denseSeries(o.spans, o.bucket_secs, win, nowMs)
   const alertSeries = alerts ? alertActivity(alerts, o.bucket_secs, win, nowMs) : []
   const delta = (cur: number, pick: (v: OverviewView) => number) =>
-    doubled ? deltaText(cur, previousCount(cur, pick(doubled))) : since === '7d' ? 'no earlier window' : '…'
+    doubled
+      ? deltaText(cur, previousCount(cur, pick(doubled)))
+      : since === '7d'
+        ? 'no earlier window'
+        : doubledFailed
+          ? '—'
+          : '…'
+  const deltaHint = !doubled && doubledFailed && since !== '7d' ? 'The previous window could not be loaded.' : undefined
   return [
     {
       label: `Error stories · ${since}`,
       value: o.error_stories,
       delta: delta(o.error_stories, (v) => v.error_stories),
+      deltaHint,
       tone: 'err',
       values: err,
       summary: `Error stories per ${per} over ${since}, at most ${peak(err)} in one ${per}`,
@@ -70,6 +83,7 @@ export function buildTiles(
       label: `Slow stories · ${since}`,
       value: o.slow_stories,
       delta: delta(o.slow_stories, (v) => v.slow_stories),
+      deltaHint,
       tone: 'slow',
       values: slow,
       summary: `Slow stories per ${per} over ${since}, at most ${peak(slow)} in one ${per}`,
@@ -122,7 +136,7 @@ export function KpiTiles({
   /** End of the window: when the overview was fetched. */
   nowMs: number
 }) {
-  const tiles = buildTiles(overview, doubled.data, alerts, since, nowMs)
+  const tiles = buildTiles(overview, doubled.data, alerts, since, nowMs, doubled.isError)
   return (
     <StaggerList role="list" aria-label="Summary" className="grid grid-cols-2 gap-3.5 lg:grid-cols-4">
       {tiles.map((t) => (
@@ -135,7 +149,15 @@ export function KpiTiles({
                 format={t.format}
                 className={`tabular text-[26px] font-semibold tracking-[-0.02em] ${valueTone[t.tone]}`}
               />
-              <span className="truncate text-xs text-muted">{t.delta}</span>
+              {t.deltaHint ? (
+                <Tooltip content={t.deltaHint}>
+                  <span tabIndex={0} aria-label={`Change unknown: ${t.deltaHint}`} className="cursor-help text-xs text-muted">
+                    {t.delta}
+                  </span>
+                </Tooltip>
+              ) : (
+                <span className="truncate text-xs text-muted">{t.delta}</span>
+              )}
             </div>
             <Spark values={t.values} tone={t.tone} width={220} height={30} label={t.summary} />
           </Card>

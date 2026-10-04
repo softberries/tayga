@@ -116,6 +116,29 @@ describe('Waterfall (compact)', () => {
     expect(onOpen).toHaveBeenCalledWith(RC)
   })
 
+  it('zooms its fixed scale to initialZoomTo and measures the axis from the window start', async () => {
+    // In ms: root a 0..100, c 20..30, d 70..90. Zoomed to c the window is 19.6..30.4 (4 % pad).
+    const ms = small.map((sp) => ({ ...sp, start_ns: sp.start_ns * 1e6, duration_ns: sp.duration_ns * 1e6 }))
+    const { container } = renderInRouter(<Waterfall compact spans={ms} initialZoomTo={['c']} />)
+    const group = await screen.findByRole('group')
+    const axis = group.firstElementChild!.querySelectorAll('span.absolute')
+    expect([...axis].map((e) => e.textContent)).toEqual(['0 ms', '5.40 ms', '10.8 ms'])
+    const bar = (id: string) => container.querySelector<HTMLElement>(`[data-span-id="${id}"] span.relative > span[title]`)
+    expect(parseFloat(bar('c')!.style.left)).toBeCloseTo((0.4 / 10.8) * 100, 1)
+    expect(parseFloat(bar('c')!.style.width)).toBeCloseTo((10 / 10.8) * 100, 1)
+    // The root is clipped to the whole track; d lies outside the window and has no bar.
+    expect(parseFloat(bar('a')!.style.left)).toBe(0)
+    expect(parseFloat(bar('a')!.style.width)).toBe(100)
+    expect(bar('d')).toBeNull()
+  })
+
+  it('keeps the whole-trace scale without initialZoomTo', async () => {
+    const { container } = renderInRouter(<Waterfall compact spans={small} />)
+    await screen.findByRole('group')
+    const d = container.querySelector<HTMLElement>('[data-span-id="d"] span.relative > span[title]')!
+    expect(parseFloat(d.style.left)).toBeCloseTo(70, 1)
+  })
+
   it('honours maxRows and omits the link when everything fits', async () => {
     renderInRouter(<Waterfall compact spans={small} maxRows={12} traceId="x" />)
     await screen.findByRole('group')

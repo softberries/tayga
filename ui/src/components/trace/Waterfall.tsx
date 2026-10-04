@@ -51,8 +51,9 @@ export interface WaterfallProps {
   /** Compact only: the trace page the "show all" link opens. */
   traceId?: string
   /**
-   * Full only: start zoomed to the time window these spans cover (e.g. the story's critical
-   * path), when that window is under 70 % of the trace. Reset zoom shows everything.
+   * Start zoomed to the time window these spans cover (e.g. the story's critical path), when
+   * that window is under 70 % of the trace. Full mode: Reset zoom shows everything. Compact
+   * mode: the fixed scale, with axis labels measured from the window's start.
    */
   initialZoomTo?: readonly string[]
   /** Shown beside "Reset zoom" while that initial zoom is active (default "Zoomed in"). */
@@ -611,12 +612,25 @@ function FullWaterfall({
   )
 }
 
-function CompactWaterfall({ layout, rootCauseId, selectedId, onOpen, maxRows = 12, traceId, label, className }: ModeProps) {
+function CompactWaterfall({
+  layout,
+  rootCauseId,
+  selectedId,
+  onOpen,
+  maxRows = 12,
+  traceId,
+  initialZoomTo,
+  label,
+  className,
+}: ModeProps) {
   const rows = useMemo(() => compactRows(layout, maxRows), [layout, maxRows])
   const hidden = layout.rows.length - rows.length
+  const zoomKey = initialZoomTo?.join('\n') ?? ''
+  // Keyed by content, so a new array with the same ids keeps the view.
+  const view = useMemo(() => focusWindow(layout, zoomKey ? zoomKey.split('\n') : undefined), [layout, zoomKey])
   const ticks = useMemo(
-    () => [0, 0.5, 1].map((at) => ({ ns: Math.round(layout.totalNs * at), at })),
-    [layout.totalNs],
+    () => [0, 0.5, 1].map((at) => ({ ns: Math.round((view[1] - view[0]) * layout.totalNs * at), at })),
+    [layout.totalNs, view],
   )
   const noop = useCallback(() => {}, [])
   const open = useCallback((row: LayoutRow) => onOpen?.(row.span.span_id), [onOpen])
@@ -632,7 +646,7 @@ function CompactWaterfall({ layout, rootCauseId, selectedId, onOpen, maxRows = 1
           <SpanRow
             row={row}
             layout={layout}
-            view={FULL_VIEW}
+            view={view}
             selected={row.span.span_id === (selectedId ?? undefined)}
             expanded
             flat

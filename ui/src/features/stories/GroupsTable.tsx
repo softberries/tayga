@@ -201,7 +201,9 @@ export interface GroupsTableProps {
 
 export function GroupsTable({ groups, search, since, nowMs, onSearch, selected, onSelect, onOpen, onVisible }: GroupsTableProps) {
   const [sorting, setSorting] = useState<SortingState>(DEFAULT_SORT)
-  const columnFilters = useMemo(() => filtersOf(search), [search])
+  const { kind, service, endpoint } = search
+  // Only the filter values: a selection change (search.group) must not re-filter or re-sort.
+  const columnFilters = useMemo(() => filtersOf({ kind, service, endpoint }), [kind, service, endpoint])
   const data = groups as StoryGroup[]
   const table = useTable({
     features,
@@ -303,9 +305,9 @@ export function GroupsTable({ groups, search, since, nowMs, onSearch, selected, 
           aria-label="Story groups"
           aria-rowcount={visible.length + 1}
           onKeyDown={onKeyDown}
-          className="max-h-[min(62vh,600px)] overflow-y-auto overscroll-contain"
+          className="sm:max-h-[min(62vh,600px)] sm:overflow-y-auto sm:overscroll-contain"
         >
-          <div role="row" className={cx('sticky top-0 z-10 grid items-center gap-3.5 border-b border-line-soft bg-panel py-2 pr-4', COLS)}>
+          <div role="row" className={cx('z-10 grid sm:sticky sm:top-0 items-center gap-3.5 border-b border-line-soft bg-panel py-2 pr-4', COLS)}>
             <span role="columnheader" aria-label="Kind" />
             <SortHeader id="title" sorting={sorting} onSort={onSort}>
               Group
@@ -369,9 +371,25 @@ export function GroupsTable({ groups, search, since, nowMs, onSearch, selected, 
                       {title}
                     </span>
                   </span>
-                  <span className="truncate text-xs text-muted">
-                    {detail ? `${detail} · ` : ''}
-                    <span className="font-mono">{endpointOf(g)}</span>
+                  {/* The endpoint never truncates away: groups with the same title differ there.
+                      Phones show it on its own line above the detail. */}
+                  <span className="flex min-w-0 flex-col gap-0.5 text-xs text-muted sm:flex-row sm:gap-1">
+                    {detail ? (
+                      <>
+                        <span className="min-w-0 truncate" title={detail}>
+                          {detail}
+                        </span>
+                        <span aria-hidden className="hidden shrink-0 sm:inline">
+                          ·
+                        </span>
+                      </>
+                    ) : null}
+                    <span
+                      className="order-first min-w-0 shrink-0 truncate font-mono sm:order-none sm:max-w-[65%]"
+                      title={endpointOf(g)}
+                    >
+                      {endpointOf(g)}
+                    </span>
                   </span>
                 </span>
                 <span role="gridcell" className="hidden sm:block">

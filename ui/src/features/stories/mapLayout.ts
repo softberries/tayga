@@ -29,7 +29,7 @@ export interface MiniMapLayout {
   height: number
 }
 
-export const MINI = { r: 9, colGap: 118, rowGap: 40, padX: 56, padY: 22, labelGap: 20 } as const
+export const MINI = { r: 9, colGap: 132, rowGap: 40, padX: 66, padY: 22, labelGap: 22 } as const
 
 /** An edge fails when at least 1 % of its calls returned an error. */
 export const FAILING_EDGE_RATE = 0.01

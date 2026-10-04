@@ -10,7 +10,16 @@ import type { ServiceMapView } from '../../api/types'
 import { sinceSearch } from '../../app/search'
 import type { Since } from '../../app/search'
 import { cx } from '../../lib/cx'
+import { NARROW_QUERY, useMediaQuery } from '../../lib/useMediaQuery'
 import { MINI, isFailingEdge, layoutMiniMap } from './mapLayout'
+
+/** Label size in viewBox units: about 9 px on a desktop card. */
+const LABEL_SIZE = 13
+/**
+ * Narrowest the drawing may scale to, as a fraction of its viewBox: labels stay at 10 px or
+ * more. Phones get a horizontal scroll instead of unreadable labels.
+ */
+const MIN_SCALE = 10 / LABEL_SIZE
 
 /** Longest label drawn; longer service names are cut with an ellipsis (full name in <title>). */
 const LABEL_CHARS = 16
@@ -28,6 +37,7 @@ export function describeMap(map: ServiceMapView): string {
 
 export function MiniMap({ map, since }: { map: ServiceMapView; since: Since }) {
   const layout = useMemo(() => layoutMiniMap(map), [map])
+  const narrow = useMediaQuery(NARROW_QUERY)
   const glowId = `${useId()}-glow`
   const slowGlowId = `${glowId}-slow`
   if (layout.nodes.length === 0) return <p className="m-0 text-muted">No service calls in this window.</p>
@@ -42,8 +52,8 @@ export function MiniMap({ map, since }: { map: ServiceMapView; since: Since }) {
         role="presentation"
         width="100%"
         viewBox={`0 0 ${layout.width} ${layout.height}`}
-        className="block min-w-[320px]"
-        style={{ maxHeight: 320 }}
+        className="block"
+        style={{ maxHeight: 320, minWidth: narrow ? Math.ceil(layout.width * MIN_SCALE) : 320 }}
       >
         <defs>
           <radialGradient id={glowId}>
@@ -94,7 +104,7 @@ export function MiniMap({ map, since }: { map: ServiceMapView; since: Since }) {
               x={n.x}
               y={n.y + MINI.labelGap}
               textAnchor="middle"
-              fontSize={10.5}
+              fontSize={LABEL_SIZE}
               className={cx(
                 'font-sans',
                 n.health === 'error' ? 'fill-err' : n.health === 'slow' ? 'fill-slow' : 'fill-ink-2',
