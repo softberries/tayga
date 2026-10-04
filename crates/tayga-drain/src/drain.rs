@@ -334,6 +334,30 @@ mod tests {
     }
 
     #[test]
+    fn masked_routing_token_takes_the_wildcard_branch() {
+        let mut d = drain();
+        let a = d.add("svc", "123 apples", 0, 9);
+        let b = d.add("svc", "456 apples", 0, 9);
+        assert!(a.created && !b.created);
+        assert_eq!(a.template_id, b.template_id);
+        assert_eq!(d.cluster(a.template_id).unwrap().template(), "<*> apples");
+        let c = d.add("svc", "pear apples", 0, 9);
+        assert!(c.created, "a literal routing token gets its own branch");
+
+        // The `<*>` branch is taken even when the node is full, and a full node's overflow
+        // traffic lands on the same branch.
+        let mut d = Drain::new(DrainConfig {
+            max_children: 1,
+            ..DrainConfig::default()
+        });
+        d.add("svc", "pear apples", 0, 9);
+        let w = d.add("svc", "123 apples", 0, 9);
+        let full = d.add("svc", "plum apples", 0, 9);
+        assert!(w.created && !full.created);
+        assert_eq!(full.template_id, w.template_id);
+    }
+
+    #[test]
     fn cluster_cap_routes_to_overflow() {
         let mut d = Drain::new(DrainConfig {
             max_clusters_per_service: 2,
