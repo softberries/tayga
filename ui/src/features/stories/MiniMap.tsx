@@ -10,7 +10,7 @@ import type { ServiceMapView } from '../../api/types'
 import { sinceSearch } from '../../app/search'
 import type { Since } from '../../app/search'
 import { cx } from '../../lib/cx'
-import { MINI, layoutMiniMap } from './mapLayout'
+import { MINI, isFailingEdge, layoutMiniMap } from './mapLayout'
 
 /** Longest label drawn; longer service names are cut with an ellipsis (full name in <title>). */
 const LABEL_CHARS = 16
@@ -19,7 +19,7 @@ const label = (s: string) => (s.length > LABEL_CHARS ? `${s.slice(0, LABEL_CHARS
 
 export function describeMap(map: ServiceMapView): string {
   const bad = map.nodes.filter((n) => n.health !== 'ok')
-  const failing = map.edges.filter((e) => e.errors > 0 && e.parent !== e.child)
+  const failing = map.edges.filter((e) => isFailingEdge(e) && e.parent !== e.child)
   const parts = [`${map.nodes.length} services`]
   parts.push(bad.length ? `degraded: ${bad.map((n) => `${n.service} (${n.health})`).join(', ')}` : 'all healthy')
   if (failing.length) parts.push(`failing calls: ${failing.map((e) => `${e.parent} to ${e.child}`).join(', ')}`)
