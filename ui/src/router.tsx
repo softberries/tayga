@@ -56,7 +56,7 @@ const storyRoute = createRoute({
   beforeLoad: ({ params }) => {
     if (!HEX32.test(params.storyId)) throw notFound()
   },
-  component: page('StoryPage'),
+  component: lazyRouteComponent(() => import('./routes/stories/$id'), 'StoryPage'),
 })
 
 const tracesRoute = createRoute({
@@ -79,7 +79,7 @@ const traceRoute = createRoute({
   beforeLoad: ({ params }) => {
     if (!HEX32.test(params.traceId)) throw notFound()
   },
-  component: page('TracePage'),
+  component: lazyRouteComponent(() => import('./routes/traces/$id'), 'TracePage'),
 })
 
 const mapRoute = createRoute({

@@ -4,14 +4,8 @@ import { Placeholder } from './Placeholder'
 export function StoriesPage() {
   return <Placeholder title="Stories" task="Task 6" />
 }
-export function StoryPage() {
-  return <Placeholder title="Story" task="Task 7" />
-}
 export function TracesPage() {
   return <Placeholder title="Traces explorer" task="Task 8" />
-}
-export function TracePage() {
-  return <Placeholder title="Trace" task="Task 7" />
 }
 export function MapPage() {
   return <Placeholder title="Service map" task="Task 9" />
