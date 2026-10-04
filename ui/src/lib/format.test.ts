@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { clockMs, compact, dateTime, duration, msValue, percent, shortId } from './format'
+import { ago, clockMs, compact, dateTime, duration, msValue, percent, shortId } from './format'
 import { SERVICE_COLORS, serviceColor } from './serviceColor'
 
 describe('format', () => {
@@ -43,5 +43,21 @@ describe('format', () => {
     expect(serviceColor('checkout')).toMatch(new RegExp(`^var\\(--tg-svc-[1-${SERVICE_COLORS}]\\)$`))
     const used = new Set(['frontend', 'checkout', 'payment', 'cart', 'ad', 'quote', 'email', 'shipping'].map(serviceColor))
     expect(used.size).toBeGreaterThan(3)
+  })
+})
+
+describe('ago', () => {
+  const now = 1_791_125_400_000
+  const ns = (msBefore: number) => (now - msBefore) * 1e6
+  it('picks the largest whole unit', () => {
+    expect(ago(ns(500), now)).toBe('just now')
+    expect(ago(ns(12_400), now)).toBe('12 s ago')
+    expect(ago(ns(61_000), now)).toBe('1 min ago')
+    expect(ago(ns(3 * 3_600_000 + 5), now)).toBe('3 h ago')
+    expect(ago(ns(2 * 86_400_000), now)).toBe('2 d ago')
+  })
+  it('treats the future and bad input safely', () => {
+    expect(ago(ns(-5000), now)).toBe('just now')
+    expect(ago(Number.NaN, now)).toBe('—')
   })
 })

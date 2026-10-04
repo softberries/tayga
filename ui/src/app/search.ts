@@ -95,3 +95,27 @@ export function sinceCovering(tsNs: number, nowMs: number, atLeast: Since = '15m
   const floor = SINCE_SECS[atLeast]
   return SINCE_VALUES.find((s) => SINCE_SECS[s] >= floor && SINCE_SECS[s] >= ageSecs) ?? '7d'
 }
+
+/**
+ * `/` (stories home) search: the groups table's kind, service (root cause) and endpoint
+ * filters, the text search, and the selected group (fingerprint).
+ */
+export interface HomeSearch {
+  kind?: 'error' | 'slow'
+  service?: string
+  /** `"<endpoint service> <endpoint name>"`, as the table shows it. */
+  endpoint?: string
+  q?: string
+  group?: string
+}
+
+export function validateHomeSearch(s: Record<string, unknown>): HomeSearch {
+  const group = typeof s.group === 'number' && Number.isSafeInteger(s.group) ? String(s.group) : s.group
+  return {
+    kind: s.kind === 'error' || s.kind === 'slow' ? s.kind : undefined,
+    service: str(s.service, 200),
+    endpoint: str(s.endpoint, 400),
+    q: str(s.q, 200),
+    group: typeof group === 'string' && U64.test(group) ? group : undefined,
+  }
+}

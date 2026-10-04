@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { HEX32, U64, sinceCovering, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch } from './search'
+import { HEX32, U64, sinceCovering, validateHomeSearch, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch } from './search'
 
 describe('validateRootSearch', () => {
   it('keeps a valid non-default since', () => {
@@ -64,5 +64,24 @@ describe('sinceCovering', () => {
   it('never goes below the requested range', () => {
     expect(sinceCovering(ago(60), now, '24h')).toBe('24h')
     expect(sinceCovering(ago(5 * 3600), now, '1h')).toBe('24h')
+  })
+})
+
+describe('validateHomeSearch', () => {
+  it('keeps valid filters and the selected group', () => {
+    expect(
+      validateHomeSearch({ kind: 'slow', service: 'payment', endpoint: 'frontend GET /api/data', q: 'charge', group: '3637772083875833685' }),
+    ).toEqual({ kind: 'slow', service: 'payment', endpoint: 'frontend GET /api/data', q: 'charge', group: '3637772083875833685' })
+  })
+  it('drops invalid values', () => {
+    expect(validateHomeSearch({ kind: 'warn', service: '', q: 7, group: 'abc' })).toEqual({
+      kind: undefined,
+      service: undefined,
+      endpoint: undefined,
+      q: '7',
+      group: undefined,
+    })
+    expect(validateHomeSearch({ group: 42 }).group).toBe('42')
+    expect(validateHomeSearch({ group: 2 ** 60 }).group).toBeUndefined()
   })
 })

@@ -34,7 +34,8 @@ function q<T>(key: string, path: string, params?: Params) {
 }
 
 export const api = {
-  overview: (since: Since) => q<OverviewView>('overview', '/overview', { since }),
+  /** `since` may be any API window (e.g. "2h" for the previous-window delta). */
+  overview: (since: string) => q<OverviewView>('overview', '/overview', { since }),
   storyGroups: (p: { since: Since; kind?: string; service?: string }) =>
     q<StoryGroup[]>('story-groups', '/story-groups', p),
   storyGroup: (fingerprint: string, since: Since) =>

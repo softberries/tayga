@@ -60,3 +60,14 @@ export function percent(fraction: number): string {
   const p = fraction * 100
   return `${p < 10 ? p.toFixed(1) : Math.round(p)} %`
 }
+
+/** How long before `nowMs` a moment `ns` (unix ns) was: "12 s ago", "3 min ago", "2 h ago". */
+export function ago(ns: number, nowMs: number): string {
+  if (!Number.isFinite(ns) || !Number.isFinite(nowMs)) return '—'
+  const s = Math.floor((nowMs - ns / 1e6) / 1000)
+  if (s < 1) return 'just now'
+  if (s < 60) return `${s} s ago`
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`
+  if (s < 86_400) return `${Math.floor(s / 3600)} h ago`
+  return `${Math.floor(s / 86_400)} d ago`
+}
