@@ -394,17 +394,33 @@ async fn reads_seeded_log_templates_alerts_and_trace_links() {
     };
     let ts = r.log_templates(&tf(3600, None, None)).await.unwrap();
     assert_eq!(ts.len(), 2);
-    assert_eq!(ts[0].template_id, tmpl_a.to_string());
-    assert_eq!(ts[0].template, "Payment request failed <*>");
+    assert_eq!(ts[0].template.template_id, tmpl_a.to_string());
+    assert_eq!(ts[0].template.template, "Payment request failed <*>");
     assert_eq!(
-        ts[0].count, 2,
+        ts[0].template.count, 2,
         "replay deduplicated, old hit outside the window"
     );
-    assert!(ts[0].alerting);
-    assert!(!ts[1].alerting, "cart alert is old");
-    assert_eq!(ts[1].count, 1);
+    assert!(ts[0].template.alerting);
+    assert!(!ts[1].template.alerting, "cart alert is old");
+    assert_eq!(ts[1].template.count, 1);
+    // Buckets come from one grouped query: they sum to the window count, stay ascending and
+    // on the bucket grid, and match the detail endpoint's.
+    assert_eq!(ts[0].bucket_secs, 60);
+    for t in &ts {
+        assert_eq!(t.buckets.iter().map(|b| b.1).sum::<u64>(), t.template.count);
+        assert!(t.buckets.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(t.buckets.iter().all(|b| b.0 % 60 == 0));
+    }
+    let detail_a = r
+        .log_template(&tmpl_a.to_string(), 3600)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ts[0].buckets, detail_a.buckets);
     assert_eq!(
-        r.log_templates(&tf(172_800, None, None)).await.unwrap()[0].count,
+        r.log_templates(&tf(172_800, None, None)).await.unwrap()[0]
+            .template
+            .count,
         3
     );
     let by_service = r
@@ -412,13 +428,13 @@ async fn reads_seeded_log_templates_alerts_and_trace_links() {
         .await
         .unwrap();
     assert_eq!(by_service.len(), 1);
-    assert_eq!(by_service[0].service, "cart");
+    assert_eq!(by_service[0].template.service, "cart");
     let by_q = r
         .log_templates(&tf(3600, None, Some("PAYMENT REQ")))
         .await
         .unwrap();
     assert_eq!(by_q.len(), 1);
-    assert_eq!(by_q[0].template_id, tmpl_a.to_string());
+    assert_eq!(by_q[0].template.template_id, tmpl_a.to_string());
     assert!(
         r.log_templates(&tf(3600, None, Some("no such text")))
             .await

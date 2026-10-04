@@ -397,6 +397,24 @@ impl LogTemplateView {
     }
 }
 
+/// One row of `GET /log-templates`: the template plus its hits per bucket over the window,
+/// for the table's sparkline.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LogTemplateListItem {
+    #[serde(flatten)]
+    pub template: LogTemplateView,
+    pub bucket_secs: u32,
+    /// (bucket start in unix seconds, distinct hits), ascending; empty buckets are omitted.
+    pub buckets: Vec<(u32, u64)>,
+}
+
+#[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
+pub struct TemplateListBucketRow {
+    pub template_id: String,
+    pub bucket: u32,
+    pub hits: u64,
+}
+
 /// A `LogTemplateRow` plus the sample body, as one row of the detail query.
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
 pub struct TemplateDetailRow {

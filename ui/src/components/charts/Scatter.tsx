@@ -10,6 +10,7 @@ import { REDUCED_MOTION_QUERY, useMediaQuery } from '../../lib/useMediaQuery'
 import { readChartTokens, withAlpha } from '../../theme/echartsTheme'
 import { useAppliedTheme } from '../../theme/useAppliedTheme'
 import { EChart } from './EChart'
+import { timeAxisLabel } from './timeAxis'
 
 export type ScatterTone = 'accent' | 'slow' | 'err'
 /** Drawing order: errors last, so they sit on top. */
@@ -123,7 +124,7 @@ export function Scatter({
         type: 'time',
         min: xRange?.[0],
         max: xRange?.[1],
-        axisLabel: { hideOverlap: true },
+        axisLabel: timeAxisLabel(),
       },
       yAxis: logY
         ? { type: 'log', logBase: 10, axisLabel: { formatter: formatY } }

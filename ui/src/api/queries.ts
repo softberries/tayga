@@ -12,7 +12,7 @@ import type {
   GroupDetail,
   LogAlertView,
   LogTemplateDetail,
-  LogTemplateView,
+  LogTemplateListItem,
   OverviewView,
   SearchView,
   SeriesView,
@@ -62,7 +62,7 @@ export const api = {
   logAlerts: (p: { since: Since; kind?: string; service?: string }) =>
     q<LogAlertView[]>('log-alerts', '/log-alerts', p),
   logTemplates: (p: { since: Since; service?: string; q?: string }) =>
-    q<LogTemplateView[]>('log-templates', '/log-templates', p),
+    q<LogTemplateListItem[]>('log-templates', '/log-templates', p),
   logTemplate: (id: string, since: Since) =>
     q<LogTemplateDetail>('log-templates', `/log-templates/${encodeURIComponent(id)}`, { since }),
   search: (text: string) => q<SearchView>('search', '/search', { q: text }),

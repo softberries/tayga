@@ -1,4 +1,4 @@
-import type { ExampleTrace, LogAlertView, LogTemplateView } from '../../api/types'
+import type { ExampleTrace, LogAlertView, LogTemplateListItem } from '../../api/types'
 import type { Since } from '../../app/search'
 import { SINCE_SECS, denseSeries } from '../stories/model'
 
@@ -56,9 +56,9 @@ export interface TemplateSort {
   desc: boolean
 }
 
-export function sortTemplates(rows: readonly LogTemplateView[], { key, desc }: TemplateSort): LogTemplateView[] {
+export function sortTemplates(rows: readonly LogTemplateListItem[], { key, desc }: TemplateSort): LogTemplateListItem[] {
   const dir = desc ? -1 : 1
-  const val = (t: LogTemplateView) => (key === 'count' ? t.count : key === 'first' ? t.first_seen_ns : t.template)
+  const val = (t: LogTemplateListItem) => (key === 'count' ? t.count : key === 'first' ? t.first_seen_ns : t.template)
   return [...rows].sort((a, b) => {
     const x = val(a)
     const y = val(b)
@@ -82,4 +82,9 @@ export function bucketPoints(
   const last = Math.floor(nowMs / 1000 / step) * step
   const start = last - (values.length - 1) * step
   return values.map((v, i) => [(start + i * step) * 1000, v] as const)
+}
+
+/** Active alerts first, then the most recently seen first. */
+export function sortAlerts(alerts: readonly LogAlertView[]): LogAlertView[] {
+  return [...alerts].sort((a, b) => Number(b.active) - Number(a.active) || b.last_at_ns - a.last_at_ns)
 }

@@ -4,7 +4,7 @@
  */
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
-import { useCallback } from 'react'
+import { useCallback, useMemo } from 'react'
 import { api } from '../../api/queries'
 import { useLiveInterval } from '../../app/live'
 import type { LogAlertsSearch } from '../../app/search'
@@ -19,7 +19,7 @@ import { ErrorBanner } from '../../features/stories/ErrorBanner'
 import { AlertsTable } from '../../features/logs/AlertsTable'
 import { AlertsTimeline } from '../../features/logs/AlertsTimeline'
 import { sinceSearch } from '../../app/search'
-import { stepWord, TIMELINE_STEP } from '../../features/logs/model'
+import { TIMELINE_STEP, sortAlerts, stepWord } from '../../features/logs/model'
 
 const KINDS = [
   { value: 'all', label: 'All' },
@@ -55,8 +55,12 @@ export function LogAlertsPage() {
       void navigate({ search: (prev) => ({ ...prev, ...patch }), replace: true, resetScroll: false }),
     [navigate],
   )
-  const filtered = Boolean(search.kind || search.service)
-  const data = alerts.data
+  const filtered = Boolean(search.kind || search.service || search.active)
+  // Active alerts first, then the most recently seen; "Active only" hides the rest.
+  const data = useMemo(() => {
+    const sorted = alerts.data ? sortAlerts(alerts.data) : undefined
+    return search.active ? sorted?.filter((a) => a.active) : sorted
+  }, [alerts.data, search.active])
   const active = data?.filter((a) => a.active).length ?? 0
 
   return (
@@ -76,8 +80,17 @@ export function LogAlertsPage() {
             onChange={(service) => onSearch({ service })}
             emptyText="No services"
           />
+          <Button
+            size="sm"
+            aria-pressed={Boolean(search.active)}
+            onClick={() => onSearch({ active: search.active ? undefined : true })}
+            className={search.active ? 'border-err/60 bg-err-soft text-err hover:bg-err-soft' : undefined}
+          >
+            <span aria-hidden className="size-2 rounded-full bg-err" />
+            Active only
+          </Button>
           {filtered ? (
-            <Button size="sm" variant="ghost" onClick={() => onSearch({ kind: undefined, service: undefined })}>
+            <Button size="sm" variant="ghost" onClick={() => onSearch({ kind: undefined, service: undefined, active: undefined })}>
               Clear filters
             </Button>
           ) : null}
@@ -96,6 +109,7 @@ export function LogAlertsPage() {
       <Card className="flex min-w-0 flex-col gap-2 px-4 py-3.5">
         <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
           <PanelTitle>Alerts per {stepWord(TIMELINE_STEP[since])}</PanelTitle>
+          <span className="text-xs text-muted">alerts started in this window, by kind</span>
           <ul aria-label="Legend" className="m-0 flex list-none gap-3 p-0 text-xs text-muted">
             <li className="flex items-center gap-1.5">
               <span aria-hidden className="size-2 rounded-full bg-accent" />
@@ -107,7 +121,7 @@ export function LogAlertsPage() {
             </li>
           </ul>
         </div>
-        {data ? <AlertsTimeline alerts={data} since={since} nowMs={alerts.dataUpdatedAt} /> : <Skeleton className="h-[170px]" />}
+        {alerts.data ? <AlertsTimeline alerts={alerts.data} since={since} nowMs={alerts.dataUpdatedAt} /> : <Skeleton className="h-[170px]" />}
       </Card>
 
       <Card className="overflow-hidden">
@@ -128,7 +142,7 @@ export function LogAlertsPage() {
             description={filtered ? 'Clear a filter to see more.' : `No template was new or spiked in the last ${since}. A longer time range may show older alerts.`}
             action={
               filtered ? (
-                <Button size="sm" onClick={() => onSearch({ kind: undefined, service: undefined })}>
+                <Button size="sm" onClick={() => onSearch({ kind: undefined, service: undefined, active: undefined })}>
                   Clear filters
                 </Button>
               ) : null

@@ -713,6 +713,7 @@ async fn templates_page<R: Repo>(
                 q: f.q.clone().unwrap_or_default(),
                 rows: templates
                     .into_iter()
+                    .map(|i| i.template)
                     .map(|t| TemplateRowView {
                         first_seen: fmt_time(t.first_seen_ns),
                         template_id: t.template_id,
@@ -1364,10 +1365,18 @@ mod tests {
         }
     }
 
+    fn list_item(template: LogTemplateView) -> LogTemplateListItem {
+        LogTemplateListItem {
+            template,
+            bucket_secs: 60,
+            buckets: vec![],
+        }
+    }
+
     #[tokio::test]
     async fn templates_page_renders_rows_and_escapes() {
         let repo = FakeRepo {
-            templates: vec![template_view(9, true)],
+            templates: vec![list_item(template_view(9, true))],
             ..Default::default()
         };
         let (status, body) = html(repo, "/templates?since=30m&q=Found").await;
@@ -1527,7 +1536,7 @@ mod tests {
             async fn log_templates(
                 &self,
                 f: &TemplateFilter,
-            ) -> anyhow::Result<Vec<LogTemplateView>> {
+            ) -> anyhow::Result<Vec<LogTemplateListItem>> {
                 self.0.log_templates(f).await
             }
             async fn log_template(

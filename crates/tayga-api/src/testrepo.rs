@@ -12,7 +12,7 @@ pub struct FakeRepo {
     pub trace: Option<TraceView>,
     pub edges: Vec<EdgeView>,
     pub alerts: Vec<LogAlertView>,
-    pub templates: Vec<LogTemplateView>,
+    pub templates: Vec<LogTemplateListItem>,
     pub template_detail: Option<LogTemplateDetail>,
     pub trace_templates: Vec<TraceLogTemplate>,
     pub overview: OverviewView,
@@ -75,7 +75,7 @@ impl Repo for FakeRepo {
         *self.last_alert_filter.lock().unwrap() = Some(f.clone());
         Ok(self.alerts.clone())
     }
-    async fn log_templates(&self, f: &TemplateFilter) -> anyhow::Result<Vec<LogTemplateView>> {
+    async fn log_templates(&self, f: &TemplateFilter) -> anyhow::Result<Vec<LogTemplateListItem>> {
         self.check()?;
         *self.last_template_filter.lock().unwrap() = Some(f.clone());
         Ok(self.templates.clone())

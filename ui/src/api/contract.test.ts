@@ -43,7 +43,7 @@ const cases: Array<[string, ZodType, unknown]> = [
   ['traces/{id}/log-templates', z.array(S.TraceLogTemplateSchema), traceLogTemplates],
   ['service-map', S.ServiceMapSchema, serviceMap],
   ['log-alerts', z.array(S.LogAlertViewSchema), logAlerts],
-  ['log-templates', z.array(S.LogTemplateViewSchema), logTemplates],
+  ['log-templates', z.array(S.LogTemplateListItemSchema), logTemplates],
   ['log-templates/{id}', S.LogTemplateDetailSchema, logTemplate],
   ['overview', S.OverviewSchema, overview],
   ['stories/series', S.StoriesSeriesSchema, storiesSeries],

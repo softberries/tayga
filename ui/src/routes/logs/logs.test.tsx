@@ -2,6 +2,7 @@
  * Logs section against captured fixtures: the alerts timeline and table, the template list
  * with its debounced search, the template page, and the empty, error and loading states.
  */
+import { compact } from '../../lib/format'
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -9,10 +10,10 @@ import logAlerts from '../../api/__fixtures__/log-alerts.json'
 import logTemplate from '../../api/__fixtures__/log-template.json'
 import logTemplates from '../../api/__fixtures__/log-templates.json'
 import services from '../../api/__fixtures__/services.json'
-import type { LogAlertView, LogTemplateDetail } from '../../api/types'
+import type { LogAlertView, LogTemplateDetail, LogTemplateListItem } from '../../api/types'
 import { clearOutage } from '../../app/apiStatus'
 import type { EChartProps } from '../../components/charts/EChart'
-import { countVsBaseline, exampleLink, sortTemplates, timeline } from '../../features/logs/model'
+import { countVsBaseline, exampleLink, sortAlerts, sortTemplates, timeline } from '../../features/logs/model'
 import { renderApp, stubApi } from '../../test/renderApp'
 import type { Routes } from '../../test/renderApp'
 import { SEARCH_DEBOUNCE_MS } from './templates'
@@ -40,7 +41,7 @@ afterEach(() => {
 })
 
 const alerts = logAlerts as LogAlertView[]
-const templates = logTemplates
+const templates = logTemplates as unknown as LogTemplateListItem[]
 const detail = logTemplate as unknown as LogTemplateDetail
 const TID = detail.template.template_id
 
@@ -77,6 +78,13 @@ describe('model', () => {
   it('describes the count against the baseline, and sorts templates', () => {
     expect(countVsBaseline({ kind: 'spike', peak_count: 35, baseline_per_window: 1.75 })).toBe('35 vs 1.8 / window')
     expect(countVsBaseline({ kind: 'new', peak_count: 0, baseline_per_window: 0 })).toBe('first seen')
+    const mk = (id: string, active: boolean, last: number) => ({ alert_id: id, active, last_at_ns: last }) as LogAlertView
+    expect(sortAlerts([mk('old-active', true, 1), mk('new-ended', false, 9), mk('new-active', true, 5), mk('old-ended', false, 2)]).map((a) => a.alert_id)).toEqual([
+      'new-active',
+      'old-active',
+      'new-ended',
+      'old-ended',
+    ])
     const byCount = sortTemplates(templates, { key: 'count', desc: false })
     expect(byCount[0]!.count).toBe(Math.min(...templates.map((t) => t.count)))
   })
@@ -130,6 +138,71 @@ describe('log alerts', () => {
     const table = await screen.findByRole('table', { name: 'Log alerts' })
     expect(within(table).getAllByText('active')).toHaveLength(1)
     expect(screen.getByText(`${alerts.length} alerts · 1 active`)).toBeInTheDocument()
+  })
+
+  it('lists active alerts first, then the newest, inside a labelled scroll region', async () => {
+    const live = alerts.map((a, i) => (i === alerts.length - 1 ? { ...a, active: true } : { ...a, active: false }))
+    stubApi(routes({ '/log-alerts': { body: live } }))
+    renderApp('/logs/alerts')
+    const table = await screen.findByRole('table', { name: 'Log alerts' })
+    const rows = within(table).getAllByRole('row').slice(1)
+    const last = live[live.length - 1]!
+    expect(rows[0]).toHaveTextContent(last.service)
+    expect(within(rows[0] as HTMLElement).getByText('active')).toBeInTheDocument()
+    // The rest by last seen, newest first.
+    const order = live.filter((a) => !a.active).sort((a, b) => b.last_at_ns - a.last_at_ns)
+    expect(rows[1]).toHaveTextContent(order[0]!.template.slice(0, 20))
+    const region = screen.getByRole('region', { name: 'Log alerts (scrollable)' })
+    expect(region).toHaveAttribute('tabindex', '0')
+    expect(region.style.maxHeight).toContain('vh')
+  })
+
+  it('Active only goes into the URL and hides ended alerts', async () => {
+    const user = userEvent.setup()
+    const live = alerts.map((a, i) => ({ ...a, active: i < 2 }))
+    stubApi(routes({ '/log-alerts': { body: live } }))
+    const { router } = renderApp('/logs/alerts')
+    await screen.findByRole('table', { name: 'Log alerts' })
+    await user.click(screen.getByRole('button', { name: 'Active only' }))
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ active: true }))
+    const table = await screen.findByRole('table', { name: 'Log alerts' })
+    await waitFor(() => expect(within(table).getAllByRole('row').slice(1)).toHaveLength(2))
+    expect(screen.getByRole('button', { name: 'Active only' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByText('2 alerts · 2 active')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Clear filters' }))
+    await waitFor(() => expect(router.state.location.search).toEqual({}))
+  })
+
+  it('reads Active only from the URL', async () => {
+    stubApi(routes())
+    renderApp('/logs/alerts?active=true')
+    // No alert in the fixture is active.
+    expect(await screen.findByText('No alerts match these filters')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Active only' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('stacks each alert as a card on a narrow screen', async () => {
+    const original = window.matchMedia
+    window.matchMedia = ((query: string) => ({ ...original(query), matches: query.includes('max-width: 639') })) as typeof window.matchMedia
+    try {
+      stubApi(routes())
+      renderApp('/logs/alerts')
+      const list = await screen.findByRole('list', { name: 'Log alerts' })
+      const items = within(list).getAllByRole('listitem').filter((li) => li.parentElement === list)
+      expect(items).toHaveLength(alerts.length)
+      const first = items[0] as HTMLElement
+      const top = [...alerts].sort((a, b) => b.last_at_ns - a.last_at_ns)[0]!
+      expect(within(first).getByRole('link', { name: top.template })).toHaveAttribute('href', `/logs/templates/${top.template_id}`)
+      expect(screen.queryByRole('table', { name: 'Log alerts' })).toBeNull()
+    } finally {
+      window.matchMedia = original
+    }
+  })
+
+  it('captions the chart as alerts started in the window', async () => {
+    stubApi(routes())
+    renderApp('/logs/alerts')
+    expect(await screen.findByText('alerts started in this window, by kind')).toBeInTheDocument()
   })
 
   it('shows the full template in a tooltip', async () => {
@@ -205,21 +278,24 @@ describe('log templates', () => {
   }
 
   it('lists every template with count, service and a trend', async () => {
-    stubApi(routes())
+    const fetch = stubApi(routes())
     renderApp('/logs/templates')
     const rows = await bodyRows()
     expect(rows).toHaveLength(templates.length)
     const first = rows[0] as HTMLElement
     const top = templates[0]!
     expect(within(first).getByRole('link', { name: top.template })).toHaveAttribute('href', `/logs/templates/${top.template_id}`)
-    expect(within(first).getByText('55k')).toHaveAttribute('title', String(top.count))
+    expect(within(first).getByText(compact(top.count))).toHaveAttribute('title', String(top.count))
     expect(within(first).getByText(top.service)).toBeInTheDocument()
-    expect(await within(first).findByRole('img', { name: /^55003 hits over 1h, peak \d+ per bucket$/ })).toBeInTheDocument()
+    // The trend comes with the list: no request per row.
+    expect(within(first).getByRole('img', { name: new RegExp(`^${top.count} hits over 1h, peak \\d+ per bucket$`) })).toBeInTheDocument()
+    expect(calls(fetch, 'log-templates/')).toEqual([])
     expect(screen.getByText(`${templates.length} templates`)).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Log templates' }).style.maxHeight).toContain('vh')
   })
 
   it('marks alerting templates', async () => {
-    const alerting = templates.map((t, i) => (i === 1 ? { ...t, alerting: true } : t))
+    const alerting = templates.map((t, i) => ({ ...t, alerting: i === 1 }))
     stubApi(routes({ '/log-templates': { body: alerting } }))
     renderApp('/logs/templates')
     const rows = await bodyRows()

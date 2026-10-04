@@ -529,7 +529,11 @@ mod tests {
     #[tokio::test]
     async fn log_templates_json_filter_and_validation() {
         let repo = Arc::new(FakeRepo {
-            templates: vec![template_view()],
+            templates: vec![LogTemplateListItem {
+                template: template_view(),
+                bucket_secs: 60,
+                buckets: vec![(1_790_000_040, 3), (1_790_000_100, 6)],
+            }],
             ..Default::default()
         });
         let (status, json) = get_with(
@@ -542,6 +546,15 @@ mod tests {
         assert_eq!(json[0]["template_id"], "17393964261140422938");
         assert_eq!(json[0]["alerting"], true);
         assert_eq!(json[0]["count"], 9);
+        assert_eq!(json[0]["bucket_secs"], 60);
+        assert_eq!(
+            json[0]["buckets"],
+            serde_json::json!([[1_790_000_040, 3], [1_790_000_100, 6]])
+        );
+        assert!(
+            json[0].get("template").is_some(),
+            "flattened fields stay top-level"
+        );
         let f = repo.last_template_filter.lock().unwrap().clone().unwrap();
         assert_eq!(
             (f.since_secs, f.q.as_deref(), f.service.as_deref()),

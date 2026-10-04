@@ -37,7 +37,7 @@ pub trait Repo: Send + Sync + 'static {
     fn log_templates(
         &self,
         f: &TemplateFilter,
-    ) -> impl Future<Output = anyhow::Result<Vec<LogTemplateView>>> + Send;
+    ) -> impl Future<Output = anyhow::Result<Vec<LogTemplateListItem>>> + Send;
     fn log_template(
         &self,
         template_id: &str,
@@ -425,7 +425,7 @@ impl Repo for ChRepo {
         .await
     }
 
-    async fn log_templates(&self, f: &TemplateFilter) -> anyhow::Result<Vec<LogTemplateView>> {
+    async fn log_templates(&self, f: &TemplateFilter) -> anyhow::Result<Vec<LogTemplateListItem>> {
         let service = f.service.as_deref().unwrap_or_default();
         let q = f.q.as_deref().unwrap_or_default();
         let rows: Vec<LogTemplateRow> = self
@@ -440,7 +440,43 @@ impl Repo for ChRepo {
             .bind(q)
             .fetch_all()
             .await?;
-        Ok(rows.into_iter().map(LogTemplateView::from_row).collect())
+        let step = bucket_secs(f.since_secs);
+        // One grouped query for every listed template (at most 200), not one per row.
+        let mut by_template: HashMap<String, Vec<(u32, u64)>> = HashMap::new();
+        if !rows.is_empty() {
+            let ids: Vec<String> = rows.iter().map(|r| r.template_id.clone()).collect();
+            let hits: Vec<TemplateListBucketRow> = self
+                .client
+                .query(
+                    "SELECT toString(template_id) AS template_id, \
+                     toUInt32(toStartOfInterval(ts, toIntervalSecond(?))) AS bucket, uniqExact(log_id) AS hits \
+                     FROM log_template_hits \
+                     WHERE template_id IN (SELECT toUInt64(arrayJoin(?))) AND ts > now64(9) - toIntervalSecond(?) \
+                     GROUP BY template_id, bucket ORDER BY template_id, bucket",
+                )
+                .bind(step)
+                .bind(ids)
+                .bind(f.since_secs)
+                .fetch_all()
+                .await?;
+            for h in hits {
+                by_template
+                    .entry(h.template_id)
+                    .or_default()
+                    .push((h.bucket, h.hits));
+            }
+        }
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let buckets = by_template.remove(&r.template_id).unwrap_or_default();
+                LogTemplateListItem {
+                    template: LogTemplateView::from_row(r),
+                    bucket_secs: step,
+                    buckets,
+                }
+            })
+            .collect())
     }
 
     async fn log_template(

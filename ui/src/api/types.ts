@@ -17,6 +17,7 @@ import type {
   HealthSchema,
   LogAlertViewSchema,
   LogTemplateDetailSchema,
+  LogTemplateListItemSchema,
   LogTemplateViewSchema,
   NodeViewSchema,
   OverviewSchema,
@@ -81,6 +82,7 @@ export type NodeView = z.infer<typeof NodeViewSchema>
 export type ServiceMapView = z.infer<typeof ServiceMapSchema>
 export type ExampleTrace = z.infer<typeof ExampleTraceSchema>
 export type LogAlertView = z.infer<typeof LogAlertViewSchema>
+export type LogTemplateListItem = z.infer<typeof LogTemplateListItemSchema>
 export type LogTemplateView = z.infer<typeof LogTemplateViewSchema>
 export type TemplateHit = z.infer<typeof TemplateHitSchema>
 export type LogTemplateDetail = z.infer<typeof LogTemplateDetailSchema>

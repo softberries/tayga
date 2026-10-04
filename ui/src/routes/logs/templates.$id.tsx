@@ -207,7 +207,10 @@ export function LogTemplatePage() {
 
       <Card className="overflow-hidden">
         <div className="border-b border-line px-4 py-2.5">
-          <PanelTitle>Latest hits</PanelTitle>
+          <div className="flex flex-wrap items-baseline gap-x-3">
+            <PanelTitle>Latest {detail.data.recent.length} hits</PanelTitle>
+            <span className="text-xs text-muted">the newest, whatever the time range</span>
+          </div>
         </div>
         <RecentHits hits={detail.data.recent} since={since} nowMs={nowMs} />
       </Card>

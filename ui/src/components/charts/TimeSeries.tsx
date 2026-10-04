@@ -3,6 +3,7 @@ import { readChartTokens, withAlpha } from '../../theme/echartsTheme'
 import { REDUCED_MOTION_QUERY, useMediaQuery } from '../../lib/useMediaQuery'
 import { useAppliedTheme } from '../../theme/useAppliedTheme'
 import { EChart } from './EChart'
+import { timeAxisLabel } from './timeAxis'
 
 export type SeriesTone = 'accent' | 'err' | 'slow' | 'ok'
 
@@ -50,7 +51,7 @@ export function TimeSeries({ series, height = 180, markAt, markLabel, format, su
       animationDuration: 300,
       grid: { left: 8, right: 12, top: 16, bottom: 4, containLabel: true },
       tooltip: { trigger: 'axis', valueFormatter: (v: unknown) => (typeof v === 'number' ? fmt(v) : '—') },
-      xAxis: { type: 'time', axisLabel: { hideOverlap: true }, ...(xRange ? { min: xRange[0], max: xRange[1] } : {}) },
+      xAxis: { type: 'time', axisLabel: timeAxisLabel(), ...(xRange ? { min: xRange[0], max: xRange[1] } : {}) },
       yAxis: {
         type: 'value',
         minInterval,

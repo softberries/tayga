@@ -1,20 +1,17 @@
 /**
  * Log templates (≤ 200 from /log-templates) in a virtualized table: service, template, hits
  * in the window, a sparkline, first seen and an alerting badge. Sorted locally. The sparkline
- * comes from the template's detail query, fetched only for rows that stay on screen.
+ * is drawn from the buckets each row carries.
  */
-import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useRef } from 'react'
 import type { KeyboardEvent } from 'react'
-import { api } from '../../api/queries'
-import type { LogTemplateView } from '../../api/types'
+import type { LogTemplateListItem } from '../../api/types'
 import { sinceSearch } from '../../app/search'
 import type { Since } from '../../app/search'
 import { Spark } from '../../components/charts/Spark'
 import { Badge } from '../../components/ui/Badge'
-import { Skeleton } from '../../components/ui/Skeleton'
 import { SortHeader } from '../../components/ui/SortHeader'
 import { cx } from '../../lib/cx'
 import { ago, compact, dateTime } from '../../lib/format'
@@ -29,33 +26,23 @@ const AREAS = '"svc tmpl count spark first alert"'
 const NARROW_COLS = 'minmax(0, 1fr) auto auto'
 const NARROW_AREAS = '"tmpl tmpl tmpl" "svc count alert"'
 const HEADER_H = 34
-/** How long a row must stay mounted before it fetches its sparkline (fast scrolling skips it). */
-const SPARK_DELAY_MS = 150
-
-function RowSpark({ id, since, nowMs, hits }: { id: string; since: Since; nowMs: number; hits: number }) {
-  const [ready, setReady] = useState(false)
-  useEffect(() => {
-    const t = setTimeout(() => setReady(true), SPARK_DELAY_MS)
-    return () => clearTimeout(t)
-  }, [])
-  const detail = useQuery({ ...api.logTemplate(id, since), enabled: ready, staleTime: 60_000 })
-  if (detail.isError) return <span className="text-xs text-faint" title="The trend could not be loaded">—</span>
-  if (!detail.data) return <Skeleton className="h-[22px] w-full" />
-  const values = denseSeries(detail.data.buckets, detail.data.bucket_secs, SINCE_SECS[since], nowMs)
-  return <Spark values={values} tone="accent" height={22} label={`${hits} hits over ${since}, peak ${peak(values)} per bucket`} />
+function RowSpark({ t, since, nowMs }: { t: LogTemplateListItem; since: Since; nowMs: number }) {
+  const values = denseSeries(t.buckets, t.bucket_secs, SINCE_SECS[since], nowMs)
+  return <Spark values={values} tone="accent" height={22} label={`${t.count} hits over ${since}, peak ${peak(values)} per bucket`} />
 }
 
 export interface TemplatesTableProps {
-  rows: readonly LogTemplateView[]
+  rows: readonly LogTemplateListItem[]
   since: Since
   /** When the rows were fetched: the end of the sparkline window and "first seen" reference. */
   nowMs: number
   sort: TemplateSort
   onSort: (s: TemplateSort) => void
-  height?: number
+  /** Max height of the scrolling table: a number of px or any CSS length. */
+  height?: number | string
 }
 
-export function TemplatesTable({ rows, since, nowMs, sort, onSort, height = 560 }: TemplatesTableProps) {
+export function TemplatesTable({ rows, since, nowMs, sort, onSort, height = 'min(68vh, 760px)' }: TemplatesTableProps) {
   const sorted = useMemo(() => sortTemplates(rows, sort), [rows, sort])
   const narrow = useMediaQuery(NARROW_QUERY)
   const rowHeight = narrow ? 64 : 42
@@ -174,7 +161,7 @@ export function TemplatesTable({ rows, since, nowMs, sort, onSort, height = 560 
                   {compact(t.count)}
                 </span>
                 <span role="cell" style={{ gridArea: 'spark' }} className={narrow ? 'hidden' : undefined}>
-                  {narrow ? null : <RowSpark id={t.template_id} since={since} nowMs={nowMs} hits={t.count} />}
+                  {narrow ? null : <RowSpark t={t} since={since} nowMs={nowMs} />}
                 </span>
                 <span role="cell" style={{ gridArea: 'first' }} className={cx('tabular whitespace-nowrap text-xs text-muted', narrow && 'hidden')} title={dateTime(t.first_seen_ns)}>
                   {ago(t.first_seen_ns, nowMs)}

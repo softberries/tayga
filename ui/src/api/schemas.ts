@@ -248,6 +248,12 @@ export const LogTemplateViewSchema = z.strictObject({
   alerting: z.boolean(),
 })
 
+/** `GET /log-templates` element: the template plus its hits per bucket over the window. */
+export const LogTemplateListItemSchema = LogTemplateViewSchema.extend({
+  bucket_secs: int,
+  buckets: z.array(countBucket),
+})
+
 export const TemplateHitSchema = z.strictObject({
   ts_ns: ns,
   trace_id: str,
