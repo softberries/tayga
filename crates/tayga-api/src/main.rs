@@ -7,12 +7,14 @@ use tayga_api::recorder::{self, Target};
 use tayga_api::repo::ChRepo;
 use tayga_api::routes::{ApiMetrics, api_router};
 use tayga_api::ui::{UiLinks, ui_router};
+use tayga_kafka::KafkaSettings;
 use tayga_store::ClickHouseSettings;
 use tayga_store::store::Store;
 
 #[derive(Deserialize)]
 struct Settings {
     clickhouse: ClickHouseSettings,
+    kafka: KafkaSettings,
     #[serde(default = "default_http")]
     http_addr: SocketAddr,
     #[serde(default = "default_jaeger")]
@@ -45,6 +47,7 @@ fn default_grafana() -> String {
 async fn main() -> anyhow::Result<()> {
     tayga_common::init_logging();
     let settings: Settings = tayga_common::load_settings()?;
+    tracing::info!(brokers = %settings.kafka.brokers, topic = %settings.kafka.topic, "kafka for consumer-group lag");
     let repo = Arc::new(ChRepo::new(&settings.clickhouse));
     let mut registry = Registry::default();
     let metrics = ApiMetrics::register(&mut registry);
