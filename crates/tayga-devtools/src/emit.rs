@@ -21,6 +21,29 @@ pub fn random_word(len: usize) -> String {
         .collect()
 }
 
+/// Service the e2e new-template probe logs under, kept apart from the demo services.
+pub const PROBE_SERVICE: &str = "tayga-e2e-probe";
+/// Constant log that keeps the probe service's oldest template alive (warmup, spec §6).
+pub const PROBE_SEED: &str = "tayga e2e probe seed";
+/// Number of `probe` tokens in a probe body: bodies have 4 to 58 tokens.
+pub const PROBE_REPEATS: std::ops::RangeInclusive<usize> = 2..=56;
+
+/// `{word} probe … probe marker` with `repeats` `probe`s. Drain routes on the token count and
+/// then on `word`, so random words and lengths spread probes over ~55 length nodes of 100
+/// children each before a node fills (spec §12.7). No token has a digit, so nothing is masked.
+pub fn probe_body(word: &str, repeats: usize) -> String {
+    let mut body = String::from(word);
+    for _ in 0..repeats {
+        body.push_str(" probe");
+    }
+    body.push_str(" marker");
+    body
+}
+
+pub fn random_probe_repeats() -> usize {
+    rand::random_range(PROBE_REPEATS)
+}
+
 fn severity_text(severity: i32) -> &'static str {
     match severity {
         9 => "INFO",
@@ -120,6 +143,26 @@ mod tests {
             rec.body.as_ref().unwrap().value,
             Some(any_value::Value::StringValue("hello world".into()))
         );
+    }
+
+    #[test]
+    fn probe_body_has_the_planned_shape_and_is_sent_verbatim() {
+        let body = probe_body("qwertyuiopas", 2);
+        assert_eq!(body, "qwertyuiopas probe probe marker");
+        for repeats in [*PROBE_REPEATS.start(), *PROBE_REPEATS.end()] {
+            let body = probe_body(&random_word(12), repeats);
+            let tokens: Vec<&str> = body.split(' ').collect();
+            assert_eq!(tokens.len(), repeats + 2);
+            assert!((4..=58).contains(&tokens.len()));
+            assert!(!body.bytes().any(|b| b.is_ascii_digit()), "{body}");
+            let req = build_request(PROBE_SERVICE, &body, &[1; 16], [1; 8], 9, 1);
+            let rec = &req.resource_logs[0].scope_logs[0].log_records[0];
+            assert_eq!(
+                rec.body.as_ref().unwrap().value,
+                Some(any_value::Value::StringValue(body.clone()))
+            );
+        }
+        assert!(PROBE_REPEATS.contains(&random_probe_repeats()));
     }
 
     #[test]

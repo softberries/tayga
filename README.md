@@ -83,10 +83,10 @@ Limits: one logminer replica only (Drain state is global per service while recor
 To probe the new-template rule by hand (the stack's ingest listens on 14318):
 
 ```sh
-cargo run -p tayga-devtools -- emit-log --service checkout --body "hello probe marker"
+cargo run -p tayga-devtools -- emit-log --service tayga-e2e-probe --body "hello probe marker"
 ```
 
-The command prints the trace id it used. The e2e `new_template_from_probe` does this with a random first word and leaves one probe template in checkout per run.
+The command prints the trace id it used. An alert fires only if the service already had a template 15 minutes before. The e2e `new_template_from_probe` logs under its own service, `tayga-e2e-probe`, never a demo service. Every run emits a constant seed log, `tayga e2e probe seed`, and then a probe `{word} probe … probe marker` with a random 12-letter word and 4 to 58 tokens. The first run on a stack waits up to 16 minutes for the seed template to age past the warmup. Drain routes on the token count, then on the first word, so the probes spread over about 55 nodes of 100 children: about 5,500 runs fit in the 30-day template TTL before probes start merging and the test fails.
 
 ## Developer commands
 
@@ -95,7 +95,7 @@ The command prints the trace id it used. The e2e `new_template_from_probe` does 
 | `cargo test --workspace` | Unit tests (integration and e2e tests are `#[ignore]`d) |
 | `make it` | Starts Redpanda + ClickHouse standalone (compose project `tayga-it`) and runs the ignored integration tests (all crates except `tayga-e2e`; the ClickHouse tests each seed a uniquely named database). Run it with the full stack down: both use the same host ports 19092 and 18123 |
 | `make infra-down` | Stops the standalone infra and removes its volumes |
-| `make e2e` | Resets flags, then runs the end-to-end tests against the live stack (`make up` first). Nine tests: the seven from before (flag-driven story scenarios for payment, payment unreachable, shipping, product catalog and ad, the service map, and raw span counts versus Jaeger) plus `log_spike_on_payment_failure` and `new_template_from_probe`. The spike scenario fails up front if a payment spike alert is still active from an earlier run (wait about 10 minutes) |
+| `make e2e` | Resets flags, then runs the end-to-end tests against the live stack (`make up` first). Nine tests: the seven from before (flag-driven story scenarios for payment, payment unreachable, shipping, product catalog and ad, the service map, and raw span counts versus Jaeger) plus `log_spike_on_payment_failure` and `new_template_from_probe`. The spike scenario fails up front if a payment spike alert is still active from an earlier run (wait about 10 minutes). The first run on a fresh stack waits up to 16 more minutes for the probe service warmup |
 | `make verify-raw` | Compares per-trace span counts in ClickHouse with the demo's Jaeger |
 | `make capture NAME=<n> ARGS="<args>"` | Captures a fixture to `fixtures/<n>.pb.gz` (see `cargo run -p tayga-devtools -- capture --help`) |
 

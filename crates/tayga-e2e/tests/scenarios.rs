@@ -193,32 +193,41 @@ async fn log_spike_on_payment_failure() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Emits a log with a per-run random first word, so Drain creates a fresh template every run
-/// (`<word> <*> marker`; the `e2e` token contains a digit and is masked). The checkout service
-/// is older than 15 min, so the template is reported as a new-template alert. Each run leaves
-/// one probe template in checkout's template set (spec section 12.7).
+/// Emits a probe log under the dedicated `tayga-e2e-probe` service, never a demo service:
+/// `{word} probe … probe marker` with a random 12-letter `word` and 2 to 56 `probe`s (spec
+/// §12.7). Drain routes on the token count, then on `word`, so each run adds one child to one of
+/// ~55 length nodes; that is ~5,500 runs within the 30-day template TTL before a node fills and
+/// probes start merging. The new-template rule needs the service to have had a template for
+/// 15 min, so every run also emits the constant seed `tayga e2e probe seed`, and the first run
+/// waits up to 16 min for that seed to age.
 #[tokio::test]
 #[ignore = "end-to-end: requires `make up`"]
 async fn new_template_from_probe() -> anyhow::Result<()> {
+    use tayga_devtools::emit::{
+        PROBE_SEED, PROBE_SERVICE, emit_log, probe_body, random_probe_repeats, random_trace_id,
+        random_word,
+    };
+    const INGEST: &str = "http://localhost:14318";
     let api = Api::new(API);
-    let word = tayga_devtools::emit::random_word(12);
-    let trace = tayga_devtools::emit::random_trace_id();
+    emit_log(INGEST, PROBE_SERVICE, PROBE_SEED, &random_trace_id(), 9).await?;
+    let warmed = wait_for_service_warmup(&api, PROBE_SERVICE, PROBE_WARMUP_TIMEOUT).await?;
+    println!(
+        "[e2e] new_template: probe service warm after {:.0}s",
+        warmed.as_secs_f64()
+    );
+
+    let word = random_word(12);
+    let body = probe_body(&word, random_probe_repeats());
+    let trace = random_trace_id();
     let trace_hex: String = trace.iter().map(|b| format!("{b:02x}")).collect();
     let flipped = now_ns();
-    tayga_devtools::emit::emit_log(
-        "http://localhost:14318",
-        "checkout",
-        &format!("{word} tayga-e2e-probe marker"),
-        &trace,
-        9,
-    )
-    .await?;
+    emit_log(INGEST, PROBE_SERVICE, &body, &trace, 9).await?;
     let (alert, waited) = wait_for_alert(
         &api,
-        "kind=new&service=checkout&since=1h",
+        &format!("kind=new&service={PROBE_SERVICE}&since=1h"),
         flipped,
         NEW_TEMPLATE_TIMEOUT,
-        |a| s(a, "template").starts_with(&word),
+        |a| s(a, "template") == body,
     )
     .await?;
     println!(
