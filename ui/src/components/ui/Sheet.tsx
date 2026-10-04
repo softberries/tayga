@@ -1,38 +1,14 @@
 import { Dialog as D } from 'radix-ui'
 import { X } from 'lucide-react'
 import { AnimatePresence, m } from 'motion/react'
-import { useCallback, useRef, useState } from 'react'
-import type { KeyboardEvent, PointerEvent, ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { cx } from '../../lib/cx'
+import { useResizableWidth } from './useResizableWidth'
 
 export const SHEET_MIN = 360
-const SHEET_STEP = 32
 
 function maxWidth(): number {
   return Math.max(SHEET_MIN, Math.round(window.innerWidth * 0.9))
-}
-
-function clamp(w: number): number {
-  return Math.min(maxWidth(), Math.max(SHEET_MIN, Math.round(w)))
-}
-
-function readWidth(key: string | undefined, fallback: number): number {
-  if (!key) return fallback
-  try {
-    const v = Number(window.localStorage.getItem(key))
-    return Number.isFinite(v) && v > 0 ? v : fallback
-  } catch {
-    return fallback
-  }
-}
-
-function writeWidth(key: string | undefined, w: number): void {
-  if (!key) return
-  try {
-    window.localStorage.setItem(key, String(w))
-  } catch {
-    // Storage blocked: the width lasts for this page only.
-  }
 }
 
 export interface SheetProps {
@@ -70,43 +46,7 @@ export function Sheet({
   onCloseAutoFocus,
   className,
 }: SheetProps) {
-  const [width, setWidth] = useState(() => readWidth(storageKey, defaultWidth))
-  const drag = useRef<{ x: number; w: number } | null>(null)
-
-  const commit = useCallback(
-    (w: number) => {
-      const c = clamp(w)
-      setWidth(c)
-      writeWidth(storageKey, c)
-    },
-    [storageKey],
-  )
-
-  const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
-    e.preventDefault()
-    e.currentTarget.setPointerCapture(e.pointerId)
-    drag.current = { x: e.clientX, w: width }
-  }
-  const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
-    if (!drag.current) return
-    // The sheet is anchored right, so dragging left (smaller x) widens it.
-    setWidth(clamp(drag.current.w + (drag.current.x - e.clientX)))
-  }
-  const onPointerUp = (e: PointerEvent<HTMLDivElement>) => {
-    if (!drag.current) return
-    drag.current = null
-    e.currentTarget.releasePointerCapture(e.pointerId)
-    commit(width)
-  }
-  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    const step = e.shiftKey ? SHEET_STEP * 4 : SHEET_STEP
-    if (e.key === 'ArrowLeft') commit(width + step)
-    else if (e.key === 'ArrowRight') commit(width - step)
-    else if (e.key === 'Home') commit(maxWidth())
-    else if (e.key === 'End') commit(SHEET_MIN)
-    else return
-    e.preventDefault()
-  }
+  const { width, handleProps } = useResizableWidth({ defaultWidth, min: SHEET_MIN, max: maxWidth, storageKey })
 
   return (
     <D.Root open={open} onOpenChange={onOpenChange} modal={modal}>
@@ -143,18 +83,8 @@ export function Sheet({
                 transition={{ type: 'tween', duration: 0.22, ease: [0.2, 0.8, 0.2, 1] }}
               >
                 <div
-                  role="separator"
-                  aria-orientation="vertical"
+                  {...handleProps}
                   aria-label="Resize panel"
-                  aria-valuemin={SHEET_MIN}
-                  aria-valuemax={maxWidth()}
-                  aria-valuenow={width}
-                  tabIndex={0}
-                  onPointerDown={onPointerDown}
-                  onPointerMove={onPointerMove}
-                  onPointerUp={onPointerUp}
-                  onPointerCancel={onPointerUp}
-                  onKeyDown={onKeyDown}
                   className="absolute inset-y-0 -left-1 w-2 cursor-col-resize touch-none after:absolute after:inset-y-0 after:left-[3px] after:w-0.5 after:bg-transparent hover:after:bg-accent focus-visible:after:bg-accent"
                 />
                 <header className="flex items-start gap-3 border-b border-line px-5 py-4">
