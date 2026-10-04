@@ -19,14 +19,15 @@ export function traceQuery(search: TracesSearch, since: Since) {
 }
 
 /**
- * Error traces are red; traces the pipeline made a story of without an error are slow
- * stories (a story is either an error or a slow one); the rest use the accent.
+ * Error traces and traces with an error story are red (an error story can sit on a trace
+ * whose summary is not an error); traces with a slow story use the slow tone; the rest the
+ * accent.
  */
 export type TraceTone = 'err' | 'slow' | 'accent'
 
 export function toneOf(t: TraceHit): TraceTone {
-  if (t.is_error) return 'err'
-  return t.story_id ? 'slow' : 'accent'
+  if (t.is_error || t.story_kind === 'error') return 'err'
+  return t.story_kind === 'slow' ? 'slow' : 'accent'
 }
 
 /**
@@ -94,4 +95,11 @@ export function barFraction(ms: number, lo: number, hi: number, log: boolean): n
     f = v / hi
   }
   return Math.min(1, Math.max(MIN, f))
+}
+
+/** Axis labels with a unit: ms below 1 s, else seconds ("0.01 ms", "250 ms", "1.5 s"). */
+export function axisMs(v: number): string {
+  if (v === 0) return '0'
+  if (v >= 1000) return `${Number((v / 1000).toPrecision(3))} s`
+  return `${Number(v.toPrecision(v >= 1 ? 3 : 1))} ms`
 }

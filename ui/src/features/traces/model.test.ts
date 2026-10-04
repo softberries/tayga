@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { apiUrl } from '../../api/client'
 import type { TraceHit } from '../../api/types'
-import { MS_FLOOR, TRACE_LIMIT, barFraction, plotMs, rowsInRect, sortRows, toneOf, traceQuery } from './model'
+import { MS_FLOOR, TRACE_LIMIT, axisMs, barFraction, plotMs, rowsInRect, sortRows, toneOf, traceQuery } from './model'
 
 const hit = (o: Partial<TraceHit>): TraceHit => ({
   trace_id: 'a'.repeat(32),
@@ -12,6 +12,7 @@ const hit = (o: Partial<TraceHit>): TraceHit => ({
   is_error: false,
   span_count: 3,
   story_id: null,
+  story_kind: null,
   ...o,
 })
 
@@ -53,9 +54,13 @@ describe('brush filter', () => {
 })
 
 describe('tones, sorting and bars', () => {
-  it('errors win over stories; a story without an error is a slow one', () => {
-    expect(toneOf(hit({ is_error: true, story_id: 'b'.repeat(32) }))).toBe('err')
-    expect(toneOf(hit({ story_id: 'b'.repeat(32) }))).toBe('slow')
+  it('colors by error flag and story kind', () => {
+    const story = 'b'.repeat(32)
+    expect(toneOf(hit({ is_error: true }))).toBe('err')
+    // An error story on a trace whose summary is not an error is still an error.
+    expect(toneOf(hit({ story_id: story, story_kind: 'error' }))).toBe('err')
+    expect(toneOf(hit({ story_id: story, story_kind: 'slow' }))).toBe('slow')
+    expect(toneOf(hit({ is_error: true, story_id: story, story_kind: 'slow' }))).toBe('err')
     expect(toneOf(hit({}))).toBe('accent')
   })
   it('sorts by a column with newest-first ties', () => {
@@ -73,5 +78,21 @@ describe('tones, sorting and bars', () => {
     expect(barFraction(10, 1, 100, true)).toBe(0.5)
     expect(barFraction(0, 1, 100, false)).toBe(0.02)
     expect(barFraction(5, 5, 5, true)).toBe(1)
+  })
+})
+
+describe('axisMs', () => {
+  it('labels every tick with a unit', () => {
+    expect([0, 0.01, 0.1, 1, 100, 250, 1000, 1500, 10_000].map(axisMs)).toEqual([
+      '0',
+      '0.01 ms',
+      '0.1 ms',
+      '1 ms',
+      '100 ms',
+      '250 ms',
+      '1 s',
+      '1.5 s',
+      '10 s',
+    ])
   })
 })

@@ -22,24 +22,19 @@ import { ErrorBanner } from '../../features/stories/ErrorBanner'
 import { SINCE_SECS } from '../../features/stories/model'
 import { TraceFilters } from '../../features/traces/TraceFilters'
 import { TraceTable } from '../../features/traces/TraceTable'
-import { TRACE_LIMIT, plotMs, plotTime, rowsInRect, toneOf, traceQuery } from '../../features/traces/model'
+import { TRACE_LIMIT, axisMs, plotMs, plotTime, rowsInRect, toneOf, traceQuery } from '../../features/traces/model'
 import type { Sort } from '../../features/traces/model'
 import { cx } from '../../lib/cx'
 import { dateTime, duration } from '../../lib/format'
 import { NARROW_QUERY, useMediaQuery } from '../../lib/useMediaQuery'
 
-const NAMES: Record<ScatterTone, string> = { accent: 'Traces', slow: 'Slow stories', err: 'Errors' }
+/** Error: the trace failed or has an error story. Slow: it has a slow story. */
+const NAMES: Record<ScatterTone, string> = { accent: 'Other traces', slow: 'Slow stories', err: 'Errors and error stories' }
 const DOT: Record<ScatterTone, string> = { accent: 'bg-accent', slow: 'bg-slow', err: 'bg-err' }
 const SCALE = [
   { value: 'linear', label: 'Linear' },
   { value: 'log', label: 'Log' },
 ] as const
-
-/** Axis labels: whole ms below 1 s, else seconds ("250", "1.5 s"). */
-function axisMs(v: number): string {
-  if (v >= 1000) return `${Number((v / 1000).toPrecision(3))} s`
-  return v >= 1 || v === 0 ? String(Number(v.toPrecision(3))) : String(Number(v.toPrecision(1)))
-}
 
 function Legend({ counts }: { counts: Record<ScatterTone, number> }) {
   return (
@@ -89,6 +84,8 @@ export function TracesExplorer() {
       void navigate({ search: (prev) => ({ ...prev, ...patch }), replace: true, resetScroll: false }),
     [navigate],
   )
+  // A filter change replaces the plotted traces, so a brushed region no longer means anything.
+  const onFilter = useCallback((patch: Partial<TracesSearch>) => onSearch({ ...patch, sel: undefined }), [onSearch])
 
   const rows: readonly TraceHit[] = useMemo(() => traces.data ?? [], [traces.data])
   const rect = useMemo(() => parseRect(search.sel), [search.sel])
@@ -110,6 +107,14 @@ export function TracesExplorer() {
     for (const t of rows) m.set(t.endpoint_name, (m.get(t.endpoint_name) ?? 0) + 1)
     return m
   }, [rows])
+  // The endpoint list of each service as last seen without an endpoint filter, so with one
+  // endpoint picked the picker still offers the others.
+  const serviceKey = search.service ?? ''
+  const [known, setKnown] = useState<ReadonlyMap<string, { data: unknown; endpoints: ReadonlyMap<string, number> }>>(new Map())
+  if (!search.endpoint && traces.data && !traces.isPlaceholderData && known.get(serviceKey)?.data !== traces.data) {
+    setKnown(new Map(known).set(serviceKey, { data: traces.data, endpoints }))
+  }
+  const endpointOptions = (search.endpoint ? known.get(serviceKey)?.endpoints : undefined) ?? endpoints
 
   const capped = rows.length >= TRACE_LIMIT
   const now = traces.dataUpdatedAt
@@ -120,7 +125,9 @@ export function TracesExplorer() {
   )
 
   const onSelect = useCallback(
-    (r: XYRect | null) => onSearch({ sel: r ? formatRect({ t0: r.x[0], t1: r.x[1], d0: r.y[0], d1: r.y[1] }) : undefined }),
+    // Durations are never negative: a box dragged below the axis starts at 0.
+    (r: XYRect | null) =>
+      onSearch({ sel: r ? formatRect({ t0: r.x[0], t1: r.x[1], d0: Math.max(0, r.y[0]), d1: Math.max(0, r.y[1]) }) : undefined }),
     [onSearch],
   )
   const onPointClick = useCallback(
@@ -134,7 +141,7 @@ export function TracesExplorer() {
       return {
         title: `${t.endpoint_service} · ${t.endpoint_name}`,
         lines: [
-          `${duration(t.duration_ns)} · ${t.span_count} spans${t.is_error ? ' · error' : ''}`,
+          `${duration(t.duration_ns)} · ${t.span_count} spans${t.is_error ? ' · error' : ''}${t.story_kind ? ` · ${t.story_kind} story` : ''}`,
           dateTime(t.ts_ns),
           'Click to open the trace',
         ],
@@ -153,7 +160,7 @@ export function TracesExplorer() {
       hi = Math.max(hi, t.duration_ns)
     }
     return (
-      `Duration over time of ${rows.length} traces in the last ${since}: ${counts.err} errors, ${counts.slow} slow stories; ` +
+      `Duration over time of ${rows.length} traces in the last ${since}: ${counts.err} with errors or error stories, ${counts.slow} with slow stories; ` +
       `durations from ${duration(lo)} to ${duration(hi)}.` +
       (rect ? ` ${selected.length} selected between ${duration(rect.d0 * 1e6)} and ${duration(rect.d1 * 1e6)}.` : '')
     )
@@ -169,8 +176,8 @@ export function TracesExplorer() {
           search={search}
           since={since}
           services={services.data ?? []}
-          endpoints={endpoints}
-          onSearch={onSearch}
+          endpoints={endpointOptions}
+          onSearch={onFilter}
         />
       </Card>
 
@@ -210,7 +217,7 @@ export function TracesExplorer() {
               filtered ? (
                 <Button
                   size="sm"
-                  onClick={() => onSearch({ service: undefined, endpoint: undefined, min_ms: undefined, max_ms: undefined, errors: undefined, sel: undefined })}
+                  onClick={() => onFilter({ service: undefined, endpoint: undefined, min_ms: undefined, max_ms: undefined, errors: undefined })}
                 >
                   Clear filters
                 </Button>

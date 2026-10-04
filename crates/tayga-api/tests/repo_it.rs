@@ -720,7 +720,8 @@ async fn reads_seeded_overview_traces_services_and_search() {
     assert_eq!(hits.len(), 2, "old trace outside the window");
     assert_eq!(hits[0].trace_id, t2, "newest first");
     assert_eq!(hits[1].story_id.as_deref(), Some(t1.as_str()));
-    assert!(hits[0].story_id.is_none() && hits[1].is_error);
+    assert_eq!(hits[1].story_kind.as_deref(), Some("error"));
+    assert!(hits[0].story_id.is_none() && hits[0].story_kind.is_none() && hits[1].is_error);
     assert_eq!(hits[1].duration_ns, 5_000_000);
     assert_eq!(
         ids(r
@@ -807,6 +808,35 @@ async fn reads_seeded_overview_traces_services_and_search() {
             .await
             .unwrap()),
         [t1.as_str()]
+    );
+    // A slow story's trace (not an error) reports kind "slow".
+    store
+        .insert_rows(
+            "trace_summaries",
+            &[summary(
+                &slow_id,
+                now - 40 * sec,
+                "slowsvc",
+                "GET /slow",
+                900,
+                false,
+            )],
+        )
+        .await
+        .unwrap();
+    let slow_hits = r
+        .traces_search(&TraceFilter {
+            endpoint: Some("GET /slow".into()),
+            ..tf.clone()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        slow_hits
+            .iter()
+            .map(|h| (h.story_id.as_deref(), h.story_kind.as_deref(), h.is_error))
+            .collect::<Vec<_>>(),
+        [(Some(slow_id.as_str()), Some("slow"), false)]
     );
 
     // Extended trace.

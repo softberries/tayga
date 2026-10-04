@@ -250,6 +250,31 @@ impl ChRepo {
             .collect())
     }
 
+    /// The stories among `trace_ids` (story_id equals trace_id), mapped to their kind.
+    async fn story_kinds_among<'a>(
+        &self,
+        trace_ids: impl Iterator<Item = &'a str>,
+    ) -> anyhow::Result<HashMap<String, String>> {
+        let mut traces: Vec<&str> = trace_ids.collect();
+        traces.sort_unstable();
+        traces.dedup();
+        if traces.is_empty() {
+            return Ok(HashMap::new());
+        }
+        Ok(self
+            .client
+            .query(
+                "SELECT story_id, toString(kind) AS kind FROM error_stories FINAL \
+                 WHERE story_id IN ?",
+            )
+            .bind(&traces)
+            .fetch_all::<StoryKindRow>()
+            .await?
+            .into_iter()
+            .map(|r| (r.story_id, r.kind))
+            .collect())
+    }
+
     /// Alerts newest first, resolving which example traces have an error story.
     async fn alerts(
         &self,
@@ -643,7 +668,7 @@ impl Repo for ChRepo {
             .fetch_all()
             .await?;
         let stories = self
-            .story_ids_among(rows.iter().map(|r| r.trace_id.as_str()))
+            .story_kinds_among(rows.iter().map(|r| r.trace_id.as_str()))
             .await?;
         Ok(rows
             .into_iter()

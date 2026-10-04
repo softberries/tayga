@@ -295,6 +295,8 @@ export const TraceHitSchema = z.strictObject({
   is_error: z.boolean(),
   span_count: int,
   story_id: z.nullable(str),
+  /** The story's kind when `story_id` is set; an error story can sit on a non-error trace. */
+  story_kind: z.nullable(StoryKindSchema),
 })
 
 export const RedPointSchema = z.strictObject({

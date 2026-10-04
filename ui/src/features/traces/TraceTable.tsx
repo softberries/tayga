@@ -5,6 +5,7 @@
 import { Link } from '@tanstack/react-router'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useMemo, useRef } from 'react'
+import type { KeyboardEvent } from 'react'
 import type { TraceHit } from '../../api/types'
 import { sinceSearch } from '../../app/search'
 import type { Since } from '../../app/search'
@@ -17,7 +18,9 @@ import { NARROW_QUERY, useMediaQuery } from '../../lib/useMediaQuery'
 import { barFraction, plotMs, sortRows, toneOf } from './model'
 import type { Sort, SortKey } from './model'
 
-const COLS = '112px minmax(0, 1fr) minmax(150px, 240px) 52px 56px 56px'
+const COLS = '112px minmax(0, 1fr) minmax(150px, 240px) 52px 56px 76px'
+/** Header row height: the sticky header sits inside the scroller, above the rows. */
+const HEADER_H = 34
 const AREAS = '"start ep dur spans err story"'
 /** Phones: the endpoint on its own line, then start, duration and the story link. */
 const NARROW_COLS = 'auto minmax(0, 1fr) auto'
@@ -56,6 +59,7 @@ export function TraceTable({ rows, extent, logY, since, sort, onSort, height = 5
 
   const narrow = useMediaQuery(NARROW_QUERY)
   const rowHeight = narrow ? 58 : 38
+  // The scroller holds the sticky header too; rows start below it.
   const scrollRef = useRef<HTMLDivElement>(null)
   // No React Compiler in this build; the virtualizer's unstable functions are fine here.
   // eslint-disable-next-line react-hooks/incompatible-library
@@ -65,8 +69,23 @@ export function TraceTable({ rows, extent, logY, since, sort, onSort, height = 5
     // Fixed row heights (one line, or two on phones): no per-row measuring.
     estimateSize: () => rowHeight,
     overscan: 12,
+    scrollMargin: HEADER_H,
     getItemKey: (i) => sorted[i]!.trace_id,
   })
+
+  // Keyboard scrolling for the focusable scroller: rows outside the viewport are not mounted,
+  // so Home/End/PageUp/PageDown move the virtualizer, which mounts the rows there.
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    const el = scrollRef.current
+    if (!el || sorted.length === 0) return
+    const page = Math.max(rowHeight, el.clientHeight - HEADER_H - rowHeight)
+    if (e.key === 'Home') virt.scrollToIndex(0, { align: 'start' })
+    else if (e.key === 'End') virt.scrollToIndex(sorted.length - 1, { align: 'end' })
+    else if (e.key === 'PageDown') virt.scrollToOffset(el.scrollTop + page)
+    else if (e.key === 'PageUp') virt.scrollToOffset(Math.max(0, el.scrollTop - page))
+    else return
+    e.preventDefault()
+  }
 
   const header = (key: SortKey, label: string, className?: string) => (
     <SortHeader
@@ -80,16 +99,22 @@ export function TraceTable({ rows, extent, logY, since, sort, onSort, height = 5
   )
 
   return (
+    <div
+      ref={scrollRef}
+      role="region"
+      aria-label="Trace results"
+      tabIndex={0}
+      onKeyDown={onKeyDown}
+      className="relative overflow-y-auto overscroll-contain [scrollbar-gutter:stable] focus-visible:-outline-offset-2"
+      style={{ maxHeight: height }}
+    >
     <div role="table" aria-label="Traces" aria-rowcount={sorted.length + 1}>
-      <div role="rowgroup">
+      <div role="rowgroup" className="sticky top-0 z-10 bg-panel">
         <div
           role="row"
           aria-rowindex={1}
-          className={cx(
-            'grid items-center gap-3 border-b border-line px-4 py-2 [scrollbar-gutter:stable]',
-            narrow && 'grid-cols-3',
-          )}
-          style={narrow ? undefined : { gridTemplateColumns: COLS, gridTemplateAreas: AREAS }}
+          className={cx('grid items-center gap-3 border-b border-line px-4', narrow && 'grid-cols-3')}
+          style={{ height: HEADER_H, ...(narrow ? {} : { gridTemplateColumns: COLS, gridTemplateAreas: AREAS }) }}
         >
           {header('start', 'Start')}
           {header('endpoint', 'Endpoint')}
@@ -107,13 +132,7 @@ export function TraceTable({ rows, extent, logY, since, sort, onSort, height = 5
           )}
         </div>
       </div>
-      <div
-        ref={scrollRef}
-        role="rowgroup"
-        className="relative overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
-        style={{ maxHeight: height }}
-      >
-        <div className="relative" style={{ height: virt.getTotalSize() }}>
+      <div role="rowgroup" className="relative" style={{ height: virt.getTotalSize() }}>
           {virt.getVirtualItems().map((vi) => {
             const t = sorted[vi.index]!
             const tone = toneOf(t)
@@ -132,7 +151,7 @@ export function TraceTable({ rows, extent, logY, since, sort, onSort, height = 5
                   gridTemplateColumns: narrow ? NARROW_COLS : COLS,
                   gridTemplateAreas: narrow ? NARROW_AREAS : AREAS,
                   height: rowHeight,
-                  transform: `translateY(${vi.start}px)`,
+                  transform: `translateY(${vi.start - HEADER_H}px)`,
                 }}
               >
                 <span role="cell" style={{ gridArea: 'start' }} className="tabular font-mono text-[11.5px] text-muted" title={dateTime(t.ts_ns)}>
@@ -174,10 +193,10 @@ export function TraceTable({ rows, extent, logY, since, sort, onSort, height = 5
                       to="/stories/$storyId"
                       params={{ storyId: t.story_id }}
                       search={sinceSearch(since)}
-                      className="text-xs text-accent hover:underline"
-                      aria-label={`Story of trace ${t.trace_id}`}
+                      aria-label={`${t.story_kind ?? 'Story'} story of trace ${t.trace_id}`}
+                      className={cx('text-xs hover:underline', t.story_kind === 'error' ? 'text-err' : t.story_kind === 'slow' ? 'text-slow' : 'text-accent')}
                     >
-                      story
+                      {t.story_kind ? `${t.story_kind} story` : 'story'}
                     </Link>
                   ) : (
                     <span className="sr-only">no story</span>

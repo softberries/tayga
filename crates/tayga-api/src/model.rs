@@ -1,7 +1,7 @@
 //! API rows (ClickHouse result shapes, field names = SQL aliases) and response views.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
 pub struct StoryGroupRow {
@@ -604,12 +604,25 @@ pub struct TraceHitView {
     pub span_count: u32,
     /// Set when a story exists for the trace (story_id equals trace_id).
     pub story_id: Option<String>,
+    /// The story's kind, `"error"` or `"slow"`, when `story_id` is set. An error story can
+    /// exist for a trace whose `is_error` is false (the failure was caught downstream).
+    pub story_kind: Option<String>,
+}
+
+/// A story id with its kind, for resolving which traces have a story and of what kind.
+#[derive(Debug, Clone, PartialEq, clickhouse::Row, Deserialize)]
+pub struct StoryKindRow {
+    pub story_id: String,
+    pub kind: String,
 }
 
 impl TraceHitView {
-    pub fn from_row(r: TraceHitRow, stories: &HashSet<String>) -> Self {
+    /// `stories` maps story id (equal to its trace id) to the story kind.
+    pub fn from_row(r: TraceHitRow, stories: &HashMap<String, String>) -> Self {
+        let kind = stories.get(&r.trace_id).cloned();
         Self {
-            story_id: stories.contains(&r.trace_id).then(|| r.trace_id.clone()),
+            story_id: kind.as_ref().map(|_| r.trace_id.clone()),
+            story_kind: kind,
             trace_id: r.trace_id,
             ts_ns: r.ts_ns,
             endpoint_service: r.endpoint_service,
@@ -839,6 +852,37 @@ pub(crate) mod tests {
         assert!(v.active);
         assert_eq!(v.example_traces[0].story_id, None);
         assert_eq!(v.example_traces[1].story_id.as_deref(), Some("y"));
+    }
+
+    #[test]
+    fn trace_hit_story_kind() {
+        let row = |id: &str, err: u8| TraceHitRow {
+            trace_id: id.into(),
+            ts_ns: 1,
+            endpoint_service: "frontend".into(),
+            endpoint_name: "GET /".into(),
+            duration_ns: 2,
+            is_error: err,
+            span_count: 3,
+        };
+        let stories: HashMap<String, String> = [
+            ("e".to_string(), "error".to_string()),
+            ("s".to_string(), "slow".to_string()),
+        ]
+        .into();
+        // An error story on a trace whose summary is not an error keeps its kind.
+        let e = TraceHitView::from_row(row("e", 0), &stories);
+        assert_eq!(
+            (e.story_id.as_deref(), e.story_kind.as_deref(), e.is_error),
+            (Some("e"), Some("error"), false)
+        );
+        let s = TraceHitView::from_row(row("s", 0), &stories);
+        assert_eq!(
+            (s.story_id.as_deref(), s.story_kind.as_deref()),
+            (Some("s"), Some("slow"))
+        );
+        let n = TraceHitView::from_row(row("n", 1), &stories);
+        assert_eq!((n.story_id, n.story_kind, n.is_error), (None, None, true));
     }
 
     #[test]

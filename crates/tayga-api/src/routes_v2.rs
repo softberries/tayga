@@ -499,9 +499,17 @@ mod tests {
             is_error: true,
             span_count: 4,
             story_id: Some("ab".repeat(16)),
+            story_kind: Some("error".into()),
+        };
+        let unstoried = TraceHitView {
+            trace_id: "cd".repeat(16),
+            is_error: false,
+            story_id: None,
+            story_kind: None,
+            ..hit.clone()
         };
         let repo = Arc::new(FakeRepo {
-            trace_hits: vec![hit],
+            trace_hits: vec![hit, unstoried],
             ..Default::default()
         });
         let app = App {
@@ -519,6 +527,11 @@ mod tests {
         assert_eq!(json[0]["trace_id"], "ab".repeat(16));
         assert_eq!(json[0]["is_error"], true);
         assert_eq!(json[0]["story_id"], "ab".repeat(16));
+        assert_eq!(json[0]["story_kind"], "error");
+        // No story: both fields are present as null.
+        assert_eq!(json[1]["story_id"], serde_json::Value::Null);
+        assert_eq!(json[1]["story_kind"], serde_json::Value::Null);
+        assert!(json[1].as_object().unwrap().contains_key("story_kind"));
         assert_eq!(
             repo.last_trace_filter.lock().unwrap().clone(),
             Some(TraceFilter {

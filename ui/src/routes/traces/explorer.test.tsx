@@ -48,6 +48,7 @@ const bodyRows = async () => {
   const table = await screen.findByRole('table', { name: 'Traces' })
   return within(table).getAllByRole('row').slice(1)
 }
+const escapeRe = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const searchCalls = (fetch: ReturnType<typeof stubApi>) =>
   fetch.mock.calls.map((c) => String(c[0])).filter((u) => u.startsWith('/api/v1/traces/search'))
 
@@ -58,13 +59,16 @@ describe('traces explorer', () => {
     expect(await bodyRows()).toHaveLength(rows.length)
     expect(searchCalls(fetch)[0]).toBe('/api/v1/traces/search?since=1h&limit=500')
     const withStory = rows.find((r) => r.story_id)!
-    expect(screen.getByRole('link', { name: `Story of trace ${withStory.trace_id}` })).toHaveAttribute('href', `/stories/${withStory.story_id}`)
+    expect(screen.getByRole('link', { name: `${withStory.story_kind} story of trace ${withStory.trace_id}` })).toHaveAttribute(
+      'href',
+      `/stories/${withStory.story_id}`,
+    )
     const first = (await bodyRows())[0] as HTMLElement
     expect(first).toHaveAttribute('data-trace-id', rows[0]!.trace_id)
     expect(within(first).getByRole('link')).toHaveAttribute('href', `/traces/${rows[0]!.trace_id}`)
     expect(screen.getByText(`${rows.length} traces`)).toBeInTheDocument()
     // The chart's text summary.
-    expect(screen.getByText(new RegExp(`^Duration over time of ${rows.length} traces in the last 1h: 1 errors`))).toBeInTheDocument()
+    expect(screen.getByText(new RegExp(`^Duration over time of ${rows.length} traces in the last 1h: 1 with errors or error stories, 0 with slow stories`))).toBeInTheDocument()
   })
 
   it('filters build the URL and the API query string', async () => {
@@ -132,6 +136,87 @@ describe('traces explorer', () => {
     await user.click(screen.getByRole('button', { name: 'Clear selection' }))
     await waitFor(() => expect(router.state.location.search).not.toHaveProperty('sel'))
     expect(await bodyRows()).toHaveLength(rows.length)
+  })
+
+  it('a brush below the axis starts at 0 ms; changing a filter clears the selection', async () => {
+    const user = userEvent.setup()
+    stubApi(routes())
+    const { router } = renderApp('/traces')
+    await bodyRows()
+    await waitFor(() => expect(chart?.onEvents?.brushEnd).toBeDefined())
+    act(() => chart!.onEvents!.brushEnd!({ type: 'brushEnd', areas: [{ brushType: 'rect', coordRange: [[1, 2], [-40, 60]] }] }))
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ sel: '1_2_0_60' }))
+    await user.click(screen.getByRole('button', { name: 'Errors only' }))
+    await waitFor(() => expect(router.state.location.search).toEqual({ errors: true }))
+  })
+
+  it("with an endpoint picked, the picker still offers the service's other endpoints", async () => {
+    const user = userEvent.setup()
+    stubApi(routes())
+    const { router } = renderApp('/traces')
+    await bodyRows()
+    const names = [...new Set(rows.map((r) => r.endpoint_name))]
+    expect(names.length).toBeGreaterThan(2)
+    const option = (name: string) => screen.getByRole('option', { name: new RegExp(`^${escapeRe(name)}\\d+$`) })
+    // From now on the API answers with the first endpoint's rows only.
+    stubApi(routes({ '/traces/search': { body: rows.filter((r) => r.endpoint_name === names[0]) } }))
+    await user.click(screen.getByRole('button', { name: 'Endpoint: any' }))
+    await user.click(await waitFor(() => option(names[0]!)))
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ endpoint: names[0] }))
+    await waitFor(async () => expect(await bodyRows()).toHaveLength(rows.filter((r) => r.endpoint_name === names[0]).length))
+    await waitFor(() => expect(screen.getByRole('button', { name: `Endpoint: ${names[0]}` })).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: `Endpoint: ${names[0]}` }))
+    const options = await screen.findAllByRole('option')
+    expect(options.length).toBe(names.length + 1)
+    await user.click(option(names[1]!))
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ endpoint: names[1] }))
+  })
+
+  it('the results scroller is keyboard reachable and End mounts the last row', async () => {
+    const user = userEvent.setup()
+    // jsdom has no element scrolling: emulate scrollTo the way browsers do.
+    const proto = Element.prototype as unknown as { scrollTo?: unknown }
+    const had = proto.scrollTo
+    proto.scrollTo = function (this: HTMLElement, o: { top?: number }) {
+      this.scrollTop = o.top ?? 0
+      this.dispatchEvent(new Event('scroll'))
+    }
+    try {
+      const many: TraceHit[] = Array.from({ length: 300 }, (_, i) => ({
+        ...rows[0]!,
+        trace_id: i.toString(16).padStart(32, '0'),
+        ts_ns: rows[0]!.ts_ns - i * 1e9,
+      }))
+      stubApi(routes({ '/traces/search': { body: many } }))
+      renderApp('/traces')
+      const region = await screen.findByRole('region', { name: 'Trace results' })
+      expect(region).toHaveAttribute('tabindex', '0')
+      let top = 0
+      Object.defineProperty(region, 'scrollTop', { configurable: true, get: () => top, set: (v: number) => (top = v) })
+      // The virtualizer clamps scrolling to scrollHeight - clientHeight (4000, stubbed above).
+      Object.defineProperty(region, 'scrollHeight', { configurable: true, get: () => 34 + many.length * 38 })
+      const last = many.at(-1)!.trace_id
+      expect(document.querySelector(`[data-trace-id="${last}"]`)).toBeNull()
+      // Tab order reaches the scroller (after the header, filters and chart controls).
+      for (let i = 0; i < 40 && document.activeElement !== region; i++) await user.tab()
+      expect(region).toHaveFocus()
+      await user.keyboard('{End}')
+      const row = await waitFor(() => {
+        const el = document.querySelector<HTMLElement>(`[data-trace-id="${last}"]`)
+        expect(el).not.toBeNull()
+        return el!
+      })
+      const link = within(row).getByRole('link')
+      expect(link).toHaveAttribute('href', `/traces/${last}`)
+      act(() => link.focus())
+      expect(link).toHaveFocus()
+      await user.keyboard('{Home}')
+      await waitFor(() => expect(document.querySelector(`[data-trace-id="${many[0]!.trace_id}"]`)).not.toBeNull())
+      await user.keyboard('{PageDown}')
+      await waitFor(() => expect(region.scrollTop).toBeGreaterThan(0))
+    } finally {
+      proto.scrollTo = had
+    }
   })
 
   it('a selection with no points says so', async () => {

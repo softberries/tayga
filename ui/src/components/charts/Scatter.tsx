@@ -110,6 +110,8 @@ export function Scatter({
       tooltip: {
         trigger: 'item',
         confine: true,
+        // Long endpoint names wrap: a nowrap tooltip wider than a phone's chart overflows the page.
+        extraCssText: 'max-width: min(320px, 80vw); white-space: normal; overflow-wrap: anywhere;',
         formatter: (p: { data?: { id?: string } }) => {
           const id = p.data?.id
           if (!id) return ''
