@@ -23,12 +23,18 @@
 <h3>Compared with normal</h3>
 <ul>{% for d in diff_lines %}<li>{{ d }}</li>{% endfor %}</ul>
 {% endif %}
-<h3>Logs</h3>
-{% if logs.is_empty() %}<div class="empty">No logs attached to this trace.</div>{% else %}
+<h3 id="logs">Logs</h3>
+<p class="muted">{{ log_total }} log{% if log_total != 1 %}s{% endif %} linked to this trace · {{ trace_span_count }} span{% if trace_span_count != 1 %}s{% endif %} in {{ trace_service_count }} service{% if trace_service_count != 1 %}s{% endif %}{% if !log_filter.is_empty() %} · showing {{ log_filter }} only{% endif %}</p>
+{% if log_total > 0 %}
+<nav class="chips" aria-label="Filter logs by service">
+{% for c in log_chips %}<a class="chip{% if c.active %} on{% endif %}" href="{{ c.href }}">{{ c.label }} <span class="n">{{ c.count }}</span></a>{% endfor %}
+</nav>
+{% endif %}
+{% if logs.is_empty() %}<div class="empty">{% if log_total == 0 %}No logs are linked to this trace. Services only appear here when they log with the trace context.{% else %}No logs from {{ log_filter }} in this trace.{% endif %}</div>{% else %}
 <table>
-<tr><th>Time</th><th>Service</th><th>Severity</th><th>Body</th></tr>
+<tr><th style="width:110px">Time (UTC)</th><th>Service</th><th>Span</th><th>Severity</th><th>Body</th></tr>
 {% for l in logs %}
-<tr><td class="muted">{{ l.time }}</td><td>{{ l.service }}</td><td>{{ l.severity }}</td><td class="mono">{{ l.body }}</td></tr>
+<tr><td class="muted mono">{{ l.time }}</td><td>{{ l.service }}</td><td class="muted">{{ l.span }}</td><td>{{ l.severity }}</td><td class="mono">{{ l.body }}</td></tr>
 {% endfor %}
 </table>
 {% endif %}
