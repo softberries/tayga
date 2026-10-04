@@ -9,7 +9,7 @@ import {
   redirect,
   retainSearchParams,
 } from '@tanstack/react-router'
-import { HEX32, U64, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch } from './app/search'
+import { HEX32, U64, validateHomeSearch, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch } from './app/search'
 import type { RootSearch } from './app/search'
 import { AppShell } from './components/shell/AppShell'
 import { NotFound } from './pages/NotFound'
@@ -45,7 +45,8 @@ const storiesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
   staticData: { crumb: 'Stories' },
-  component: page('StoriesPage'),
+  validateSearch: validateHomeSearch,
+  component: lazyRouteComponent(() => import('./routes/stories/index'), 'StoriesHome'),
 })
 
 const storyRoute = createRoute({

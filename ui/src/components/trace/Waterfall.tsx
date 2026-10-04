@@ -73,7 +73,7 @@ const COMPACT_MAX_INDENT = 6
 const COMPACT_ROW_H = 25
 const COLS = 'minmax(240px, 32%) minmax(0, 1fr) 64px'
 const NARROW_COLS = 'minmax(140px, 42%) minmax(0, 1fr) 56px'
-const COMPACT_COLS = '170px minmax(0, 1fr) 52px'
+const COMPACT_COLS = 'minmax(110px, 40%) minmax(0, 1fr) 52px'
 const FILTERS = [
   { value: 'all', label: 'All spans' },
   { value: 'errors', label: 'Errors' },

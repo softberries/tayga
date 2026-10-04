@@ -1,9 +1,6 @@
 /** Route components loaded lazily per route; each is replaced by its own task. */
 import { Placeholder } from './Placeholder'
 
-export function StoriesPage() {
-  return <Placeholder title="Stories" task="Task 6" />
-}
 export function TracesPage() {
   return <Placeholder title="Traces explorer" task="Task 8" />
 }
