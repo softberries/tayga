@@ -66,10 +66,10 @@ Every 60 seconds the logminer runs two rules over `log_template_hits`:
 
 | Rule | Fires when | Default |
 |---|---|---|
-| New template | the template's first log is within the last 10 minutes, its service already has a template at least `new_template_warmup_min` old (so a fresh install or new service does not flood), and it is not `<overflow>`. One alert per template, ever | warmup 15 min |
+| New template | the template's first log is within the last 10 minutes (fixed, not configurable), its service already has a template at least `new_template_warmup_min` old (so a fresh install or new service does not flood), and it is not `<overflow>`. One alert per template, ever | warmup 15 min |
 | Rate spike | the count in the last `spike_window_min` is at least `spike_min_count` and at least `spike_factor` times the mean per-window count over the preceding `baseline_window_min` (floored at 1), and the template is older than window + baseline (65 min; younger ones are covered by the new-template rule) | window 5 min, baseline 60 min, factor 5, min count 10 |
 
-A spike alert stays active while it was last confirmed within `alert_active_min` (10) of now; a tick that still fires updates it, otherwise a new alert starts. Each alert carries up to 5 example trace ids (newest first) that link to the error story when one exists, else to Jaeger. All settings are `TAYGA__LOGMINER__*` environment variables (names in `crates/tayga-logminer/src/main.rs`). Other defaults: similarity threshold 0.5, at most 5,000 clusters per service (beyond that, unmatched logs go to the `<overflow>` template), flush at 5,000 logs or 1 s.
+A spike alert stays active while it was last confirmed within `alert_active_min` (10) of now; a tick that still fires updates it, otherwise a new alert starts. Each alert carries up to 5 example trace ids (newest first) that link to the error story when one exists, else to Jaeger. The other values are `TAYGA__LOGMINER__*` environment variables (keys in `LogminerSettings` in `crates/tayga-logminer/src/main.rs`). Other defaults: similarity threshold 0.5, at most 5,000 clusters per service (beyond that, unmatched logs go to the `<overflow>` template), flush at 5,000 logs or 1 s.
 
 Where to look:
 
@@ -151,7 +151,7 @@ Unknown routes return axum's plain 404.
 
 ## Verified
 
-Rows above the "Plan 4" marker were checked 2026-10-03 on branch `feat/plan-3-api-ui-e2e`; rows from "Plan 4" on were checked 2026-10-04 on branch `feat/plan-4-log-templates`. The stack was running for both.
+Rows above the `Plan 4` row were checked 2026-10-03 on branch `feat/plan-3-api-ui-e2e`; rows from the `Plan 4` row on were checked 2026-10-04 on branch `feat/plan-4-log-templates`. The stack was running for both.
 
 | Claim | How verified | Result |
 |---|---|---|
@@ -176,11 +176,10 @@ Rows above the "Plan 4" marker were checked 2026-10-03 on branch `feat/plan-3-ap
 | Architecture diagram | copied from spec section 3; services in `deploy/compose.tayga.yaml`; topic `tayga.signals` seen in the code and spec | topology matches compose services; topic names not checked against running Redpanda |
 | Crate list | `crates/*/Cargo.toml` | verified |
 | Performance, scale, or latency claims | none made | n/a |
-
-| **Plan 4: log templates and alerts** | | |
+| **Plan 4** | | |
 | Port 14318 = tayga-ingest OTLP/HTTP | `"127.0.0.1:14318:4318"` in `deploy/compose.tayga.yaml`; `emit-log` default endpoint in `crates/tayga-devtools/src/main.rs`; the e2e probe sends through it | verified in config; the e2e probe's 60 s alert (see below) is evidence it works |
 | `tayga-logminer` runs as one replica, metrics on 9100, scraped by Prometheus | service in `deploy/compose.tayga.yaml`; default `metrics_addr` in `crates/tayga-logminer/src/main.rs`; `deploy/prometheus/prometheus.yml`; live `docker ps` shows `tayga-logminer` Up; `/api/v1/targets` showed 6 jobs, all `up` (writer, ingest, logminer, assembler, api, redpanda) | verified |
-| Rule defaults (5 min window, 60 min baseline, factor 5, min count 10, warmup 15 min, active 10 min, new within 10 min, 65 min = baseline + window) | `DetectConfig::default` and `min_age` in `crates/tayga-drain/src/detect.rs`; logminer settings take the same values (`LogminerSettings::default` and its test) | verified in code; rule behavior verified by the e2e scenarios below |
+| Rule defaults (5 min window, 60 min baseline, factor 5, min count 10, warmup 15 min, active 10 min, new within 10 min, 65 min = baseline + window) | `DetectConfig::default` and `min_age` in `crates/tayga-drain/src/detect.rs`; logminer settings take the same values (`LogminerSettings::default` and its test) | verified in code; the e2e scenarios exercise one new-template and one spike case, not every threshold |
 | Drain defaults (similarity 0.5, depth 4, 100 children, 5,000 clusters per service, 64 tokens) | `DrainConfig::default` in `drain.rs`, `MAX_TOKENS` in `preprocess.rs` | verified in code |
 | Flush at 5,000 logs or 1 s, detect every 60 s, topic `tayga.alerts` | `LogminerSettings::default` | verified in code |
 | TTLs 3 d (hits) / 30 d (templates) / 7 d (alerts) | `TTL` lines in `crates/tayga-store/migrations/0004*` | verified in code |
@@ -188,8 +187,11 @@ Rows above the "Plan 4" marker were checked 2026-10-03 on branch `feat/plan-3-ap
 | `/alerts` and `/templates` return 200; `/api/v1/log-alerts?since=24h` | live `curl`: 200, 200; 8 alerts in the last 24 h | verified live 2026-10-04 |
 | About 60-120 templates | live `log_templates FINAL`: 293 rows in total (all ever mined, 30-day TTL), 72 with `last_seen` in the last hour; `/api/v1/log-templates?since=1h` returned 72 | verified live; the 60-120 range is the plan's estimate, the live hourly count (72) is inside it |
 | Golden Drain test: 64 templates on the 5,000-line sample, `frontend-proxy` 5, bound is 120 and 10 | `cargo test -p tayga-drain --test '*' -- --nocapture` printed `templates: 64 {... "frontend-proxy": 5 ...}`, 2 passed | verified |
-| Grafana dashboard `tayga-logs` titled "Tayga · Logs", with 5 panels; Pipeline health has 4 logminer panels | `curl -u admin:admin localhost:3001/api/dashboards/uid/...`: panel titles listed | verified live (rendering in a browser not checked) |
+| Grafana `tayga-logs` ("Tayga · Logs") has 5 panels: Log alerts by kind, Recent alerts, New templates per service, Top templates, Logs mined/s | `/api/dashboards/uid/tayga-logs`, 2026-10-04 | verified live (rendering in a browser not checked) |
+| `tayga-pipeline` has 12 panels, 4 of them logminer panels (logs mined/s, templates, cluster cap hits, detect p99) | `/api/dashboards/uid/tayga-pipeline`, 2026-10-04 | verified live |
+| Settings come from `TAYGA__SECTION__KEY` environment variables | `load_settings` in `crates/tayga-common/src/lib.rs:20-30` | verified in code |
+| The new-template 10-minute window is not configurable | `LogminerSettings` has no such key; `new_template_recent_min` comes from `DetectConfig::default` | verified in code |
 | e2e: 9 tests, 2 of them new; timeouts 180 s default, 600 s shipping, 600 s spike, 180 s new template | `cargo test -p tayga-e2e -- --ignored --list` listed 9; `crates/tayga-e2e/src/lib.rs` | verified |
-| Latest `make e2e` run, 2026-10-04: 9 of 9 passed. Alert times: log spike 316 s (245 s in a later single run), new-template probe 60 s | printed `[e2e]` lines from one run; figures supplied by the implementer's run log, not re-run for this README | reported, single run, not re-measured; not a latency guarantee |
-| Story scenario times in that run: ad 80 s, payment 95 s, unreachable 100 s, catalog 25 s, shipping 206 s | same run | reported, single run; earlier runs differed (see followups) |
+| Latest `make e2e` run, 2026-10-04: 9 of 9 passed. Alert times: log spike 316 s (245 s in a later single run), new-template probe 60 s | measured in one `make e2e` run on 2026-10-04 (controller-supervised); not re-run for this README | single run, not re-verified; not a latency guarantee |
+| Story scenario times in that run: ad 80 s, payment 95 s, unreachable 100 s, catalog 25 s, shipping 206 s | same run | measured in one `make e2e` run on 2026-10-04 (controller-supervised); not re-verified; earlier runs differed (see followups) |
 | Performance, scale, or latency claims | none made beyond the single-run timings above | n/a |
