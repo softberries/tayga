@@ -75,13 +75,14 @@ export function validateStorySearch(s: Record<string, unknown>): StorySearch {
   return { ...validateTraceSearch(s), log_service: str(s.log_service, 200), sev }
 }
 
-/** `/map` search: the service whose drawer is open. */
+/** `/map` search: the service whose drawer is open and the service search text. */
 export interface MapSearch {
   service?: string
+  q?: string
 }
 
 export function validateMapSearch(s: Record<string, unknown>): MapSearch {
-  return { service: str(s.service, 200) }
+  return { service: str(s.service, 200), q: str(s.q, 100) }
 }
 
 const SINCE_SECS: Record<Since, number> = { '15m': 900, '1h': 3600, '24h': 86_400, '7d': 604_800 }

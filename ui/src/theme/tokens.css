@@ -325,6 +325,17 @@
     box-shadow: 0 0 0 0 color-mix(in srgb, var(--tg-err) 0%, transparent);
   }
 }
+@keyframes tg-pulse-slow {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--tg-slow) 55%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 8px color-mix(in srgb, var(--tg-slow) 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--tg-slow) 0%, transparent);
+  }
+}
 @keyframes tg-pulse-accent {
   0% {
     box-shadow: 0 0 0 0 color-mix(in srgb, var(--tg-accent) 55%, transparent);
@@ -375,6 +386,9 @@
   .tg-pulse-accent {
     animation: tg-pulse-accent 1.8s ease-out infinite;
   }
+  .tg-pulse-slow {
+    animation: tg-pulse-slow 1.8s ease-out infinite;
+  }
   .tg-in {
     animation: tg-in 0.45s ease both;
   }
@@ -420,6 +434,7 @@
 @media (prefers-reduced-motion: reduce) {
   .tg-pulse,
   .tg-pulse-accent,
+  .tg-pulse-slow,
   .tg-in,
   .tg-flow,
   .tg-skeleton {

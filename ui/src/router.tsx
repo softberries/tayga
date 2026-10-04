@@ -89,7 +89,7 @@ const mapRoute = createRoute({
   path: 'map',
   staticData: { crumb: 'Service map' },
   validateSearch: validateMapSearch,
-  component: page('MapPage'),
+  component: lazyRouteComponent(() => import('./routes/map'), 'MapPage'),
 })
 
 const logsRoute = createRoute({

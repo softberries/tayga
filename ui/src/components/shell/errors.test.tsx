@@ -41,14 +41,14 @@ describe('error boundaries', () => {
     const { router } = renderApp('/pipeline')
     await screen.findByRole('alert')
     await router.navigate({ to: '/map' })
-    expect(await screen.findByText('This page is built in Task 9.')).toBeInTheDocument()
+    expect(await screen.findByText('No service calls in this window')).toBeInTheDocument()
   })
 
   it('an old /service-map shape (edges array) leaves the shell intact', async () => {
     // The pre-plan-5 API returned a bare array of edges.
     stubApi({ '/service-map': { body: [{ parent: 'a', child: 'b', calls: 1, errors: 0 }] } })
-    renderApp('/map')
-    expect(await screen.findByText('This page is built in Task 9.')).toBeInTheDocument()
+    renderApp('/logs/alerts')
+    expect(await screen.findByText('This page is built in Task 10.')).toBeInTheDocument()
     expectShell()
     expect(screen.queryByText(/degraded/)).toBeNull()
   })

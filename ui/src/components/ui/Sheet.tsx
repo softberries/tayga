@@ -27,6 +27,8 @@ export interface SheetProps {
   /** Where focus goes on close; call `e.preventDefault()` and focus your element. Without a
    *  Radix trigger (drawers opened from a list), focus would otherwise fall to <body>. */
   onCloseAutoFocus?: (e: Event) => void
+  /** Where focus goes on open (Radix default: the first tabbable, the resize handle). */
+  onOpenAutoFocus?: (e: Event) => void
   className?: string
 }
 
@@ -44,6 +46,7 @@ export function Sheet({
   storageKey,
   modal = false,
   onCloseAutoFocus,
+  onOpenAutoFocus,
   className,
 }: SheetProps) {
   const { width, handleProps } = useResizableWidth({ defaultWidth, min: SHEET_MIN, max: maxWidth, storageKey })
@@ -70,6 +73,7 @@ export function Sheet({
               aria-describedby={undefined}
               onInteractOutside={modal ? undefined : (e) => e.preventDefault()}
               onCloseAutoFocus={onCloseAutoFocus}
+              onOpenAutoFocus={onOpenAutoFocus}
             >
               <m.aside
                 className={cx(

@@ -47,7 +47,8 @@ describe('page search params', () => {
   })
   it('map: service', () => {
     expect(validateMapSearch({ service: 'checkout' })).toEqual({ service: 'checkout' })
-    expect(validateMapSearch({})).toStrictEqual({ service: undefined })
+    expect(validateMapSearch({})).toStrictEqual({ service: undefined, q: undefined })
+    expect(validateMapSearch({ q: 'pay', service: '' })).toStrictEqual({ service: undefined, q: 'pay' })
   })
 })
 

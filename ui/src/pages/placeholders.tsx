@@ -1,9 +1,6 @@
 /** Route components loaded lazily per route; each is replaced by its own task. */
 import { Placeholder } from './Placeholder'
 
-export function MapPage() {
-  return <Placeholder title="Service map" task="Task 9" />
-}
 export function LogAlertsPage() {
   return <Placeholder title="Log alerts" task="Task 10" />
 }

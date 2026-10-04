@@ -26,10 +26,14 @@ export interface TimeSeriesProps {
   format?: (v: number) => string
   /** Screen-reader summary of what the chart shows. */
   summary: string
+  /** Smallest y-axis step (default 1, for counts); 0 lets fractional values get their own ticks. */
+  minInterval?: number
+  /** Approximate number of y-axis steps (ECharts default 5); fewer suits small charts. */
+  splitNumber?: number
 }
 
 /** Shared time-series chart (line, area or bar) on a time axis, themed via echartsTheme. */
-export function TimeSeries({ series, height = 180, markAt, markLabel, format, summary }: TimeSeriesProps) {
+export function TimeSeries({ series, height = 180, markAt, markLabel, format, summary, minInterval = 1, splitNumber }: TimeSeriesProps) {
   const applied = useAppliedTheme()
   const reduceMotion = useMediaQuery(REDUCED_MOTION_QUERY)
   const option = useMemo(() => {
@@ -43,7 +47,12 @@ export function TimeSeries({ series, height = 180, markAt, markLabel, format, su
       grid: { left: 8, right: 12, top: 16, bottom: 4, containLabel: true },
       tooltip: { trigger: 'axis', valueFormatter: (v: unknown) => (typeof v === 'number' ? fmt(v) : '—') },
       xAxis: { type: 'time', axisLabel: { hideOverlap: true } },
-      yAxis: { type: 'value', minInterval: 1, axisLabel: { formatter: (v: number) => fmt(v) } },
+      yAxis: {
+        type: 'value',
+        minInterval,
+        ...(splitNumber ? { splitNumber } : {}),
+        axisLabel: { formatter: (v: number) => fmt(v) },
+      },
       series: series.map((s, i) => {
         const color = s.tone && tokens ? tokens[s.tone] : undefined
         return {
@@ -67,6 +76,6 @@ export function TimeSeries({ series, height = 180, markAt, markLabel, format, su
         }
       }),
     }
-  }, [series, markAt, markLabel, format, applied, reduceMotion])
+  }, [series, markAt, markLabel, format, applied, reduceMotion, minInterval, splitNumber])
   return <EChart option={option} height={height} summary={summary} />
 }
