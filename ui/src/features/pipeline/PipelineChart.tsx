@@ -8,6 +8,7 @@ import { Card, PanelTitle } from '../../components/ui/Card'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { Skeleton } from '../../components/ui/Skeleton'
 import { ErrorBanner } from '../stories/ErrorBanner'
+import { SectionNote, StaleNote } from './Notes'
 import { SINCE_SECS } from '../stories/model'
 import { seriesPoints } from './model'
 import type { ChartSpec } from './model'
@@ -31,14 +32,20 @@ export function PipelineChart({ spec, since, refetchInterval }: { spec: ChartSpe
   )
   const xRange = useMemo(() => [updated - SINCE_SECS[since] * 1000, updated] as const, [updated, since])
   const failed = results.find((r) => r.isError)
+  // A failed refetch keeps the last good data (stale); a first load that failed has none (missing).
+  const stale = results.filter((r) => r.isError && r.data !== undefined)
+  const missing = spec.series.filter((_, i) => results[i]?.isError && results[i]?.data === undefined).map((s) => s.name)
+  const staleAt = stale.length ? Math.min(...stale.map((r) => r.dataUpdatedAt)) : 0
   const pending = results.some((r) => r.isPending)
-  const empty = !pending && lines.every((l) => l.points.length === 0)
+  const noData = lines.every((l) => l.points.every(([, v]) => v === null))
+  const empty = !pending && noData
   const latest = lines
     .map((l) => {
       const v = l.points.findLast(([, v]) => v !== null)?.[1]
       return v === undefined || v === null ? null : `${l.name} ${spec.format(v)}`
     })
     .filter((v): v is string => v !== null)
+  const retry = () => results.forEach((r) => void r.refetch())
   const summary = `${spec.title}, ${spec.unit}, last ${since}.${latest.length ? ` Latest: ${latest.join(', ')}.` : ''}`
 
   return (
@@ -47,8 +54,14 @@ export function PipelineChart({ spec, since, refetchInterval }: { spec: ChartSpe
         <PanelTitle>{spec.title}</PanelTitle>
         <span className="text-xs text-muted">{spec.unit}</span>
       </div>
-      {failed && lines.every((l) => l.points.length === 0) ? (
-        <ErrorBanner what={`${spec.title.toLowerCase()} chart`} error={failed.error} onRetry={() => results.forEach((r) => void r.refetch())} />
+      {stale.length > 0 ? <StaleNote updatedAt={staleAt} onRetry={retry} /> : null}
+      {missing.length > 0 && !(failed && noData) ? (
+        <SectionNote onRetry={retry}>
+          Could not load {missing.join(', ')}; {missing.length === 1 ? 'it is' : 'they are'} missing from this chart, not zero.
+        </SectionNote>
+      ) : null}
+      {failed && noData && stale.length === 0 ? (
+        <ErrorBanner what={`${spec.title.toLowerCase()} chart`} error={failed.error} onRetry={retry} />
       ) : pending ? (
         <Skeleton className="h-[190px]" />
       ) : empty ? (

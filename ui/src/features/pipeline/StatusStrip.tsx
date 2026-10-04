@@ -11,7 +11,7 @@ const LABEL: Record<JobState, string> = { up: 'up', down: 'down', unknown: 'no d
 export function StatusStrip({ statuses, nowMs }: { statuses: readonly JobStatus[] | undefined; nowMs: number }) {
   if (!statuses) {
     return (
-      <div aria-busy="true" aria-label="Loading job status" className="flex flex-wrap gap-3">
+      <div role="status" aria-busy="true" aria-label="Loading job status" className="flex flex-wrap gap-3">
         {Array.from({ length: 5 }, (_, i) => (
           <Skeleton key={i} className="h-[58px] w-[176px] rounded-field" />
         ))}

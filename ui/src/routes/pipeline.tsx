@@ -12,6 +12,8 @@ import { useSince } from '../components/shell/TimeRange'
 import { Card, PanelTitle } from '../components/ui/Card'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Skeleton } from '../components/ui/Skeleton'
+import { StaleNote } from '../features/pipeline/Notes'
+import { useNow } from '../lib/useNow'
 import { LagList } from '../features/pipeline/LagList'
 import { COLLECTING, PipelineChart } from '../features/pipeline/PipelineChart'
 import { StatusStrip } from '../features/pipeline/StatusStrip'
@@ -30,16 +32,19 @@ export function PipelinePage() {
   // A Kafka failure (503) is not a storage outage: keep it out of the shell banner.
   const lag = useQuery({ ...api.pipelineLag(), refetchInterval, meta: { outage: false } })
 
+  // Ages advance on a clock, not on fetches, so they stay right with Live off or fetches failing.
+  const now = useNow()
   const upUpdated = Math.max(...up.map((r) => r.dataUpdatedAt))
-  const loaded = up.every((r) => r.isSuccess)
+  const loaded = up.every((r) => r.data !== undefined)
   const statuses = useMemo(
-    () => (loaded ? JOBS.map((job, i) => jobStatus(job, up[i]?.data, upUpdated)) : undefined),
+    () => (loaded ? JOBS.map((job, i) => jobStatus(job, up[i]?.data, now)) : undefined),
     // `up` is a fresh array each render; the data only changes with the update stamps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [loaded, upUpdated],
+    [loaded, now, upUpdated],
   )
   // Charts wait for the job statuses, so an empty history shows one notice, not nine.
   const upPending = up.some((r) => r.isPending)
+  const staleUp = up.some((r) => r.isError && r.data !== undefined)
   const upError = up.find((r) => r.isError)
   // Nothing recorded yet (the recorder writes its first row on its first tick, 15 s apart).
   const collecting = loaded && up.every((r) => (r.data?.points.length ?? 0) === 0)
@@ -49,8 +54,10 @@ export function PipelinePage() {
       {upError && !statuses ? (
         <ErrorBanner what="job status" error={upError.error} onRetry={() => up.forEach((r) => void r.refetch())} />
       ) : (
-        <StatusStrip statuses={statuses} nowMs={upUpdated} />
+        <StatusStrip statuses={statuses} nowMs={now} />
       )}
+
+      {staleUp ? <StaleNote updatedAt={Math.min(...up.filter((r) => r.isError && r.data !== undefined).map((r) => r.dataUpdatedAt))} onRetry={() => up.forEach((r) => void r.refetch())} /> : null}
 
       {collecting ? (
         <Card>
@@ -75,6 +82,7 @@ export function PipelinePage() {
           <PanelTitle>Consumer lag</PanelTitle>
           <span className="text-xs text-muted">messages each group has yet to commit, live from Kafka</span>
         </div>
+        {lag.isError && lag.data ? <StaleNote updatedAt={lag.dataUpdatedAt} onRetry={() => void lag.refetch()} /> : null}
         {lag.isError && !lag.data ? (
           <ErrorBanner what="consumer lag" error={lag.error} onRetry={() => void lag.refetch()} />
         ) : (

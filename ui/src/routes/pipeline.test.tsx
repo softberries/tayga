@@ -17,6 +17,8 @@ interface Stub {
   lag?: { status?: number; body: unknown }
   /** Points for every non-`up` series. */
   metrics?: [number, number | null][]
+  /** Requests for which this returns true fail with a 500. */
+  fail?: (url: URL) => boolean
 }
 
 function stub(opts: Stub) {
@@ -24,6 +26,7 @@ function stub(opts: Stub) {
   const fetch = vi.fn(async (input: string) => {
     const url = new URL(input, 'http://test')
     calls.push(url)
+    if (opts.fail?.(url)) return new Response(JSON.stringify({ error: 'boom' }), { status: 500, headers: { 'content-type': 'application/json' } })
     const json = (body: unknown, status = 200) =>
       new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
     if (url.pathname.endsWith('/pipeline/lag')) return json(opts.lag?.body ?? lag, opts.lag?.status)
@@ -104,6 +107,37 @@ describe('charts', () => {
   })
 })
 
+describe('failures inside charts', () => {
+  const metrics: [number, number | null][] = [[minute(120_000), 1], [minute(60_000), 3]]
+
+  it('names a series that failed to load instead of letting it vanish', async () => {
+    stub({ up: { 'tayga-ingest': healthy(1) }, metrics, fail: (u) => u.searchParams.get('metric') === 'tayga_writer_insert_failures_total' })
+    renderApp('/pipeline')
+    const note = await screen.findByText(/Could not load insert failures; it is missing from this chart, not zero\./)
+    expect(note.closest('[role="alert"]')).toBeInTheDocument()
+    // The other lines still draw.
+    await waitFor(() => expect(screen.getAllByTestId('echart').length).toBe(9))
+  })
+
+  it('keeps old chart data and notes the failed refresh', async () => {
+    let down = false
+    stub({ up: { 'tayga-ingest': healthy(1) }, metrics, fail: (u) => down && u.searchParams.get('metric') === 'tayga_writer_rows_inserted_total' })
+    const { queryClient } = renderApp('/pipeline')
+    await waitFor(() => expect(screen.getAllByTestId('echart').length).toBe(9))
+    down = true
+    await queryClient.refetchQueries({ queryKey: ['pipeline-series'] })
+    expect(await screen.findByText(/Refresh failed · showing data from/)).toBeInTheDocument()
+    expect(screen.getAllByTestId('echart').length).toBe(9)
+  })
+
+  it('treats a series of only gaps as no data', async () => {
+    stub({ up: { 'tayga-ingest': healthy(1) }, metrics: [[minute(120_000), null], [minute(60_000), null]] })
+    renderApp('/pipeline')
+    await waitFor(() => expect(screen.getAllByText('Collecting… first points in 15 s').length).toBe(9))
+    expect(screen.queryByTestId('echart')).toBeNull()
+  })
+})
+
 describe('empty history', () => {
   it('shows one collecting state and no charts before the recorder has written anything', async () => {
     stub({})
@@ -125,7 +159,32 @@ describe('consumer lag', () => {
     expect(rows).toHaveLength(3)
     expect(rows[1]).toHaveTextContent('tayga-assembler')
     expect(rows[1]).toHaveTextContent('1.2k')
-    expect(rows[1]).toHaveAttribute('title', 'committed 17,327,899 of 17,329,052')
+    expect(rows[1]).toHaveTextContent('committed 17,327,899 · end 17,329,052')
+  })
+
+  it('scales bars to at least 1000 messages and keeps an empty track at zero lag', async () => {
+    stub({
+      up: { 'tayga-ingest': healthy(1) },
+      metrics: [[minute(120_000), 1], [minute(60_000), 2]],
+      lag: { body: [{ group: 'a', committed: 1, end: 21, lag: 20 }, { group: 'b', committed: 5, end: 5, lag: 0 }, { group: 'c', committed: 0, end: 500, lag: 500 }] },
+    })
+    renderApp('/pipeline')
+    const rows = within(await screen.findByRole('list', { name: 'Consumer lag' })).getAllByRole('listitem')
+    const width = (i: number) => (rows[i]?.querySelector('.h-full') as HTMLElement).style.width
+    expect([width(0), width(1), width(2)]).toEqual(['2%', '0%', '50%'])
+  })
+
+  it('keeps the last lag and says so when a refresh fails', async () => {
+    let down = false
+    stub({ up: { 'tayga-ingest': healthy(1) }, metrics: [[minute(120_000), 1], [minute(60_000), 2]], fail: (u) => down && u.pathname.endsWith('/pipeline/lag') })
+    const { queryClient } = renderApp('/pipeline')
+    await screen.findByRole('list', { name: 'Consumer lag' })
+    down = true
+    await queryClient.refetchQueries({ queryKey: ['pipeline-lag'] })
+    const note = await screen.findByText(/Refresh failed · showing data from \d\d:\d\d:\d\d/)
+    expect(note.closest('[role="alert"]')).toHaveTextContent('Try again')
+    expect(screen.getByRole('list', { name: 'Consumer lag' })).toBeInTheDocument()
+    expect(screen.queryByText('Could not load consumer lag.')).toBeNull()
   })
 
   it('a Kafka outage fails only the lag section', async () => {
