@@ -1948,6 +1948,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tayga-logminer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "prometheus-client",
+ "rdkafka",
+ "serde",
+ "serde_json",
+ "tayga-common",
+ "tayga-drain",
+ "tayga-kafka",
+ "tayga-model",
+ "tayga-store",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tayga-model"
 version = "0.1.0"
 dependencies = [
