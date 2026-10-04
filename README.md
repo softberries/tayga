@@ -66,8 +66,10 @@ Every 60 seconds the logminer runs two rules over `log_template_hits`:
 
 | Rule | Fires when | Default |
 |---|---|---|
-| New template | the template's first log is within the last 10 minutes (fixed, not configurable), its service already has a template at least `new_template_warmup_min` old (so a fresh install or new service does not flood), and it is not `<overflow>`. One alert per template, ever | warmup 15 min |
+| New template | the template's first log falls since the previous detection tick, in log time; its service had a template at least `new_template_warmup_min` before that first log (so a fresh install or new service does not flood); and it is not `<overflow>`. One alert per template, ever | warmup 15 min |
 | Rate spike | the count in the last `spike_window_min` is at least `spike_min_count` and at least `spike_factor` times the mean per-window count over the preceding `baseline_window_min` (floored at 1), and the template is older than window + baseline (65 min; younger ones are covered by the new-template rule) | window 5 min, baseline 60 min, factor 5, min count 10 |
+
+"In log time" means the logminer keeps a data clock, the newest mined log `ts`, and checks templates first seen after the previous tick's data clock minus 60 s. A template that appeared while the logminer was down or behind is therefore still reported when it catches up. On a fresh install (no hits yet) the clock starts at the wall clock minus 10 minutes, so a replayed backlog does not report its history. Spike windows are wall-clock based: a spike during such a gap is not reported. `tayga_logminer_data_lag_seconds` (wall clock minus the data clock, Pipeline health dashboard) shows the lag, and the logminer logs a warning when it exceeds 10 minutes.
 
 A spike alert stays active while it was last confirmed within `alert_active_min` (10) of now; a tick that still fires updates it, otherwise a new alert starts. Each alert carries up to 5 example trace ids (newest first) that link to the error story when one exists, else to Jaeger. The other values are `TAYGA__LOGMINER__*` environment variables (keys in `LogminerSettings` in `crates/tayga-logminer/src/main.rs`). Other defaults: similarity threshold 0.5, at most 5,000 clusters per service (beyond that, unmatched logs go to the `<overflow>` template), flush at 5,000 logs or 1 s.
 

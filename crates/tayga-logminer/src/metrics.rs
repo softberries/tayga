@@ -3,6 +3,7 @@ use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::{Histogram, exponential_buckets};
 use prometheus_client::registry::Registry;
+use std::sync::atomic::AtomicU64;
 use tayga_common::metrics::KindLabel;
 use tayga_drain::detect::AlertKind;
 
@@ -16,6 +17,8 @@ pub struct LogminerMetrics {
     pub templates: Gauge,
     pub alerts: Family<KindLabel, Counter>,
     pub detect_seconds: Histogram,
+    /// Wall clock minus the latest mined log's `ts`, set each detection tick.
+    pub data_lag_seconds: Gauge<f64, AtomicU64>,
 }
 
 impl Default for LogminerMetrics {
@@ -29,6 +32,7 @@ impl Default for LogminerMetrics {
             alerts: Family::default(),
             // 10 ms .. ~20 s.
             detect_seconds: Histogram::new(exponential_buckets(0.01, 2.0, 12)),
+            data_lag_seconds: Gauge::default(),
         }
     }
 }
@@ -71,6 +75,11 @@ impl LogminerMetrics {
             "Duration of one detection pass",
             m.detect_seconds.clone(),
         );
+        registry.register(
+            "tayga_logminer_data_lag_seconds",
+            "Wall clock minus the newest mined log timestamp, at the last detection pass",
+            m.data_lag_seconds.clone(),
+        );
         // Export both series at 0 so the family is visible before the first alert.
         for kind in [AlertKind::New, AlertKind::Spike] {
             drop(m.alerts.get_or_create(&KindLabel::new(kind.as_str())));
@@ -91,6 +100,7 @@ mod tests {
         m.templates.set(3);
         m.alerts.get_or_create(&KindLabel::new("new")).inc();
         m.detect_seconds.observe(0.015);
+        m.data_lag_seconds.set(2.5);
         let out = tayga_common::metrics::render(&registry);
         for line in [
             "tayga_logminer_logs_mined_total 1",
@@ -102,6 +112,8 @@ mod tests {
             "tayga_logminer_alerts_total{kind=\"spike\"} 0",
             "# TYPE tayga_logminer_detect_seconds histogram",
             "tayga_logminer_detect_seconds_bucket{le=\"0.02\"} 1",
+            "# TYPE tayga_logminer_data_lag_seconds gauge",
+            "tayga_logminer_data_lag_seconds 2.5",
         ] {
             assert!(out.contains(line), "missing {line:?} in\n{out}");
         }

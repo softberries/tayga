@@ -11,8 +11,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tayga_common::metrics::KindLabel;
 use tayga_common::retry::retry_until;
 use tayga_drain::detect::{
-    Alert, DetectConfig, NewCandidate, SpikeTracker, TemplateWindow, is_new, new_alert,
-    spike_baseline,
+    Alert, DetectConfig, NewCandidate, SpikeTracker, TemplateWindow, initial_watermark, is_new,
+    new_alert, new_template_since, spike_baseline,
 };
 use tayga_drain::drain::DrainConfig;
 use tayga_kafka::KafkaSettings;
@@ -29,6 +29,7 @@ use tokio::time::MissedTickBehavior;
 const GROUP: &str = "tayga-logminer";
 const EXAMPLES: u32 = 5;
 const ALERTS_PARTITIONS: i32 = 3;
+const MIN_NS: i64 = 60_000_000_000;
 
 #[derive(Deserialize)]
 struct Settings {
@@ -207,6 +208,12 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     let active: Vec<Alert> = active.iter().filter_map(alert_from_row).collect();
     let active_spikes = active.len();
     tracker.restore(active);
+    let Some(data_now) = retry_until("load data clock", || store.data_now_ns(), &mut stop_rx).await
+    else {
+        return Ok(());
+    };
+    // Data time up to which new templates have been checked; advanced after each detection pass.
+    let mut new_watermark = initial_watermark(&detect_cfg, data_now, now_ns());
 
     let consumer = tayga_kafka::consumer(&settings.kafka, GROUP)?;
     consumer.subscribe(&[&settings.kafka.topic])?;
@@ -225,6 +232,7 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
         alerts = %cfg.alerts_topic,
         restored,
         active_spikes,
+        new_watermark,
         "tayga-logminer consuming"
     );
 
@@ -274,7 +282,7 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
         if detect_due {
             let mut detect_stop = stop_rx.clone();
             tokio::select! {
-                _ = detect(&store, &producer, cfg, &detect_cfg, &mut tracker, &metrics) => {}
+                _ = detect(&store, &producer, cfg, &detect_cfg, &mut tracker, &mut new_watermark, &metrics) => {}
                 _ = detect_stop.wait_for(|stop| *stop) => break,
             }
         }
@@ -417,20 +425,25 @@ where
     }
 }
 
-/// One detection pass (spec §6). Failures are logged; the loop continues.
+/// One detection pass (spec §6). Failures are logged; the loop continues. The new-template
+/// watermark advances to this pass's data clock only when the pass found and stored its alerts,
+/// so a failed pass is retried over the same range.
 async fn detect(
     store: &Store,
     producer: &FutureProducer,
     cfg: &LogminerSettings,
     detect_cfg: &DetectConfig,
     tracker: &mut SpikeTracker,
+    new_watermark: &mut i64,
     metrics: &LogminerMetrics,
 ) {
     let started = Instant::now();
     let now = now_ns();
-    match find_alerts(store, detect_cfg, tracker, now).await {
-        Ok(alerts) => {
-            publish_alerts(store, producer, &cfg.alerts_topic, &alerts, now, metrics).await
+    match find_alerts(store, detect_cfg, tracker, *new_watermark, now, metrics).await {
+        Ok((alerts, data_now)) => {
+            if publish_alerts(store, producer, &cfg.alerts_topic, &alerts, now, metrics).await {
+                *new_watermark = (*new_watermark).max(data_now);
+            }
         }
         Err(e) => tracing::warn!(error = %e, "detection failed"),
     }
@@ -440,13 +453,38 @@ async fn detect(
     tracker.expire(detect_cfg, now);
 }
 
-/// Alerts to write, each with whether it was created (as opposed to an active spike updated).
+/// Seconds from the newest mined log to the wall clock; `None` before any log was mined.
+fn data_lag_secs(data_now_ns: i64, now_ns: i64) -> Option<f64> {
+    (data_now_ns > 0).then(|| (now_ns - data_now_ns) as f64 / 1e9)
+}
+
+/// Minutes back from `now_ns` that cover `first_seen_ns`, at least `floor_min`: example traces
+/// of a template found after a lag are older than the usual window.
+fn minutes_covering(first_seen_ns: i64, now_ns: i64, floor_min: u32) -> u32 {
+    let age_min = now_ns.saturating_sub(first_seen_ns).max(0) / MIN_NS + 1;
+    u32::try_from(age_min).unwrap_or(u32::MAX).max(floor_min)
+}
+
+/// Alerts to write, each with whether it was created (as opposed to an active spike updated),
+/// and the data clock the new-template check ran against.
 async fn find_alerts(
     store: &Store,
     cfg: &DetectConfig,
     tracker: &mut SpikeTracker,
+    new_watermark: i64,
     now: i64,
-) -> anyhow::Result<Vec<(Alert, bool)>> {
+    metrics: &LogminerMetrics,
+) -> anyhow::Result<(Vec<(Alert, bool)>, i64)> {
+    let data_now = store.data_now_ns().await?;
+    if let Some(lag) = data_lag_secs(data_now, now) {
+        metrics.data_lag_seconds.set(lag);
+        if lag > f64::from(cfg.new_template_recent_min) * 60.0 {
+            tracing::warn!(
+                lag_secs = lag,
+                "logminer is behind the logs: new templates are still found, spikes in the lag are not"
+            );
+        }
+    }
     let mut out = Vec::new();
     let windows = store
         .template_windows(
@@ -470,9 +508,8 @@ async fn find_alerts(
         let examples = examples(store, w.template_id, cfg.spike_window_min).await;
         out.push(tracker.observe(cfg, &w, baseline, examples, now));
     }
-    let candidates = store
-        .new_template_candidates(cfg.new_template_recent_min)
-        .await?;
+    let since = new_template_since(new_watermark);
+    let candidates = store.new_template_candidates(since).await?;
     for r in candidates {
         let c = NewCandidate {
             template_id: r.template_id,
@@ -481,13 +518,14 @@ async fn find_alerts(
             first_seen_ns: r.first_seen_ns,
             service_oldest_ns: r.service_oldest_ns,
         };
-        if !is_new(cfg, &c, now) {
+        if !is_new(cfg, &c, since) {
             continue;
         }
-        let examples = examples(store, c.template_id, cfg.new_template_recent_min).await;
+        let window = minutes_covering(c.first_seen_ns, now, cfg.new_template_recent_min);
+        let examples = examples(store, c.template_id, window).await;
         out.push((new_alert(&c, examples, now), true));
     }
-    Ok(out)
+    Ok((out, data_now))
 }
 
 /// Example traces are best effort: a failed lookup yields none rather than dropping the alert.
@@ -503,7 +541,7 @@ async fn examples(store: &Store, template_id: u64, since_min: u32) -> Vec<String
 
 /// One attempt each: insert all alerts, then publish each one. Alerts are published only once
 /// stored; a new-template alert that failed to store is found again on the next pass, and an
-/// active spike is rewritten on its next update.
+/// active spike is rewritten on its next update. Returns whether the alerts were stored.
 async fn publish_alerts(
     store: &Store,
     producer: &FutureProducer,
@@ -511,15 +549,15 @@ async fn publish_alerts(
     alerts: &[(Alert, bool)],
     now: i64,
     metrics: &LogminerMetrics,
-) {
+) -> bool {
     if alerts.is_empty() {
-        return;
+        return true;
     }
     let version = u64::try_from(now).unwrap_or(0);
     let rows: Vec<_> = alerts.iter().map(|(a, _)| alert_row(a, version)).collect();
     if let Err(e) = store.insert_alerts(&rows).await {
         tracing::warn!(error = %e, alerts = rows.len(), "alert insert failed");
-        return;
+        return false;
     }
     for (alert, created) in alerts {
         if *created {
@@ -548,6 +586,7 @@ async fn publish_alerts(
             "log alert"
         );
     }
+    true
 }
 
 #[cfg(test)]
@@ -573,6 +612,24 @@ mod tests {
             serde_json::from_str(r#"{"detect_secs": 5, "alerts_topic": "x"}"#).unwrap();
         assert_eq!((s.detect_secs, s.alerts_topic.as_str()), (5, "x"));
         assert_eq!(s.max_batch, 5_000);
+    }
+
+    #[test]
+    fn data_lag_is_unknown_before_any_log() {
+        assert_eq!(data_lag_secs(0, 5 * MIN_NS), None);
+        assert_eq!(data_lag_secs(MIN_NS, 3 * MIN_NS), Some(120.0));
+    }
+
+    #[test]
+    fn example_window_covers_the_template_age() {
+        let now = 1_000 * MIN_NS;
+        assert_eq!(minutes_covering(now - MIN_NS, now, 10), 10, "floor");
+        assert_eq!(minutes_covering(now - 12 * MIN_NS, now, 10), 13);
+        assert_eq!(
+            minutes_covering(now + MIN_NS, now, 10),
+            10,
+            "future first_seen"
+        );
     }
 
     #[test]

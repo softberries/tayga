@@ -99,10 +99,34 @@ pub fn spike_baseline(cfg: &DetectConfig, w: &TemplateWindow, now_ns: i64) -> Op
         .then_some(per_window)
 }
 
-pub fn is_new(cfg: &DetectConfig, c: &NewCandidate, now_ns: i64) -> bool {
+/// Slack below the previous tick's data clock, for logs that arrive slightly out of order.
+pub const NEW_TEMPLATE_MARGIN_NS: i64 = MIN_NS;
+
+/// Data clock before the first detection tick: `new_template_recent_min` before the latest hit.
+/// With no hits at all (fresh install, or nothing within the hits TTL) the wall clock stands in,
+/// so a backlog replayed from scratch does not report its history as new.
+pub fn initial_watermark(cfg: &DetectConfig, data_now_ns: i64, wall_now_ns: i64) -> i64 {
+    let clock = if data_now_ns > 0 {
+        data_now_ns
+    } else {
+        wall_now_ns
+    };
+    clock - i64::from(cfg.new_template_recent_min) * MIN_NS
+}
+
+/// Lower bound (exclusive) on `first_seen` for new-template candidates this tick.
+pub fn new_template_since(watermark_ns: i64) -> i64 {
+    watermark_ns - NEW_TEMPLATE_MARGIN_NS
+}
+
+/// A template is new when it first appeared after `since_ns` (in log time) and its service already
+/// had templates `new_template_warmup_min` minutes before it appeared.
+pub fn is_new(cfg: &DetectConfig, c: &NewCandidate, since_ns: i64) -> bool {
     c.template != OVERFLOW
-        && c.first_seen_ns >= now_ns - i64::from(cfg.new_template_recent_min) * MIN_NS
-        && c.service_oldest_ns <= now_ns - i64::from(cfg.new_template_warmup_min) * MIN_NS
+        && c.first_seen_ns > since_ns
+        && c.service_oldest_ns
+            <= c.first_seen_ns
+                .saturating_sub(i64::from(cfg.new_template_warmup_min) * MIN_NS)
 }
 
 pub fn new_alert(c: &NewCandidate, examples: Vec<String>, now_ns: i64) -> Alert {
@@ -216,23 +240,65 @@ mod tests {
         assert_eq!(spike_baseline(&cfg, &o, NOW), None);
     }
 
-    #[test]
-    fn new_template_respects_service_warmup() {
-        let cfg = DetectConfig::default();
-        let c = |first_ago: i64, oldest_ago: i64| NewCandidate {
+    fn candidate(first_seen_ns: i64, service_oldest_ns: i64) -> NewCandidate {
+        NewCandidate {
             template_id: 1,
             service: "checkout".into(),
             template: "x".into(),
-            first_seen_ns: NOW - first_ago * MIN_NS,
-            service_oldest_ns: NOW - oldest_ago * MIN_NS,
-        };
-        assert!(is_new(&cfg, &c(1, 15), NOW));
-        assert!(!is_new(&cfg, &c(1, 14), NOW), "service younger than warmup");
-        assert!(!is_new(&cfg, &c(11, 60), NOW), "first seen too long ago");
-        let a = new_alert(&c(1, 60), vec!["t1".into()], NOW);
+            first_seen_ns,
+            service_oldest_ns,
+        }
+    }
+
+    #[test]
+    fn new_template_needs_first_seen_after_the_bound() {
+        let cfg = DetectConfig::default();
+        let since = NOW - 10 * MIN_NS;
+        let oldest = since - 60 * MIN_NS;
+        assert!(
+            !is_new(&cfg, &candidate(since, oldest), since),
+            "bound is exclusive"
+        );
+        assert!(is_new(&cfg, &candidate(since + 1, oldest), since));
+        let mut o = candidate(since + 1, oldest);
+        o.template = OVERFLOW.into();
+        assert!(!is_new(&cfg, &o, since));
+    }
+
+    #[test]
+    fn new_template_warmup_is_measured_from_first_seen() {
+        let cfg = DetectConfig::default();
+        let first = NOW - 30 * MIN_NS; // long before the wall clock: only data time matters
+        let since = first - MIN_NS;
+        assert!(is_new(&cfg, &candidate(first, first - 15 * MIN_NS), since));
+        assert!(
+            !is_new(&cfg, &candidate(first, first - 15 * MIN_NS + 1), since),
+            "service one nanosecond short of the warmup"
+        );
+        assert!(
+            !is_new(&cfg, &candidate(first, first), since),
+            "new service"
+        );
+    }
+
+    #[test]
+    fn watermark_starts_from_the_data_clock_or_the_wall_clock() {
+        let cfg = DetectConfig::default();
+        assert_eq!(
+            initial_watermark(&cfg, NOW, NOW + 60 * MIN_NS),
+            NOW - 10 * MIN_NS
+        );
+        assert_eq!(initial_watermark(&cfg, 0, NOW), NOW - 10 * MIN_NS);
+        assert_eq!(new_template_since(NOW), NOW - MIN_NS);
+    }
+
+    #[test]
+    fn new_alert_id_is_one_per_template() {
+        let c = candidate(NOW - MIN_NS, NOW - 60 * MIN_NS);
+        let a = new_alert(&c, vec!["t1".into()], NOW);
         assert_eq!(
             a.alert_id,
-            new_alert(&c(1, 60), vec![], NOW + MIN_NS).alert_id,
+            new_alert(&c, vec![], NOW + MIN_NS).alert_id,
             "one id per template"
         );
         assert_eq!(a.alert_id.len(), 16);

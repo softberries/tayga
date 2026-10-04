@@ -134,11 +134,23 @@ impl Store {
             .await
     }
 
-    /// Templates first seen in the last `recent_min` minutes with no `new` alert yet, with the
+    /// Latest hit `ts` in the last 3 days (the hits TTL) in ns, or 0 when there is none. The
+    /// logminer's data clock for new-template detection.
+    pub async fn data_now_ns(&self) -> clickhouse::error::Result<i64> {
+        self.client()
+            .query(
+                "SELECT toUnixTimestamp64Nano(max(ts)) FROM log_template_hits \
+                 WHERE ts > now64(9) - toIntervalDay(3)",
+            )
+            .fetch_one()
+            .await
+    }
+
+    /// Templates first seen after `since_ns` (exclusive) with no `new` alert yet, with the
     /// oldest first-seen of their service (to tell a new service from a new template).
     pub async fn new_template_candidates(
         &self,
-        recent_min: u32,
+        since_ns: i64,
     ) -> clickhouse::error::Result<Vec<NewCandidateRow>> {
         self.client()
             .query(
@@ -146,12 +158,12 @@ impl Store {
                  toUnixTimestamp64Nano(t.first_seen) AS first_seen_ns, \
                  toUnixTimestamp64Nano(s.oldest) AS service_oldest_ns \
                  FROM (SELECT template_id, service, template, first_seen FROM log_templates FINAL \
-                       WHERE first_seen > now64(9) - toIntervalMinute(?)) AS t \
+                       WHERE first_seen > fromUnixTimestamp64Nano(?)) AS t \
                  INNER JOIN (SELECT service, min(first_seen) AS oldest FROM log_templates FINAL GROUP BY service) AS s \
                      ON s.service = t.service \
                  WHERE t.template_id NOT IN (SELECT template_id FROM log_alerts WHERE kind = 'new')",
             )
-            .bind(recent_min)
+            .bind(since_ns)
             .fetch_all()
             .await
     }

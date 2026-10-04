@@ -463,16 +463,70 @@ async fn new_candidates_and_alerts() {
         ])
         .await
         .unwrap();
-    let c = store.new_template_candidates(10).await.unwrap();
+    let since = now - 10 * MIN_NS;
+    let c = store.new_template_candidates(since).await.unwrap();
     assert_eq!(c.len(), 1);
     assert_eq!(c[0].template_id, 2);
     assert_eq!(c[0].service_oldest_ns, old_first);
+    let first = c[0].first_seen_ns;
+    assert!(
+        store
+            .new_template_candidates(first)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the bound is exclusive"
+    );
+    assert_eq!(
+        store
+            .new_template_candidates(first - 1)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store.new_template_candidates(0).await.unwrap().len(),
+        2,
+        "the bound is in data time, not a wall-clock window"
+    );
 
     store
         .insert_alerts(&[alert("new:2", 1, 2, now)])
         .await
         .unwrap();
-    assert!(store.new_template_candidates(10).await.unwrap().is_empty());
+    assert!(
+        store
+            .new_template_candidates(0)
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.template_id == 1)
+    );
+    assert!(
+        store
+            .new_template_candidates(since)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn data_now_is_the_latest_recent_hit_or_zero() {
+    let (s, store) = log_store().await;
+    assert_eq!(store.data_now_ns().await.unwrap(), 0, "no hits");
+    let now = now_ns();
+    store
+        .insert_log_hits(&[
+            hit(1, 1, now - 30 * MIN_NS, ""),
+            hit(2, 1, now - 5 * MIN_NS, ""),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(store.data_now_ns().await.unwrap(), now - 5 * MIN_NS);
     drop_db(&s, &store).await;
 }
 

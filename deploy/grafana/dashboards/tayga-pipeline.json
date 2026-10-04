@@ -2,7 +2,7 @@
   "uid": "tayga-pipeline",
   "title": "Tayga \u00b7 Pipeline health",
   "schemaVersion": 41,
-  "version": 2,
+  "version": 3,
   "editable": true,
   "tags": [
     "tayga"
@@ -501,6 +501,42 @@
         "overrides": []
       },
       "options": {}
+    },
+    {
+      "id": 13,
+      "title": "Logminer data lag",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tayga-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "tayga_logminer_data_lag_seconds",
+          "legendFormat": "lag",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "description": "Wall clock minus the newest mined log timestamp, at each detection pass. Above 10 min (new_template_recent_min), spike windows during the lag are missed; new templates are still found."
     }
   ],
   "templating": {
