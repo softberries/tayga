@@ -11,6 +11,9 @@ pub const SCENARIO_TIMEOUT: Duration = Duration::from_secs(180);
 /// slow story can take several minutes. One clean-baseline run saw 10 orders, none
 /// international, in 180 s.
 pub const SHIPPING_TIMEOUT: Duration = Duration::from_secs(600);
+/// Log detection runs every 60 s and the spike rule needs 10 hits in 5 min.
+pub const LOG_SPIKE_TIMEOUT: Duration = Duration::from_secs(600);
+pub const NEW_TEMPLATE_TIMEOUT: Duration = Duration::from_secs(180);
 pub const POLL_EVERY: Duration = Duration::from_secs(5);
 /// Spec §15 target for flag-to-story latency; reported, not asserted.
 pub const TARGET_LATENCY: Duration = Duration::from_secs(60);
@@ -90,6 +93,15 @@ impl Api {
             .unwrap_or_default())
     }
 
+    pub async fn log_alerts(&self, query: &str) -> anyhow::Result<Vec<Value>> {
+        Ok(self
+            .get(&format!("/api/v1/log-alerts?{query}"))
+            .await?
+            .as_array()
+            .cloned()
+            .unwrap_or_default())
+    }
+
     pub async fn story(&self, id: &str) -> anyhow::Result<Value> {
         self.get(&format!("/api/v1/stories/{id}")).await
     }
@@ -161,6 +173,50 @@ pub async fn wait_for_group(
     }
     anyhow::bail!(
         "no matching story group within {timeout:?} (last poll error: {last_err:?}); last groups seen:\n{}",
+        last_seen.join("\n")
+    )
+}
+
+/// Polls log alerts matching `query` until one with `last_at_ns > after_ns` satisfies `pred`.
+/// Returns it and the wait.
+pub async fn wait_for_alert(
+    api: &Api,
+    query: &str,
+    after_ns: i64,
+    timeout: Duration,
+    pred: impl Fn(&Value) -> bool,
+) -> anyhow::Result<(Value, Duration)> {
+    let start = Instant::now();
+    let mut last_seen: Vec<String> = Vec::new();
+    let mut last_err: Option<String> = None;
+    while start.elapsed() < timeout {
+        match api.log_alerts(query).await {
+            Ok(alerts) => {
+                last_seen = alerts
+                    .iter()
+                    .map(|a| {
+                        format!(
+                            "{} | {} | {} | last_at_ns={}",
+                            a["kind"], a["service"], a["template"], a["last_at_ns"]
+                        )
+                    })
+                    .collect();
+                let found = alerts
+                    .into_iter()
+                    .find(|a| a["last_at_ns"].as_i64().unwrap_or(0) > after_ns && pred(a));
+                if let Some(a) = found {
+                    return Ok((a, start.elapsed()));
+                }
+            }
+            Err(e) => {
+                eprintln!("[e2e] poll error (continuing): {e}");
+                last_err = Some(e.to_string());
+            }
+        }
+        tokio::time::sleep(POLL_EVERY).await;
+    }
+    anyhow::bail!(
+        "no matching log alert within {timeout:?} (last poll error: {last_err:?}); last alerts seen:\n{}",
         last_seen.join("\n")
     )
 }

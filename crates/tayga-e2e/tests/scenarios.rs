@@ -154,3 +154,74 @@ async fn raw_span_counts_match_jaeger() -> anyhow::Result<()> {
     assert!(mismatches.is_empty(), "mismatches: {mismatches:?}");
     Ok(())
 }
+
+/// A 100% payment failure makes the "Payment request failed" template spike. The template is
+/// older than the 65-minute spike-age rule, so it is reported as a spike, not as new.
+/// Detection runs every 60 s, so the wait is long.
+#[tokio::test]
+#[ignore = "end-to-end: requires `make up`"]
+async fn log_spike_on_payment_failure() -> anyhow::Result<()> {
+    let api = Api::new(API);
+    let flipped = now_ns();
+    let _flag = FlagGuard::set("paymentFailure", "100%")?;
+    let (alert, waited) = wait_for_alert(
+        &api,
+        "kind=spike&service=payment&since=1h",
+        flipped,
+        LOG_SPIKE_TIMEOUT,
+        |a| s(a, "template").contains("Payment request failed"),
+    )
+    .await?;
+    println!("[e2e] log_spike: alert after {:.0}s", waited.as_secs_f64());
+    let traces = alert["example_traces"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        traces.iter().any(|t| !t["story_id"].is_null()),
+        "no example trace links to a story: {traces:?}"
+    );
+    Ok(())
+}
+
+/// Emits a log with a per-run random first word, so Drain creates a fresh template every run
+/// (`<word> <*> marker`; the `e2e` token contains a digit and is masked). The checkout service
+/// is older than 15 min, so the template is reported as a new-template alert (spec section 12.7).
+#[tokio::test]
+#[ignore = "end-to-end: requires `make up`"]
+async fn new_template_from_probe() -> anyhow::Result<()> {
+    let api = Api::new(API);
+    let word = tayga_devtools::emit::random_word(12);
+    let trace = tayga_devtools::emit::random_trace_id();
+    let trace_hex: String = trace.iter().map(|b| format!("{b:02x}")).collect();
+    let flipped = now_ns();
+    tayga_devtools::emit::emit_log(
+        "http://localhost:14318",
+        "checkout",
+        &format!("{word} tayga-e2e-probe marker"),
+        &trace,
+        9,
+    )
+    .await?;
+    let (alert, waited) = wait_for_alert(
+        &api,
+        "kind=new&service=checkout&since=1h",
+        flipped,
+        NEW_TEMPLATE_TIMEOUT,
+        |a| s(a, "template").starts_with(&word),
+    )
+    .await?;
+    println!(
+        "[e2e] new_template: alert after {:.0}s",
+        waited.as_secs_f64()
+    );
+    let traces = alert["example_traces"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        traces.iter().any(|t| s(t, "trace_id") == trace_hex),
+        "example_traces {traces:?} should contain {trace_hex}"
+    );
+    Ok(())
+}
