@@ -1,6 +1,6 @@
 //! Server-rendered pages (spec §10). No JavaScript.
 
-use crate::model::{GroupView, StoryView, TraceLogRow};
+use crate::model::{GroupView, StoryView, TraceLogRow, TraceSpanRow};
 use crate::params::{
     bucket_secs, group_filter, parse_fingerprint, parse_hex_id, parse_since, since_or,
 };
@@ -15,7 +15,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use std::collections::HashSet;
+use serde::Deserialize;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -89,6 +90,30 @@ fn fmt_time(ns: i64) -> String {
         sod / 60 % 60,
         sod % 60
     )
+}
+
+/// UTC wall clock with milliseconds, `HH:MM:SS.mmm`, for log lines within one story.
+fn fmt_clock_ms(ns: i64) -> String {
+    let sod = ns.div_euclid(1_000_000_000).rem_euclid(86_400);
+    let millis = ns.rem_euclid(1_000_000_000) / 1_000_000;
+    format!(
+        "{:02}:{:02}:{:02}.{millis:03}",
+        sod / 3600,
+        sod / 60 % 60,
+        sod % 60
+    )
+}
+
+/// Percent-encodes everything except unreserved URL characters, for query values in links.
+fn url_component(raw: &str) -> String {
+    raw.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 fn ms(ns: u64) -> String {
@@ -259,8 +284,22 @@ async fn group_page<R: Repo>(
 struct LogView {
     time: String,
     service: String,
+    span: String,
     severity: String,
     body: String,
+}
+
+/// One service filter link above the log table; `href` is a relative link to this story.
+struct LogChip {
+    label: String,
+    count: usize,
+    href: String,
+    active: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct StoryQuery {
+    log_service: Option<String>,
 }
 
 #[derive(Template, WebTemplate)]
@@ -278,6 +317,11 @@ struct StoryPage {
     rows: Vec<WaterfallRow>,
     diff_lines: Vec<String>,
     logs: Vec<LogView>,
+    log_total: usize,
+    log_chips: Vec<LogChip>,
+    log_filter: String,
+    trace_span_count: usize,
+    trace_service_count: usize,
 }
 
 fn diff_lines(story: &StoryView) -> Vec<String> {
@@ -312,26 +356,74 @@ fn diff_lines(story: &StoryView) -> Vec<String> {
     out
 }
 
-fn log_view(l: &TraceLogRow) -> LogView {
+fn log_view(l: &TraceLogRow, span_names: &HashMap<&str, &str>) -> LogView {
     LogView {
-        time: fmt_time(l.ts_ns),
+        time: fmt_clock_ms(l.ts_ns),
         service: l.service_name.clone(),
-        severity: if l.severity_text.is_empty() {
-            l.severity_number.to_string()
-        } else {
-            l.severity_text.clone()
+        span: span_names
+            .get(l.span_id.as_str())
+            .map_or_else(|| "—".to_string(), |n| n.to_string()),
+        severity: match (l.severity_text.is_empty(), l.severity_number) {
+            (false, _) => l.severity_text.clone(),
+            // OTLP severity 0 means "unspecified", e.g. Envoy access logs.
+            (true, 0) => "—".to_string(),
+            (true, n) => n.to_string(),
         },
         body: l.body.clone(),
     }
 }
 
+/// Logs linked to the trace (time order), the per-service filter chips and the filtered rows.
+fn story_logs(
+    story_id: &str,
+    spans: &[TraceSpanRow],
+    logs: &[TraceLogRow],
+    filter: &str,
+) -> (Vec<LogView>, Vec<LogChip>) {
+    let span_names: HashMap<&str, &str> = spans
+        .iter()
+        .map(|s| (s.span_id.as_str(), s.span_name.as_str()))
+        .collect();
+    let mut sorted: Vec<&TraceLogRow> = logs.iter().collect();
+    sorted.sort_by_key(|l| l.ts_ns);
+    let mut per_service: BTreeMap<&str, usize> = BTreeMap::new();
+    for l in &sorted {
+        *per_service.entry(l.service_name.as_str()).or_default() += 1;
+    }
+    let base = format!("/stories/{story_id}");
+    let mut chips = vec![LogChip {
+        label: "all".to_string(),
+        count: sorted.len(),
+        href: format!("{base}#logs"),
+        active: filter.is_empty(),
+    }];
+    chips.extend(per_service.iter().map(|(svc, count)| LogChip {
+        label: svc.to_string(),
+        count: *count,
+        href: format!("{base}?log_service={}#logs", url_component(svc)),
+        active: *svc == filter,
+    }));
+    let rows = sorted
+        .into_iter()
+        .filter(|l| filter.is_empty() || l.service_name == filter)
+        .map(|l| log_view(l, &span_names))
+        .collect();
+    (rows, chips)
+}
+
 async fn story_page<R: Repo>(
     State(s): State<UiState<R>>,
     Path(story_id): Path<String>,
+    q: Result<Query<StoryQuery>, QueryRejection>,
 ) -> Response {
     let Ok(id) = parse_hex_id(&story_id) else {
         return error_page(StatusCode::BAD_REQUEST, "invalid story id");
     };
+    let q = match q {
+        Ok(Query(q)) => q,
+        Err(rejection) => return error_page(StatusCode::BAD_REQUEST, rejection.body_text()),
+    };
+    let log_filter = q.log_service.unwrap_or_default().trim().to_string();
     let story = match s.app.repo.story(&id).await {
         Ok(Some(v)) => v,
         Ok(None) => return error_page(StatusCode::NOT_FOUND, "no such story"),
@@ -348,6 +440,13 @@ async fn story_page<R: Repo>(
         }
     };
     let critical: HashSet<String> = story.critical_span_ids().into_iter().collect();
+    let (logs, log_chips) = story_logs(&id, &trace.spans, &trace.logs, &log_filter);
+    let trace_service_count = trace
+        .spans
+        .iter()
+        .map(|sp| sp.service_name.as_str())
+        .collect::<HashSet<_>>()
+        .len();
     StoryPage {
         kind: story.kind.clone(),
         summary: story.summary.clone(),
@@ -364,7 +463,12 @@ async fn story_page<R: Repo>(
         fingerprint: story.fingerprint.clone(),
         rows: waterfall(&trace.spans, &critical, &story.root_cause.span_id),
         diff_lines: diff_lines(&story),
-        logs: trace.logs.iter().map(log_view).collect(),
+        logs,
+        log_total: trace.logs.len(),
+        log_chips,
+        log_filter,
+        trace_span_count: trace.spans.len(),
+        trace_service_count,
     }
     .into_response()
 }
@@ -619,6 +723,136 @@ mod tests {
         assert!(body.contains("class=\"rc\""));
         assert!(body.contains("http://localhost:8080/jaeger/ui/trace/"));
         assert!(body.contains("load-generator → checkout → payment"));
+    }
+
+    fn log(ts_ns: i64, span: &str, service: &str, body: &str) -> TraceLogRow {
+        TraceLogRow {
+            ts_ns,
+            span_id: span.into(),
+            service_name: service.into(),
+            severity_number: 9,
+            severity_text: "INFO".into(),
+            body: body.into(),
+        }
+    }
+
+    fn span(id: &str, service: &str, name: &str) -> TraceSpanRow {
+        TraceSpanRow {
+            span_id: id.into(),
+            parent_span_id: String::new(),
+            service_name: service.into(),
+            span_name: name.into(),
+            kind: "server".into(),
+            start_ns: 0,
+            duration_ns: 10,
+            status: "unset".into(),
+            status_message: String::new(),
+        }
+    }
+
+    fn logs_repo() -> FakeRepo {
+        let trace = TraceView {
+            trace_id: "ab".repeat(16),
+            spans: vec![
+                span("s1", "checkout", "PlaceOrder"),
+                span("s2", "payment", "charge"),
+            ],
+            // Deliberately out of order; the page sorts by time.
+            logs: vec![
+                log(3_000_000, "s1", "checkout", "order placed"),
+                log(1_000_000, "s1", "checkout", "[PlaceOrder]"),
+                log(2_500_000, "s2", "payment", "Charge request received."),
+                log(2_000_000, "unknown", "payment", "no span here"),
+            ],
+        };
+        FakeRepo {
+            story: Some(StoryView::from_record(record())),
+            trace: Some(trace),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn story_logs_are_time_ordered_with_service_and_span() {
+        let (status, body) = html(logs_repo(), &format!("/stories/{}", "ab".repeat(16))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("4 logs linked to this trace · 2 spans in 2 services"));
+        let order: Vec<usize> = [
+            "[PlaceOrder]",
+            "no span here",
+            "Charge request received.",
+            "order placed",
+        ]
+        .iter()
+        .map(|b| body.find(b).unwrap_or_else(|| panic!("missing {b}")))
+        .collect();
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "not time ordered: {order:?}"
+        );
+        assert!(body.contains("<td class=\"muted\">PlaceOrder</td>"));
+        assert!(
+            body.contains("<td class=\"muted\">—</td>"),
+            "unknown span shows a dash"
+        );
+        assert!(body.contains("00:00:00.001"), "millisecond clock");
+        let id = "ab".repeat(16);
+        assert!(body.contains(&format!("href=\"/stories/{id}?log_service=payment#logs\"")));
+        assert!(body.contains("all <span class=\"n\">4</span>"));
+        assert!(body.contains("payment <span class=\"n\">2</span>"));
+    }
+
+    #[tokio::test]
+    async fn story_logs_filter_by_service() {
+        let id = "ab".repeat(16);
+        let (status, body) = html(logs_repo(), &format!("/stories/{id}?log_service=payment")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Charge request received.") && body.contains("no span here"));
+        assert!(!body.contains("order placed") && !body.contains("[PlaceOrder]"));
+        assert!(body.contains("showing payment only"));
+        assert!(
+            body.contains(
+                "chip on\" href=\"/stories/{id}?log_service=payment#logs\""
+                    .replace("{id}", &id)
+                    .as_str()
+            )
+        );
+        let (_, none) = html(logs_repo(), &format!("/stories/{id}?log_service=nope")).await;
+        assert!(none.contains("No logs from nope in this trace."));
+    }
+
+    #[tokio::test]
+    async fn story_without_linked_logs_explains_why() {
+        let repo = FakeRepo {
+            story: Some(StoryView::from_record(record())),
+            trace: Some(TraceView {
+                trace_id: "ab".repeat(16),
+                spans: vec![span("s1", "load-generator", "POST")],
+                logs: vec![],
+            }),
+            ..Default::default()
+        };
+        let (_, body) = html(repo, &format!("/stories/{}", "ab".repeat(16))).await;
+        assert!(body.contains("0 logs linked to this trace · 1 span in 1 service"));
+        assert!(body.contains("No logs are linked to this trace."));
+        assert!(!body.contains("class=\"chips\""));
+    }
+
+    #[test]
+    fn unspecified_severity_shows_a_dash() {
+        let names = HashMap::new();
+        let mut l = log(0, "s", "frontend-proxy", "GET /");
+        l.severity_text = String::new();
+        l.severity_number = 0;
+        assert_eq!(log_view(&l, &names).severity, "—");
+        l.severity_number = 17;
+        assert_eq!(log_view(&l, &names).severity, "17");
+    }
+
+    #[test]
+    fn url_component_encodes_reserved_characters() {
+        assert_eq!(url_component("frontend-proxy"), "frontend-proxy");
+        assert_eq!(url_component("a b&c\"<"), "a%20b%26c%22%3C");
     }
 
     #[tokio::test]

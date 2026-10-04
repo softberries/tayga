@@ -23,6 +23,11 @@ form.filters { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
 .wf .bar.crit { background:var(--crit); } .wf .bar.err { background:var(--err); }
 tr.rc td { background:#fdecea; }
 .path { font-size:15px; }
+.chips { display:flex; gap:6px; flex-wrap:wrap; margin:4px 0 10px; }
+.chip { padding:2px 9px; border:1px solid var(--line); border-radius:12px; color:var(--fg); text-decoration:none; font-size:12px; background:var(--card); }
+.chip .n { color:var(--muted); }
+.chip.on { background:var(--fg); border-color:var(--fg); color:#fff; }
+.chip.on .n { color:#cfd5dc; }
 .empty { padding:24px; text-align:center; color:var(--muted); background:var(--card); }
 </style>
 </head>
