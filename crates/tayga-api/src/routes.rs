@@ -12,14 +12,23 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::counter::Counter;
+use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
 use serde::Deserialize;
 use std::sync::Arc;
 
+/// Label for counters split by scrape job.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct JobLabel {
+    pub job: String,
+}
+
 #[derive(Clone, Default)]
 pub struct ApiMetrics {
     pub repo_errors: Counter,
+    pub scrape_failures: Family<JobLabel, Counter>,
 }
 
 impl ApiMetrics {
@@ -29,6 +38,11 @@ impl ApiMetrics {
             "tayga_api_repo_errors",
             "Requests answered 503 because ClickHouse failed",
             m.repo_errors.clone(),
+        );
+        registry.register(
+            "tayga_api_scrape_failures",
+            "Metric scrapes of a recorder target that failed",
+            m.scrape_failures.clone(),
         );
         m
     }

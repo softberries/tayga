@@ -1,0 +1,40 @@
+# HELP tayga_logminer_logs_mined Log records assigned to a template.
+# TYPE tayga_logminer_logs_mined counter
+tayga_logminer_logs_mined_total 155472
+# HELP tayga_logminer_templates_created Templates created by Drain.
+# TYPE tayga_logminer_templates_created counter
+tayga_logminer_templates_created_total 0
+# HELP tayga_logminer_cluster_cap_hits Logs sent to a service's overflow template because its cluster cap was reached.
+# TYPE tayga_logminer_cluster_cap_hits counter
+tayga_logminer_cluster_cap_hits_total 0
+# HELP tayga_logminer_write_failures Failed ClickHouse insert attempts for hits and templates.
+# TYPE tayga_logminer_write_failures counter
+tayga_logminer_write_failures_total 0
+# HELP tayga_logminer_templates Templates held in memory.
+# TYPE tayga_logminer_templates gauge
+tayga_logminer_templates 297
+# HELP tayga_logminer_alerts Alerts created (updates of active spike alerts are not counted).
+# TYPE tayga_logminer_alerts counter
+tayga_logminer_alerts_total{kind="new"} 0
+tayga_logminer_alerts_total{kind="spike"} 1
+# HELP tayga_logminer_detect_seconds Duration of one detection pass.
+# TYPE tayga_logminer_detect_seconds histogram
+tayga_logminer_detect_seconds_sum 4.865793288999999
+tayga_logminer_detect_seconds_count 69
+tayga_logminer_detect_seconds_bucket{le="0.01"} 0
+tayga_logminer_detect_seconds_bucket{le="0.02"} 0
+tayga_logminer_detect_seconds_bucket{le="0.04"} 16
+tayga_logminer_detect_seconds_bucket{le="0.08"} 51
+tayga_logminer_detect_seconds_bucket{le="0.16"} 66
+tayga_logminer_detect_seconds_bucket{le="0.32"} 69
+tayga_logminer_detect_seconds_bucket{le="0.64"} 69
+tayga_logminer_detect_seconds_bucket{le="1.28"} 69
+tayga_logminer_detect_seconds_bucket{le="2.56"} 69
+tayga_logminer_detect_seconds_bucket{le="5.12"} 69
+tayga_logminer_detect_seconds_bucket{le="10.24"} 69
+tayga_logminer_detect_seconds_bucket{le="20.48"} 69
+tayga_logminer_detect_seconds_bucket{le="+Inf"} 69
+# HELP tayga_logminer_data_lag_seconds Wall clock minus the newest mined log timestamp, at the last detection pass.
+# TYPE tayga_logminer_data_lag_seconds gauge
+tayga_logminer_data_lag_seconds 0.394905334
+# EOF

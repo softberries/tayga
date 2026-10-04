@@ -1,0 +1,29 @@
+# HELP tayga_assembler_closed_traces Traces closed and analysed.
+# TYPE tayga_assembler_closed_traces counter
+tayga_assembler_closed_traces_total 94339
+# HELP tayga_assembler_stories Stories produced.
+# TYPE tayga_assembler_stories counter
+tayga_assembler_stories_total{kind="slow"} 165
+tayga_assembler_stories_total{kind="error"} 343
+# HELP tayga_assembler_analysis_panics Traces skipped after an analysis panic.
+# TYPE tayga_assembler_analysis_panics counter
+tayga_assembler_analysis_panics_total 0
+# HELP tayga_assembler_serialization_failures Stories dropped because they could not be serialized.
+# TYPE tayga_assembler_serialization_failures counter
+tayga_assembler_serialization_failures_total 0
+# HELP tayga_assembler_write_failures Failed ClickHouse/Kafka write attempts.
+# TYPE tayga_assembler_write_failures counter
+tayga_assembler_write_failures_total 0
+# HELP tayga_assembler_open_traces Traces currently buffered.
+# TYPE tayga_assembler_open_traces gauge
+tayga_assembler_open_traces 275
+# HELP tayga_assembler_buffered_bytes Record bytes currently buffered.
+# TYPE tayga_assembler_buffered_bytes gauge
+tayga_assembler_buffered_bytes 1660418
+# HELP tayga_assembler_late_items Spans/logs received for already closed traces.
+# TYPE tayga_assembler_late_items counter
+tayga_assembler_late_items_total 12
+# HELP tayga_assembler_baseline_endpoints Endpoints with a loaded baseline.
+# TYPE tayga_assembler_baseline_endpoints gauge
+tayga_assembler_baseline_endpoints 63
+# EOF
