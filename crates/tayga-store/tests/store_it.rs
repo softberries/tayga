@@ -48,7 +48,7 @@ fn span(id: &str) -> SpanRow {
 #[ignore = "requires ClickHouse: make it"]
 async fn migrate_is_idempotent_and_rows_roundtrip() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4]);
     assert!(migrate(&s).await.unwrap().is_empty());
 
     let store = Store::new(&s);
@@ -150,7 +150,7 @@ fn story_row(id: &str) -> StoryRow {
 #[ignore = "requires ClickHouse: run against the live stack"]
 async fn analysis_tables_roundtrip_and_baseline_queries() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4]);
     let store = Store::new(&s);
 
     let mut summaries: Vec<TraceSummaryRow> = (0..60).map(|i| summary_row(i, i % 2 == 0)).collect();
@@ -221,7 +221,7 @@ async fn analysis_tables_roundtrip_and_baseline_queries() {
 #[ignore = "requires ClickHouse: run against the live stack"]
 async fn replayed_trace_collapses_to_most_complete_row() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4]);
     let store = Store::new(&s);
 
     let full = TraceSummaryRow {
@@ -294,7 +294,7 @@ async fn replayed_trace_collapses_to_most_complete_row() {
 #[ignore = "requires ClickHouse: make it"]
 async fn slow_story_traces_are_excluded_from_baselines() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4]);
     let store = Store::new(&s);
 
     let summaries: Vec<TraceSummaryRow> = (0..60).map(|i| summary_row(i, i % 2 == 0)).collect();
@@ -330,4 +330,210 @@ async fn slow_story_traces_are_excluded_from_baselines() {
         .execute()
         .await
         .unwrap();
+}
+
+use tayga_store::logs::{LogAlertRow, LogHitRow, LogTemplateRow};
+
+const MIN_NS: i64 = 60 * 1_000_000_000;
+
+async fn log_store() -> (ClickHouseSettings, Store) {
+    let s = settings();
+    migrate(&s).await.unwrap();
+    let store = Store::new(&s);
+    (s, store)
+}
+
+async fn drop_db(s: &ClickHouseSettings, store: &Store) {
+    store
+        .client()
+        .query(&format!("DROP DATABASE `{}`", s.database))
+        .execute()
+        .await
+        .unwrap();
+}
+
+fn template(id: u64, service: &str, first_seen: i64) -> LogTemplateRow {
+    LogTemplateRow {
+        template_id: id,
+        service: service.into(),
+        template: format!("template {id} <*>"),
+        first_seen,
+        last_seen: now_ns(),
+        count: 1,
+        max_severity: 9,
+        sample: "sample".into(),
+        version: 1,
+    }
+}
+
+fn hit(log_id: u64, template_id: u64, ts: i64, trace: &str) -> LogHitRow {
+    LogHitRow {
+        log_id,
+        template_id,
+        service: "checkout".into(),
+        ts,
+        severity_number: 9,
+        trace_id: trace.into(),
+        span_id: String::new(),
+    }
+}
+
+fn alert(id: &str, kind: i8, template_id: u64, last_at: i64) -> LogAlertRow {
+    LogAlertRow {
+        alert_id: id.into(),
+        kind,
+        template_id,
+        service: "checkout".into(),
+        template: "t".into(),
+        started_at: last_at,
+        last_at,
+        window_count: 12,
+        peak_count: 12,
+        baseline_per_window: 1.5,
+        example_trace_ids: vec!["tr1".into()],
+        version: 1,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn hits_are_idempotent_by_log_id() {
+    let (s, store) = log_store().await;
+    let hits: Vec<LogHitRow> = (1..=3)
+        .map(|i| hit(i, 7, now_ns() - i as i64, ""))
+        .collect();
+    store.insert_log_hits(&hits).await.unwrap();
+    store.insert_log_hits(&hits).await.unwrap();
+    let n: u64 = store
+        .client()
+        .query("SELECT uniqExact(log_id) FROM log_template_hits WHERE template_id = 7")
+        .fetch_one()
+        .await
+        .unwrap();
+    assert_eq!(n, 3);
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn template_windows_counts_current_and_baseline() {
+    let (s, store) = log_store().await;
+    let now = now_ns();
+    store
+        .upsert_templates(&[template(1, "checkout", now - 120 * MIN_NS)])
+        .await
+        .unwrap();
+    let mut hits = Vec::new();
+    let mut id = 0;
+    for i in 0..12 {
+        id += 1;
+        hits.push(hit(id, 1, now - MIN_NS - i * 1_000_000, ""));
+    }
+    for i in 0..6 {
+        id += 1;
+        hits.push(hit(id, 1, now - (30 + i) * MIN_NS, ""));
+    }
+    for i in 0..4 {
+        id += 1;
+        hits.push(hit(id, 1, now - 120 * MIN_NS - i, ""));
+    }
+    store.insert_log_hits(&hits).await.unwrap();
+
+    let w = store.template_windows(5, 60, 10).await.unwrap();
+    assert_eq!(w.len(), 1);
+    assert_eq!(w[0].template_id, 1);
+    assert_eq!(w[0].service, "checkout");
+    assert_eq!(w[0].first_seen_ns, now - 120 * MIN_NS);
+    assert_eq!(w[0].current, 12);
+    assert_eq!(w[0].baseline_total, 6);
+    assert!(store.template_windows(5, 60, 13).await.unwrap().is_empty());
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn new_candidates_and_alerts() {
+    let (s, store) = log_store().await;
+    let now = now_ns();
+    let old_first = now - 60 * MIN_NS;
+    store
+        .upsert_templates(&[
+            template(1, "checkout", old_first),
+            template(2, "checkout", now - 2 * MIN_NS),
+        ])
+        .await
+        .unwrap();
+    let c = store.new_template_candidates(10).await.unwrap();
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0].template_id, 2);
+    assert_eq!(c[0].service_oldest_ns, old_first);
+
+    store
+        .insert_alerts(&[alert("new:2", 1, 2, now)])
+        .await
+        .unwrap();
+    assert!(store.new_template_candidates(10).await.unwrap().is_empty());
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn templates_upsert_latest_version_wins() {
+    let (s, store) = log_store().await;
+    let now = now_ns();
+    let v1 = template(1, "checkout", now - MIN_NS);
+    let v2 = LogTemplateRow {
+        count: 50,
+        version: 2,
+        ..v1.clone()
+    };
+    store
+        .upsert_templates(std::slice::from_ref(&v2))
+        .await
+        .unwrap();
+    store.upsert_templates(&[v1]).await.unwrap();
+    assert_eq!(store.load_templates().await.unwrap(), vec![v2]);
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn active_spike_alerts_filters_by_last_at() {
+    let (s, store) = log_store().await;
+    let now = now_ns();
+    let fresh = alert("spike:1", 2, 1, now - MIN_NS);
+    store
+        .insert_alerts(&[
+            fresh.clone(),
+            alert("spike:2", 2, 2, now - 30 * MIN_NS),
+            alert("new:3", 1, 3, now),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(store.active_spike_alerts(10).await.unwrap(), vec![fresh]);
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn example_traces_are_distinct_newest_first_and_skip_empty() {
+    let (s, store) = log_store().await;
+    let now = now_ns();
+    store
+        .insert_log_hits(&[
+            hit(1, 1, now - 5 * MIN_NS, "ta"),
+            hit(2, 1, now - 4 * MIN_NS, "tb"),
+            hit(3, 1, now - 3 * MIN_NS, ""),
+            hit(4, 1, now - 2 * MIN_NS, "ta"),
+            hit(5, 2, now - MIN_NS, "other"),
+            hit(6, 1, now - 120 * MIN_NS, "old"),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(
+        store.example_traces(1, 60, 10).await.unwrap(),
+        vec!["ta".to_string(), "tb".to_string()]
+    );
+    assert_eq!(store.example_traces(1, 60, 1).await.unwrap().len(), 1);
+    drop_db(&s, &store).await;
 }
