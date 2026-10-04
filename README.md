@@ -73,6 +73,8 @@ Every 60 seconds the logminer runs two rules over `log_template_hits`:
 
 A spike alert stays active while it was last confirmed within `alert_active_min` (10) of now; a tick that still fires updates it, otherwise a new alert starts. Each alert carries up to 5 example trace ids (newest first) that link to the error story when one exists, else to Jaeger. The other values are `TAYGA__LOGMINER__*` environment variables (keys in `LogminerSettings` in `crates/tayga-logminer/src/main.rs`). Other defaults: similarity threshold 0.5, at most 5,000 clusters per service (beyond that, unmatched logs go to the `<overflow>` template), flush at 5,000 logs or 1 s.
 
+The API decides whether an alert is "active" (the `active` field, the `alerting` flag and the story-page badges) with its own constant, `ALERT_ACTIVE_MIN = 10` in `crates/tayga-api/src/repo.rs`, not with the logminer setting. If you change `TAYGA__LOGMINER__ALERT_ACTIVE_MIN`, change that constant to match, or the UI and the logminer disagree on which alerts are active.
+
 Where to look:
 
 - `/alerts`: alerts with kind badge, count against baseline and example traces.
