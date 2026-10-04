@@ -182,3 +182,23 @@ export function validateTracesSearch(s: Record<string, unknown>): TracesSearch {
     sel: sel ? formatRect(sel) : undefined,
   }
 }
+
+/** `/logs/alerts` search: the API's kind and service filters. */
+export interface LogAlertsSearch {
+  kind?: 'new' | 'spike'
+  service?: string
+}
+
+export function validateLogAlertsSearch(s: Record<string, unknown>): LogAlertsSearch {
+  return { kind: s.kind === 'new' || s.kind === 'spike' ? s.kind : undefined, service: str(s.service, 200) }
+}
+
+/** `/logs/templates` search: the API's service filter and text search (`q`, at most 200 chars). */
+export interface LogTemplatesSearch {
+  service?: string
+  q?: string
+}
+
+export function validateLogTemplatesSearch(s: Record<string, unknown>): LogTemplatesSearch {
+  return { service: str(s.service, 200), q: str(s.q, 200) }
+}

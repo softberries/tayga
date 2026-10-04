@@ -46,9 +46,9 @@ describe('error boundaries', () => {
 
   it('an old /service-map shape (edges array) leaves the shell intact', async () => {
     // The pre-plan-5 API returned a bare array of edges.
-    stubApi({ '/service-map': { body: [{ parent: 'a', child: 'b', calls: 1, errors: 0 }] } })
+    stubApi({ '/service-map': { body: [{ parent: 'a', child: 'b', calls: 1, errors: 0 }] }, '/log-alerts': { body: [] }, '/services': { body: [] } })
     renderApp('/logs/alerts')
-    expect(await screen.findByText('This page is built in Task 10.')).toBeInTheDocument()
+    expect(await screen.findByText('No log alerts in this window')).toBeInTheDocument()
     expectShell()
     expect(screen.queryByText(/degraded/)).toBeNull()
   })

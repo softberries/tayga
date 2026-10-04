@@ -9,7 +9,7 @@ import {
   redirect,
   retainSearchParams,
 } from '@tanstack/react-router'
-import { HEX32, U64, validateHomeSearch, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch, validateTracesSearch } from './app/search'
+import { HEX32, U64, validateHomeSearch, validateLogAlertsSearch, validateLogTemplatesSearch, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch, validateTracesSearch } from './app/search'
 import type { RootSearch } from './app/search'
 import { AppShell } from './components/shell/AppShell'
 import { NotFound } from './pages/NotFound'
@@ -110,7 +110,8 @@ const logAlertsRoute = createRoute({
   getParentRoute: () => logsRoute,
   path: 'alerts',
   staticData: { crumb: 'Alerts' },
-  component: page('LogAlertsPage'),
+  validateSearch: validateLogAlertsSearch,
+  component: lazyRouteComponent(() => import('./routes/logs/alerts'), 'LogAlertsPage'),
 })
 
 const logTemplatesRoute = createRoute({
@@ -122,7 +123,8 @@ const logTemplatesRoute = createRoute({
 const logTemplatesIndexRoute = createRoute({
   getParentRoute: () => logTemplatesRoute,
   path: '/',
-  component: page('LogTemplatesPage'),
+  validateSearch: validateLogTemplatesSearch,
+  component: lazyRouteComponent(() => import('./routes/logs/templates'), 'LogTemplatesPage'),
 })
 
 const logTemplateRoute = createRoute({
@@ -132,7 +134,7 @@ const logTemplateRoute = createRoute({
   beforeLoad: ({ params }) => {
     if (!U64.test(params.templateId)) throw notFound()
   },
-  component: page('LogTemplatePage'),
+  component: lazyRouteComponent(() => import('./routes/logs/templates.$id'), 'LogTemplatePage'),
 })
 
 const pipelineRoute = createRoute({

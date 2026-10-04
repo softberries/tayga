@@ -30,10 +30,14 @@ export interface TimeSeriesProps {
   minInterval?: number
   /** Approximate number of y-axis steps (ECharts default 5); fewer suits small charts. */
   splitNumber?: number
+  /** Stack the series on top of each other (bars; the first series sits at the bottom). */
+  stack?: boolean
+  /** Smallest x extent as `[from, to]` unix ms, so a sparse series still spans its window. */
+  xRange?: readonly [number, number]
 }
 
 /** Shared time-series chart (line, area or bar) on a time axis, themed via echartsTheme. */
-export function TimeSeries({ series, height = 180, markAt, markLabel, format, summary, minInterval = 1, splitNumber }: TimeSeriesProps) {
+export function TimeSeries({ series, height = 180, markAt, markLabel, format, summary, minInterval = 1, splitNumber, stack, xRange }: TimeSeriesProps) {
   const applied = useAppliedTheme()
   const reduceMotion = useMediaQuery(REDUCED_MOTION_QUERY)
   const option = useMemo(() => {
@@ -46,7 +50,7 @@ export function TimeSeries({ series, height = 180, markAt, markLabel, format, su
       animationDuration: 300,
       grid: { left: 8, right: 12, top: 16, bottom: 4, containLabel: true },
       tooltip: { trigger: 'axis', valueFormatter: (v: unknown) => (typeof v === 'number' ? fmt(v) : '—') },
-      xAxis: { type: 'time', axisLabel: { hideOverlap: true } },
+      xAxis: { type: 'time', axisLabel: { hideOverlap: true }, ...(xRange ? { min: xRange[0], max: xRange[1] } : {}) },
       yAxis: {
         type: 'value',
         minInterval,
@@ -61,6 +65,7 @@ export function TimeSeries({ series, height = 180, markAt, markLabel, format, su
           data: s.points.map(([t, v]) => [t, v]),
           ...(color ? { itemStyle: { color }, lineStyle: { color } } : {}),
           showSymbol: false,
+          ...(stack ? { stack: 'total' } : {}),
           barMaxWidth: 18,
           areaStyle: s.type === 'area' ? (color ? { color: withAlpha(color, 0.16) } : { opacity: 0.16 }) : undefined,
           markLine:
@@ -76,6 +81,6 @@ export function TimeSeries({ series, height = 180, markAt, markLabel, format, su
         }
       }),
     }
-  }, [series, markAt, markLabel, format, applied, reduceMotion, minInterval, splitNumber])
+  }, [series, markAt, markLabel, format, applied, reduceMotion, minInterval, splitNumber, stack, xRange])
   return <EChart option={option} height={height} summary={summary} />
 }
