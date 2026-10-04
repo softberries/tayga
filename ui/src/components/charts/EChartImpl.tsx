@@ -5,7 +5,7 @@
  */
 import ReactEChartsCore from 'echarts-for-react/esm/core'
 import { BarChart, LineChart, ScatterChart } from 'echarts/charts'
-import { BrushComponent, GridComponent, MarkLineComponent, ToolboxComponent, TooltipComponent } from 'echarts/components'
+import { BrushComponent, GridComponent, LegendComponent, MarkLineComponent, ToolboxComponent, TooltipComponent } from 'echarts/components'
 import * as echarts from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import type { EChartProps } from './EChart'
@@ -15,6 +15,7 @@ echarts.use([
   BarChart,
   ScatterChart,
   GridComponent,
+  LegendComponent,
   TooltipComponent,
   MarkLineComponent,
   BrushComponent,

@@ -1,0 +1,141 @@
+/** Pipeline health: status strip (with a job down), series wiring, empty history, lag and errors. */
+import { screen, waitFor, within } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import lag from '../api/__fixtures__/pipeline-lag.json'
+import { clearOutage } from '../app/apiStatus'
+import { renderApp } from '../test/renderApp'
+
+// ECharts needs a canvas; jsdom has none. The chart is covered by the screenshots.
+vi.mock('../components/charts/EChartImpl', () => ({ default: () => <div data-testid="echart" /> }))
+
+const now = Date.now()
+const minute = (ago: number) => Math.floor((now - ago) / 60_000) * 60_000
+const series = (points: [number, number | null][]) => ({ metric: 'm', kind: 'rate', bucket_secs: 60, points })
+
+interface Stub {
+  up?: Record<string, [number, number][]>
+  lag?: { status?: number; body: unknown }
+  /** Points for every non-`up` series. */
+  metrics?: [number, number | null][]
+}
+
+function stub(opts: Stub) {
+  const calls: URL[] = []
+  const fetch = vi.fn(async (input: string) => {
+    const url = new URL(input, 'http://test')
+    calls.push(url)
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+    if (url.pathname.endsWith('/pipeline/lag')) return json(opts.lag?.body ?? lag, opts.lag?.status)
+    if (url.pathname.endsWith('/pipeline/series')) {
+      const q = url.searchParams
+      if (q.get('metric') === 'up') return json(series(opts.up?.[q.get('job') ?? ''] ?? []))
+      return json(series(opts.metrics ?? []))
+    }
+    return json({ error: 'not found' }, 404)
+  })
+  vi.stubGlobal('fetch', fetch)
+  return calls
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  clearOutage()
+})
+
+const healthy = (v: number): [number, number][] => [[minute(120_000), v], [minute(60_000), v], [minute(0), v]]
+
+describe('status strip', () => {
+  it('shows a chip per job and flags the one that is down', async () => {
+    stub({
+      up: {
+        'tayga-ingest': healthy(1),
+        'tayga-writer': healthy(1),
+        'tayga-assembler': [[minute(120_000), 1], [minute(60_000), 1], [minute(0), 0]],
+        'tayga-logminer': healthy(1),
+        'tayga-api': healthy(1),
+      },
+      metrics: [[minute(120_000), 1], [minute(60_000), 3]],
+    })
+    renderApp('/pipeline')
+    const strip = await screen.findByRole('list', { name: 'Job status' })
+    const chips = within(strip).getAllByRole('listitem')
+    expect(chips.map((c) => c.getAttribute('data-state'))).toEqual(['up', 'up', 'down', 'up', 'up'])
+    const down = chips[2] as HTMLElement
+    expect(down).toHaveTextContent('assembler')
+    expect(down).toHaveTextContent('down')
+    expect(within(down).getByText('down').className).toMatch(/shadow-glow-err/)
+    expect(within(chips[0] as HTMLElement).getByText('up').className).not.toMatch(/glow/)
+    expect(chips[0]).toHaveTextContent('scraped within the last minute')
+  })
+
+  it('treats a job with no recent sample as down', async () => {
+    stub({
+      up: { 'tayga-ingest': [[minute(30 * 60_000), 1]], 'tayga-writer': healthy(1), 'tayga-assembler': healthy(1), 'tayga-logminer': healthy(1), 'tayga-api': healthy(1) },
+      metrics: [[minute(120_000), 1], [minute(60_000), 2]],
+    })
+    renderApp('/pipeline')
+    const strip = await screen.findByRole('list', { name: 'Job status' })
+    await waitFor(() => expect(within(strip).getAllByRole('listitem')[0]).toHaveAttribute('data-state', 'down'))
+  })
+})
+
+describe('charts', () => {
+  it('requests each series with the recorded metric names, kinds and k=v labels', async () => {
+    const calls = stub({ up: { 'tayga-ingest': healthy(1) }, metrics: [[minute(120_000), 1], [minute(60_000), 3]] })
+    renderApp('/pipeline?since=24h')
+    await waitFor(() => expect(screen.getAllByTestId('echart').length).toBe(9))
+    const q = calls.filter((u) => u.pathname.endsWith('/pipeline/series')).map((u) => Object.fromEntries(u.searchParams))
+    expect(q).toContainEqual({ since: '24h', metric: 'tayga_ingest_records_published_total', kind: 'rate', job: 'tayga-ingest', labels: 'kind=traces' })
+    expect(q).toContainEqual({ since: '24h', metric: 'tayga_writer_batch_seconds', kind: 'q99', job: 'tayga-writer' })
+    expect(q).toContainEqual({ since: '24h', metric: 'tayga_assembler_buffered_bytes', kind: 'gauge', job: 'tayga-assembler' })
+    // Status chips use their own 15 min window whatever the page range.
+    expect(q).toContainEqual({ since: '15m', metric: 'up', kind: 'gauge', job: 'tayga-api' })
+    for (const title of ['Ingest records', 'Writer rows', 'Assembler output', 'Logminer throughput', 'Open traces', 'Buffered bytes', 'Writer batch latency', 'Logminer data lag', 'Errors']) {
+      expect(screen.getByRole('heading', { name: title })).toBeInTheDocument()
+    }
+  })
+
+  it('says a chart is collecting when its series has no points yet', async () => {
+    stub({ up: { 'tayga-ingest': healthy(1) }, metrics: [] })
+    renderApp('/pipeline')
+    await waitFor(() => expect(screen.getAllByText('Collecting… first points in 15 s').length).toBe(9))
+    expect(screen.queryByTestId('echart')).toBeNull()
+  })
+})
+
+describe('empty history', () => {
+  it('shows one collecting state and no charts before the recorder has written anything', async () => {
+    stub({})
+    renderApp('/pipeline')
+    expect(await screen.findByText('Collecting… first points in 15 s')).toBeInTheDocument()
+    expect(screen.getAllByText('Collecting… first points in 15 s')).toHaveLength(1)
+    expect(screen.queryByRole('heading', { name: 'Ingest records' })).toBeNull()
+    // Lag is live from Kafka, so it does not wait for history.
+    expect(await screen.findByRole('list', { name: 'Consumer lag' })).toBeInTheDocument()
+  })
+})
+
+describe('consumer lag', () => {
+  it('lists each group with its lag', async () => {
+    stub({ up: { 'tayga-ingest': healthy(1) }, metrics: [[minute(120_000), 1], [minute(60_000), 2]] })
+    renderApp('/pipeline')
+    const list = await screen.findByRole('list', { name: 'Consumer lag' })
+    const rows = within(list).getAllByRole('listitem')
+    expect(rows).toHaveLength(3)
+    expect(rows[1]).toHaveTextContent('tayga-assembler')
+    expect(rows[1]).toHaveTextContent('1.2k')
+    expect(rows[1]).toHaveAttribute('title', 'committed 17,327,899 of 17,329,052')
+  })
+
+  it('a Kafka outage fails only the lag section', async () => {
+    stub({ up: { 'tayga-ingest': healthy(1) }, metrics: [[minute(120_000), 1], [minute(60_000), 2]], lag: { status: 503, body: { error: 'kafka unavailable' } } })
+    renderApp('/pipeline')
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Could not load consumer lag.')
+    // Kafka being down is not a storage outage.
+    expect(screen.queryByText('Storage unavailable.')).toBeNull()
+    expect(await screen.findByRole('list', { name: 'Job status' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByTestId('echart').length).toBeGreaterThan(0))
+  })
+})

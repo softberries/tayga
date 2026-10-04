@@ -28,11 +28,6 @@ declare module '@tanstack/react-router' {
   }
 }
 
-type Pages = typeof import('./pages/placeholders')
-
-/** A route component in its own chunk, loaded on first visit. */
-const page = (name: keyof Pages) => lazyRouteComponent(() => import('./pages/placeholders'), name)
-
 const rootRoute = createRootRouteWithContext<RouterContext>()({
   validateSearch: (s: Record<string, unknown>): RootSearch => validateRootSearch(s),
   search: { middlewares: [retainSearchParams<RootSearch>(['since'])] },
@@ -141,7 +136,7 @@ const pipelineRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: 'pipeline',
   staticData: { crumb: 'Pipeline' },
-  component: page('PipelinePage'),
+  component: lazyRouteComponent(() => import('./routes/pipeline'), 'PipelinePage'),
 })
 
 export const routeTree = rootRoute.addChildren([

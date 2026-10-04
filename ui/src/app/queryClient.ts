@@ -1,4 +1,5 @@
 import { QueryCache, QueryClient } from '@tanstack/react-query'
+import type { Query } from '@tanstack/react-query'
 import { isApiError } from '../api/client'
 import { clearOutage, reportOutage } from './apiStatus'
 
@@ -8,13 +9,24 @@ export function shouldRetry(failureCount: number, error: unknown): boolean {
   return failureCount < 1
 }
 
+/**
+ * Whether a query speaks for the storage backend. A query that sets `meta: { outage: false }`
+ * (consumer lag, which reads Kafka) neither raises nor clears the "storage unavailable" banner.
+ */
+function isOutageQuery(query: Pick<Query, 'meta'>): boolean {
+  return query.meta?.outage !== false
+}
+
 export function createQueryClient(): QueryClient {
   return new QueryClient({
     queryCache: new QueryCache({
-      onError: (error) => {
+      onError: (error, query) => {
+        if (!isOutageQuery(query)) return
         if (isApiError(error) && error.status === 503) reportOutage(error.message)
       },
-      onSuccess: () => clearOutage(),
+      onSuccess: (_data, query) => {
+        if (isOutageQuery(query)) clearOutage()
+      },
     }),
     defaultOptions: {
       queries: {

@@ -2,16 +2,12 @@ import { screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderApp, stubApi } from '../../test/renderApp'
 
-// The Pipeline page throws while rendering; every other page renders its placeholder.
-vi.mock('../../pages/placeholders', async (importOriginal) => {
-  const real = await importOriginal<typeof import('../../pages/placeholders')>()
-  return {
-    ...real,
-    PipelinePage: () => {
-      throw new Error('pipeline page exploded')
-    },
-  }
-})
+// The Pipeline page throws while rendering; every other page is real.
+vi.mock('../../routes/pipeline', () => ({
+  PipelinePage: () => {
+    throw new Error('pipeline page exploded')
+  },
+}))
 
 beforeEach(() => {
   // React logs caught render errors; keep the output readable.

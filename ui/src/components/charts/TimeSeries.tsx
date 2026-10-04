@@ -35,10 +35,19 @@ export interface TimeSeriesProps {
   stack?: boolean
   /** Smallest x extent as `[from, to]` unix ms, so a sparse series still spans its window. */
   xRange?: readonly [number, number]
+  /** Shows a legend (colored dots with series names) above the plot, for charts with several lines. */
+  legend?: boolean
+}
+
+/** Rough number of legend lines (each name is a dot, a gap and ~6.5 px per character), for the room above the plot. */
+function legendRows(series: readonly TimeSeriesSeries[], viewport: number): number {
+  const width = series.reduce((w, s) => w + 27 + s.name.length * 6.5, 0)
+  const room = viewport < 640 ? viewport - 80 : 600
+  return Math.max(1, Math.ceil(width / room))
 }
 
 /** Shared time-series chart (line, area or bar) on a time axis, themed via echartsTheme. */
-export function TimeSeries({ series, height = 180, markAt, markLabel, format, summary, minInterval = 1, splitNumber, stack, xRange }: TimeSeriesProps) {
+export function TimeSeries({ series, height = 180, markAt, markLabel, format, summary, minInterval = 1, splitNumber, stack, xRange, legend }: TimeSeriesProps) {
   const applied = useAppliedTheme()
   const reduceMotion = useMediaQuery(REDUCED_MOTION_QUERY)
   const option = useMemo(() => {
@@ -49,7 +58,10 @@ export function TimeSeries({ series, height = 180, markAt, markLabel, format, su
       // Spec §5: reduced motion turns every animation off, charts included.
       animation: !reduceMotion,
       animationDuration: 300,
-      grid: { left: 8, right: 12, top: 16, bottom: 4, containLabel: true },
+      grid: { left: 8, right: 12, top: legend ? 14 + 20 * legendRows(series, window.innerWidth) : 16, bottom: 4, containLabel: true },
+      ...(legend
+        ? { legend: { show: true, top: 0, left: 0, icon: 'circle', itemWidth: 8, itemHeight: 8, itemGap: 14, selectedMode: false, textStyle: { fontSize: 11.5 } } }
+        : {}),
       tooltip: { trigger: 'axis', valueFormatter: (v: unknown) => (typeof v === 'number' ? fmt(v) : '—') },
       xAxis: { type: 'time', axisLabel: timeAxisLabel(), ...(xRange ? { min: xRange[0], max: xRange[1] } : {}) },
       yAxis: {
@@ -82,6 +94,6 @@ export function TimeSeries({ series, height = 180, markAt, markLabel, format, su
         }
       }),
     }
-  }, [series, markAt, markLabel, format, applied, reduceMotion, minInterval, splitNumber, stack, xRange])
+  }, [series, markAt, markLabel, format, applied, reduceMotion, minInterval, splitNumber, stack, xRange, legend])
   return <EChart option={option} height={height} summary={summary} />
 }

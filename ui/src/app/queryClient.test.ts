@@ -33,4 +33,16 @@ describe('query client', () => {
       .catch(() => {})
     expect(getOutage()).toBeNull()
   })
+
+  it('a query with meta outage=false neither raises nor clears the banner', async () => {
+    const qc = createQueryClient()
+    await qc
+      .fetchQuery({ queryKey: ['d'], queryFn: () => Promise.reject(new ApiError(503, 'kafka unavailable')), retry: false, meta: { outage: false } })
+      .catch(() => {})
+    expect(getOutage()).toBeNull()
+    await qc.fetchQuery({ queryKey: ['e'], queryFn: () => Promise.reject(new ApiError(503, 'clickhouse down')), retry: false }).catch(() => {})
+    await qc.fetchQuery({ queryKey: ['f'], queryFn: () => Promise.resolve(1), meta: { outage: false } })
+    expect(getOutage()?.message).toBe('clickhouse down')
+    await qc.fetchQuery({ queryKey: ['g'], queryFn: () => Promise.resolve(1) })
+  })
 })

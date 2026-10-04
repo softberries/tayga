@@ -71,3 +71,16 @@ export function ago(ns: number, nowMs: number): string {
   if (s < 86_400) return `${Math.floor(s / 3600)} h ago`
   return `${Math.floor(s / 86_400)} d ago`
 }
+
+/** Bytes with a binary unit: 1536 → "1.5 KiB", 1_680_969 → "1.6 MiB". */
+export function bytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return '—'
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
+  let v = n
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i += 1
+  }
+  return i === 0 ? `${Math.round(v)} B` : `${v.toFixed(v < 10 ? 2 : 1)} ${units[i]}`
+}
