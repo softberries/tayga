@@ -11,8 +11,6 @@ embed-ui = ["dep:rust-embed"]
 
 [dependencies]
 anyhow.workspace = true
-askama.workspace = true
-askama_web.workspace = true
 axum.workspace = true
 clickhouse.workspace = true
 futures.workspace = true

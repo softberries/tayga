@@ -9,8 +9,10 @@
 //!   `index.html` the server serves [`PLACEHOLDER`]. `cargo test` therefore
 //!   works without Node.
 //! - The router is meant to be merged last: it only has a fallback handler
-//!   plus redirect routes, so every explicit route (askama pages included)
-//!   wins over it.
+//!   plus redirect routes, so every explicit route (`/api`, `/metrics`,
+//!   `/healthz`) wins over it.
+//! - The old server-rendered UI's URLs 308 to their new client routes, query
+//!   string kept (the filter names did not change).
 
 use axum::Router;
 use axum::extract::{RawPathParams, State};
@@ -69,17 +71,21 @@ impl Assets for NoAssets {
     }
 }
 
-/// An old askama URL and where it moves to in the new app.
+/// An old server-rendered UI URL and where it moves to in the new app.
 pub struct Redirect308 {
     pub from: &'static str,
     /// `{name}` placeholders are filled from the `from` path params.
     pub to: &'static str,
 }
 
+/// `/`, `/stories/{id}` kept their paths and are client routes (index
+/// fallback). The group detail became the home page's selected group; its id
+/// is JSON-quoted because the router parses search values as JSON and a u64
+/// fingerprint can exceed 2^53.
 pub const OLD_URL_REDIRECTS: &[Redirect308] = &[
     Redirect308 {
         from: "/groups/{fp}",
-        to: "/stories?group={fp}",
+        to: "/?group=%22{fp}%22",
     },
     Redirect308 {
         from: "/alerts",
@@ -99,56 +105,37 @@ pub const OLD_URL_REDIRECTS: &[Redirect308] = &[
     },
 ];
 
-/// Must match the routes registered in `ui.rs`. Task 13 deletes askama and
-/// empties this list.
-///
-/// Paths the askama UI (`ui.rs`) still serves. A redirect whose `from` is
-/// listed here is not mounted, because the askama page must keep winning.
-/// Task 13 deletes askama and empties this list, which activates every
-/// redirect above.
-pub const ASKAMA_PATHS: &[&str] = &[
-    "/",
-    "/stories/{id}",
-    "/groups/{fp}",
-    "/service-map",
-    "/alerts",
-    "/templates",
-    "/templates/{id}",
-];
-
-/// Redirects safe to mount: those not shadowing a live askama route.
-pub fn active_redirects(askama_paths: &[&str]) -> Vec<&'static Redirect308> {
-    OLD_URL_REDIRECTS
-        .iter()
-        .filter(|r| !askama_paths.contains(&r.from))
-        .collect()
-}
-
-/// The production router: embedded assets (or placeholder) and live redirects.
+/// The production router: embedded assets (or placeholder) and the redirects.
 pub fn router() -> Router {
     #[cfg(feature = "embed-ui")]
     let assets: Arc<dyn Assets> = Arc::new(Embedded);
     #[cfg(not(feature = "embed-ui"))]
     let assets: Arc<dyn Assets> = Arc::new(NoAssets);
-    router_with(assets, &active_redirects(ASKAMA_PATHS))
+    router_with(assets, OLD_URL_REDIRECTS)
 }
 
-pub fn router_with(assets: Arc<dyn Assets>, redirects: &[&'static Redirect308]) -> Router {
+pub fn router_with(assets: Arc<dyn Assets>, redirects: &'static [Redirect308]) -> Router {
     let mut app = Router::new();
     for r in redirects {
         let to = r.to;
         app = app.route(
             r.from,
-            get(move |params: RawPathParams| async move { redirect(to, &params) }),
+            get(move |params: RawPathParams, uri: Uri| async move {
+                redirect(to, &params, uri.query())
+            }),
         );
     }
     app.fallback(serve).with_state(assets)
 }
 
-fn redirect(template: &str, params: &RawPathParams) -> Redirect {
+fn redirect(template: &str, params: &RawPathParams, query: Option<&str>) -> Redirect {
     let mut out = template.to_string();
     for (key, value) in params {
         out = out.replace(&format!("{{{key}}}"), &encode(value));
+    }
+    if let Some(q) = query.filter(|q| !q.is_empty()) {
+        out.push(if out.contains('?') { '&' } else { '?' });
+        out.push_str(q);
     }
     Redirect::permanent(&out)
 }
@@ -315,7 +302,7 @@ mod tests {
     }
 
     fn app() -> Router {
-        router_with(fixture(), &active_redirects(&[]))
+        router_with(fixture(), OLD_URL_REDIRECTS)
     }
 
     fn header_of(res: &Response, name: header::HeaderName) -> &str {
@@ -432,13 +419,28 @@ mod tests {
     #[tokio::test]
     async fn every_redirect_is_308_to_the_new_path() {
         let cases = [
-            ("/groups/abc123", "/stories?group=abc123"),
-            ("/groups/a%2Fb", "/stories?group=a%2Fb"),
+            ("/groups/123", "/?group=%22123%22"),
+            ("/groups/a%2Fb", "/?group=%22a%2Fb%22"),
+            (
+                "/groups/18446744073709551615?since=24h",
+                "/?group=%2218446744073709551615%22&since=24h",
+            ),
             ("/alerts", "/logs/alerts"),
+            (
+                "/alerts?since=24h&kind=spike",
+                "/logs/alerts?since=24h&kind=spike",
+            ),
             ("/templates", "/logs/templates"),
+            (
+                "/templates?service=cart&q=x",
+                "/logs/templates?service=cart&q=x",
+            ),
             ("/templates/42", "/logs/templates/42"),
             ("/service-map", "/map"),
+            ("/service-map?since=1h", "/map?since=1h"),
+            ("/service-map?", "/map"),
         ];
+        assert_eq!(OLD_URL_REDIRECTS.len(), 5);
         for (from, to) in cases {
             let res = call(app(), Method::GET, from).await;
             assert_eq!(res.status(), StatusCode::PERMANENT_REDIRECT, "{from}");
@@ -446,27 +448,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn redirect_table_is_complete() {
-        assert_eq!(OLD_URL_REDIRECTS.len(), 5);
-        assert_eq!(active_redirects(&[]).len(), 5);
-    }
-
-    #[test]
-    fn redirects_shadowing_askama_routes_are_not_mounted() {
-        // Until Task 13 every redirect source is an askama route.
-        assert!(active_redirects(ASKAMA_PATHS).is_empty());
-        let only_alerts = active_redirects(&["/groups/{fp}", "/templates"]);
-        let froms: Vec<_> = only_alerts.iter().map(|r| r.from).collect();
-        assert_eq!(froms, ["/alerts", "/templates/{id}", "/service-map"]);
+    #[tokio::test]
+    async fn kept_old_paths_are_client_routes() {
+        for uri in ["/", "/stories/0123456789abcdef0123456789abcdef"] {
+            let res = call(app(), Method::GET, uri).await;
+            assert_eq!(res.status(), StatusCode::OK, "{uri}");
+            assert_eq!(body(res).await, "<html>app</html>", "{uri}");
+        }
     }
 
     #[tokio::test]
-    async fn askama_style_routes_win_over_the_fallback() {
-        let live = Router::new().route("/alerts", get(|| async { "askama" }));
-        let app = live.merge(router_with(fixture(), &active_redirects(ASKAMA_PATHS)));
-        let res = call(app.clone(), Method::GET, "/alerts").await;
-        assert_eq!(body(res).await, "askama");
+    async fn explicit_routes_win_over_the_fallback() {
+        let live = Router::new().route("/healthz", get(|| async { "ok" }));
+        let app = live.merge(app());
+        let res = call(app.clone(), Method::GET, "/healthz").await;
+        assert_eq!(body(res).await, "ok");
         let res = call(app, Method::GET, "/traces").await;
         assert_eq!(body(res).await, "<html>app</html>");
     }

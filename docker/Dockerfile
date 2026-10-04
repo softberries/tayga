@@ -1,3 +1,11 @@
+# The web app, built on its own so the Rust stages never need Node.
+FROM node:24-bookworm-slim AS ui
+WORKDIR /ui
+COPY ui/package.json ui/package-lock.json ./
+RUN npm ci
+COPY ui/ ./
+RUN npm run build
+
 FROM lukemathwalker/cargo-chef:latest-rust-1.98-trixie AS chef
 RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
@@ -10,6 +18,8 @@ FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
+# tayga-api embeds ui/dist at compile time (rust-embed, feature embed-ui).
+COPY --from=ui /ui/dist /app/ui/dist
 RUN cargo build --release --workspace --bins
 
 FROM debian:trixie-slim

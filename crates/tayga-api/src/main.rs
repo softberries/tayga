@@ -8,7 +8,6 @@ use tayga_api::repo::ChRepo;
 use tayga_api::routes::{ApiMetrics, api_router};
 use tayga_api::routes_v2::{self, ClientConfig, LagCache};
 use tayga_api::spa;
-use tayga_api::ui::{UiLinks, ui_router};
 use tayga_kafka::KafkaSettings;
 use tayga_store::ClickHouseSettings;
 use tayga_store::store::Store;
@@ -19,9 +18,10 @@ struct Settings {
     kafka: KafkaSettings,
     #[serde(default = "default_http")]
     http_addr: SocketAddr,
-    #[serde(default = "default_jaeger")]
+    /// Optional external links; empty hides them in the app.
+    #[serde(default)]
     jaeger_url: String,
-    #[serde(default = "default_grafana")]
+    #[serde(default)]
     grafana_url: String,
     #[serde(default = "recorder::default_targets")]
     metric_targets: Vec<Target>,
@@ -35,14 +35,6 @@ fn default_record_secs() -> u64 {
 
 fn default_http() -> SocketAddr {
     "0.0.0.0:8090".parse().expect("valid default")
-}
-
-fn default_jaeger() -> String {
-    "http://localhost:8080/jaeger/ui".to_string()
-}
-
-fn default_grafana() -> String {
-    "http://localhost:3001".to_string()
 }
 
 #[tokio::main]
@@ -70,16 +62,8 @@ async fn main() -> anyhow::Result<()> {
         LagCache::kafka(settings.kafka.brokers.clone(), settings.kafka.topic.clone()),
         ClientConfig::new(&settings.jaeger_url, &settings.grafana_url),
     );
-    let app = api_router(repo.clone(), metrics.clone())
+    let app = api_router(repo, metrics)
         .merge(v2)
-        .merge(ui_router(
-            repo,
-            metrics,
-            UiLinks {
-                jaeger_url: settings.jaeger_url,
-                grafana_url: settings.grafana_url,
-            },
-        ))
         .merge(tayga_common::metrics::router(registry))
         // Last: only paths no other route matched fall through to the app.
         .merge(spa::router());

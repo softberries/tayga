@@ -145,16 +145,6 @@ impl StoryView {
             flags: r.flags,
         }
     }
-
-    /// Span ids on the critical path (for highlighting in the waterfall).
-    pub fn critical_span_ids(&self) -> Vec<String> {
-        self.critical_path["segments"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|s| s["span_id"].as_str().map(str::to_string))
-            .collect()
-    }
 }
 
 /// One span as read from ClickHouse; `TraceSpanRow` is its response shape.
@@ -841,10 +831,7 @@ pub(crate) mod tests {
         let v = StoryView::from_record(record());
         assert_eq!(v.root_cause.span_id, "c879b3702407e63a");
         assert!(v.baseline_diff.is_none());
-        assert_eq!(
-            v.critical_span_ids(),
-            vec!["a".to_string(), "b".to_string()]
-        );
+        assert_eq!(v.critical_path["segments"][1]["span_id"], "b");
         let json = serde_json::to_value(&v).unwrap();
         assert_eq!(json["fingerprint"], "17393964261140422938");
     }
