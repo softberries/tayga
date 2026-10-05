@@ -43,6 +43,9 @@ pub struct LogAlertRow {
     pub baseline_per_window: f64,
     pub example_trace_ids: Vec<String>,
     pub version: u64,
+    /// Seasonal comparators (spec 7a §2.3): hits of the same window 1 day / 7 days earlier.
+    pub baseline_day: Option<f64>,
+    pub baseline_week: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
@@ -53,6 +56,22 @@ pub struct TemplateWindowRow {
     pub first_seen_ns: i64,
     pub current: u64,
     pub baseline_total: u64,
+}
+
+/// One shifted copy of the spike window: whether it had any data at all (global coverage) and
+/// the per-template distinct hit counts in it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeasonalWindow {
+    pub shift_secs: u32,
+    pub covered: bool,
+    /// `(template_id, hits)`; templates without a row in a covered window have 0 hits.
+    pub counts: Vec<(u64, u64)>,
+}
+
+#[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
+struct SeasonalCountRow {
+    template_id: u64,
+    hits: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
@@ -93,7 +112,10 @@ impl Store {
     ) -> clickhouse::error::Result<Vec<LogAlertRow>> {
         self.client()
             .query(
-                "SELECT * FROM log_alerts FINAL WHERE kind = 'spike' \
+                "SELECT alert_id, kind, template_id, service, template, started_at, last_at, \
+                 window_count, peak_count, baseline_per_window, example_trace_ids, version, \
+                 baseline_day, baseline_week \
+                 FROM log_alerts FINAL WHERE kind = 'spike' \
                  AND last_at > now64(9) - toIntervalMinute(?)",
             )
             .bind(active_min)
@@ -134,6 +156,90 @@ impl Store {
             .await
     }
 
+    /// Distinct clock minutes (unix minutes, ascending) within the `baseline_min` minutes before
+    /// the last `spike_min` minutes that have at least one hit of any template. A minute with
+    /// no logs at all means the pipeline was down. At most `baseline_min + 1` values.
+    pub async fn covered_minute_buckets(
+        &self,
+        spike_min: u32,
+        baseline_min: u32,
+    ) -> clickhouse::error::Result<Vec<i64>> {
+        self.client()
+            .query(
+                "SELECT DISTINCT toInt64(intDiv(toUnixTimestamp(toStartOfMinute(ts)), 60)) AS m \
+                 FROM log_template_hits \
+                 WHERE ts > now64(9) - toIntervalMinute(?) AND ts <= now64(9) - toIntervalMinute(?) \
+                 ORDER BY m",
+            )
+            .bind(spike_min.saturating_add(baseline_min))
+            .bind(spike_min)
+            .fetch_all()
+            .await
+    }
+
+    /// Per-template hit counts of the spike window shifted back by each of `shifts_secs`, from
+    /// `log_template_minutes` (distinct `log_id`s, so replays do not count twice). The window is
+    /// the `spike_min` whole minutes ending at the start of the current minute, minus the shift.
+    /// `covered` is true when any template has a row in that window; callers must ignore the
+    /// counts of an uncovered window (no data is not zero hits).
+    pub async fn seasonal_counts(
+        &self,
+        template_ids: &[u64],
+        spike_min: u32,
+        shifts_secs: &[u32],
+    ) -> clickhouse::error::Result<Vec<SeasonalWindow>> {
+        let mut out = Vec::with_capacity(shifts_secs.len());
+        for &shift in shifts_secs {
+            let covered: Option<u8> = self
+                .client()
+                .query(
+                    "SELECT 1 FROM log_template_minutes \
+                     WHERE minute >= toStartOfMinute(now() - toIntervalSecond(?) - toIntervalMinute(?)) \
+                       AND minute < toStartOfMinute(now() - toIntervalSecond(?)) LIMIT 1",
+                )
+                .bind(shift)
+                .bind(spike_min)
+                .bind(shift)
+                .fetch_optional()
+                .await?;
+            let counts = if covered.is_some() && !template_ids.is_empty() {
+                let rows: Vec<SeasonalCountRow> = self
+                    .client()
+                    .query(
+                        "SELECT template_id, uniqExactMerge(hits) AS hits FROM log_template_minutes \
+                         WHERE template_id IN ? \
+                           AND minute >= toStartOfMinute(now() - toIntervalSecond(?) - toIntervalMinute(?)) \
+                           AND minute < toStartOfMinute(now() - toIntervalSecond(?)) \
+                         GROUP BY template_id",
+                    )
+                    .bind(template_ids)
+                    .bind(shift)
+                    .bind(spike_min)
+                    .bind(shift)
+                    .fetch_all()
+                    .await?;
+                template_ids
+                    .iter()
+                    .map(|&id| {
+                        let hits = rows
+                            .iter()
+                            .find(|r| r.template_id == id)
+                            .map_or(0, |r| r.hits);
+                        (id, hits)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            out.push(SeasonalWindow {
+                shift_secs: shift,
+                covered: covered.is_some(),
+                counts,
+            });
+        }
+        Ok(out)
+    }
+
     /// Latest hit `ts` in the last 3 days (the hits TTL) in ns, or 0 when there is none. The
     /// logminer's data clock for new-template detection.
     pub async fn data_now_ns(&self) -> clickhouse::error::Result<i64> {
@@ -167,6 +273,25 @@ impl Store {
             )
             .bind(since_ns)
             .fetch_all()
+            .await
+    }
+
+    /// Persisted logminer state value for `key`, or `None` when never stored.
+    pub async fn state_get(&self, key: &str) -> clickhouse::error::Result<Option<i64>> {
+        self.client()
+            .query("SELECT value FROM logminer_state FINAL WHERE key = ?")
+            .bind(key)
+            .fetch_optional()
+            .await
+    }
+
+    /// Stores `value` under `key`; the latest write wins.
+    pub async fn state_put(&self, key: &str, value: i64) -> clickhouse::error::Result<()> {
+        self.client()
+            .query("INSERT INTO logminer_state (key, value, updated) VALUES (?, ?, now64(9))")
+            .bind(key)
+            .bind(value)
+            .execute()
             .await
     }
 

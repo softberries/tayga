@@ -108,9 +108,13 @@ pub fn diff(summary: &TraceSummary, b: &Baseline, t: &Thresholds) -> BaselineDif
     d
 }
 
+/// Duration above which a trace of this endpoint is slow: `max(p99 x factor, p99 + margin)`.
+pub fn slow_limit_ns(b: &Baseline, t: &Thresholds) -> f64 {
+    (b.p99_ns * t.slow_trace_factor).max(b.p99_ns + t.slow_trace_margin_ms * MS)
+}
+
 pub fn is_slow(duration_ns: u64, b: &Baseline, t: &Thresholds) -> bool {
-    let limit = (b.p99_ns * t.slow_trace_factor).max(b.p99_ns + t.slow_trace_margin_ms * MS);
-    b.trusted(t) && duration_ns as f64 > limit
+    b.trusted(t) && duration_ns as f64 > slow_limit_ns(b, t)
 }
 
 /// Same aggregation as the ClickHouse baseline query, for tests and fixtures (non-error traces only).
@@ -269,6 +273,20 @@ mod tests {
         assert!(is_slow(201 * 1_000_000, &b, &t));
         let untrusted = Baseline { traces: 10, ..b };
         assert!(!is_slow(10_000 * 1_000_000, &untrusted, &t));
+    }
+
+    #[test]
+    fn slow_limit_matches_the_slow_trace_threshold() {
+        let t = Thresholds::default();
+        for (p99_ns, limit_ns) in [(100.0 * MS, 200.0 * MS), (2_000.0 * MS, 3_000.0 * MS)] {
+            let b = Baseline {
+                p99_ns,
+                ..baseline()
+            };
+            assert_eq!(slow_limit_ns(&b, &t), limit_ns);
+            assert!(!is_slow(limit_ns as u64, &b, &t));
+            assert!(is_slow(limit_ns as u64 + 1, &b, &t));
+        }
     }
 
     #[test]

@@ -6,12 +6,12 @@ use rdkafka::message::{BorrowedMessage, Headers};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::{ClientContext, Message, Offset, TopicPartitionList};
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tayga_analysis::baseline::{Baseline, Thresholds};
-use tayga_analysis::model::Endpoint;
+use tayga_analysis::baseline::Thresholds;
+use tayga_assembler::baselines::Refresh;
 use tayga_assembler::metrics::AssemblerMetrics;
 use tayga_assembler::pipeline::{Outputs, process};
 use tayga_assembler::window::{ClosedTrace, WindowConfig, Windows};
@@ -149,8 +149,17 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!(error = %e, "metrics server stopped");
         }
     });
-    let mut baselines = load_baselines(&store, a.baseline_window_minutes, HashMap::new()).await;
-    metrics.baseline_endpoints.set(baselines.len() as i64);
+    let clock = Instant::now();
+    let mut baselines = Refresh::default();
+    load_baselines(
+        &store,
+        a.baseline_window_minutes,
+        &mut baselines,
+        clock.elapsed().as_secs(),
+        &settings.thresholds,
+        &metrics,
+    )
+    .await;
     let mut main_stop = stop.clone();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -169,7 +178,7 @@ async fn main() -> anyhow::Result<()> {
                 drop_partitions(&mut windows, &mut pending, &revoked.take());
                 pending.extend(windows.close_due(Instant::now()));
                 let started = Instant::now();
-                let outputs = process(&pending, &baselines, &settings.thresholds);
+                let outputs = process(&pending, &baselines.baselines, &settings.thresholds);
                 let written = write_outputs(
                     &store,
                     &producer,
@@ -196,7 +205,7 @@ async fn main() -> anyhow::Result<()> {
                         open_traces = windows.open_traces(),
                         buffered_bytes = windows.buffered_bytes(),
                         late_items = windows.late_items(),
-                        endpoints_with_baseline = baselines.len(),
+                        endpoints_with_baseline = baselines.baselines.len(),
                         "window stats"
                     );
                 }
@@ -206,8 +215,15 @@ async fn main() -> anyhow::Result<()> {
             }
             _ = refresh.tick() => {
                 let started = Instant::now();
-                baselines = load_baselines(&store, a.baseline_window_minutes, baselines).await;
-                metrics.baseline_endpoints.set(baselines.len() as i64);
+                load_baselines(
+                    &store,
+                    a.baseline_window_minutes,
+                    &mut baselines,
+                    clock.elapsed().as_secs(),
+                    &settings.thresholds,
+                    &metrics,
+                )
+                .await;
                 windows.shift(started.elapsed());
             }
             msg = consumer.recv() => match msg {
@@ -227,7 +243,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     if !pending.is_empty() {
-        let outputs = process(&pending, &baselines, &settings.thresholds);
+        let outputs = process(&pending, &baselines.baselines, &settings.thresholds);
         let write = write_once(&store, &producer, &a.stories_topic, &outputs, &metrics);
         match tokio::time::timeout(FINAL_WRITE_TIMEOUT, write).await {
             Ok(Ok(())) => {
@@ -257,19 +273,41 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Refreshes `state` in place; a failed refresh keeps the previous baselines and carries.
 async fn load_baselines(
     store: &Store,
     window_minutes: u32,
-    previous: HashMap<Endpoint, Baseline>,
-) -> HashMap<Endpoint, Baseline> {
-    match tayga_assembler::baselines::load(store, window_minutes).await {
-        Ok(b) => {
-            tracing::debug!(endpoints = b.len(), "baselines refreshed");
-            b
+    state: &mut Refresh,
+    now_secs: u64,
+    thresholds: &Thresholds,
+    metrics: &AssemblerMetrics,
+) {
+    match tayga_assembler::baselines::load(
+        store,
+        window_minutes,
+        &state.baselines,
+        &state.carried,
+        now_secs,
+        thresholds,
+    )
+    .await
+    {
+        Ok(r) => {
+            metrics.baseline_excluded_traces.set(r.excluded as i64);
+            metrics
+                .baseline_carried_endpoints
+                .set(r.carried.len() as i64);
+            metrics.baseline_endpoints.set(r.baselines.len() as i64);
+            tracing::debug!(
+                endpoints = r.baselines.len(),
+                excluded = r.excluded,
+                carried = r.carried.len(),
+                "baselines refreshed"
+            );
+            *state = r;
         }
         Err(e) => {
             tracing::warn!(error = %e, "baseline refresh failed; keeping previous baselines");
-            previous
         }
     }
 }

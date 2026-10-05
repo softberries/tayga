@@ -604,6 +604,8 @@ mod tests {
             window_count: 30,
             peak_count: 31,
             baseline_per_window: 0.5,
+            baseline_day: Some(2.0),
+            baseline_week: None,
             active: true,
             example_traces: vec![
                 ExampleTrace {
@@ -629,6 +631,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json[0]["template_id"], "17393964261140422938");
         assert_eq!(json[0]["active"], true);
+        assert_eq!(json[0]["baseline_day"], 2.0);
+        assert!(json[0].get("baseline_week").is_none(), "absent when None");
         assert_eq!(json[0]["example_traces"][0]["story_id"], "ab".repeat(16));
         assert!(json[0]["example_traces"][1]["story_id"].is_null());
         let f = repo.last_alert_filter.lock().unwrap().clone().unwrap();

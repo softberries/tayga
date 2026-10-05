@@ -56,6 +56,21 @@ impl Miner {
             .collect()
     }
 
+    /// Whether a `new` candidate `template` (a stored template string) of `service` is only a kept
+    /// status code split out of a template that existed before the masking epoch: see
+    /// [`Drain::would_have_matched_pre_epoch`]. Restored clusters carry their stored
+    /// `first_seen`, so this works across restarts.
+    pub fn would_have_matched_pre_epoch(
+        &self,
+        service: &str,
+        template: &str,
+        epoch_start_ns: i64,
+    ) -> bool {
+        let tokens: Vec<String> = template.split(' ').map(str::to_string).collect();
+        self.drain
+            .would_have_matched_pre_epoch(service, &tokens, epoch_start_ns)
+    }
+
     pub fn len(&self) -> usize {
         self.drain.len()
     }
@@ -109,6 +124,8 @@ pub fn alert_row(a: &Alert, version: u64) -> LogAlertRow {
         baseline_per_window: a.baseline_per_window,
         example_trace_ids: a.example_trace_ids.clone(),
         version,
+        baseline_day: a.baseline_day,
+        baseline_week: a.baseline_week,
     }
 }
 
@@ -130,13 +147,15 @@ pub fn alert_from_row(r: &LogAlertRow) -> Option<Alert> {
         window_count: r.window_count,
         peak_count: r.peak_count,
         baseline_per_window: r.baseline_per_window,
+        baseline_day: r.baseline_day,
+        baseline_week: r.baseline_week,
         example_trace_ids: r.example_trace_ids.clone(),
     })
 }
 
 /// The `tayga.alerts` message: `template_id` as a decimal string (u64 does not fit a JS number).
 pub fn alert_json(a: &Alert) -> Value {
-    json!({
+    let mut v = json!({
         "alert_id": a.alert_id,
         "kind": a.kind.as_str(),
         "template_id": a.template_id.to_string(),
@@ -148,7 +167,15 @@ pub fn alert_json(a: &Alert) -> Value {
         "peak_count": a.peak_count,
         "baseline_per_window": a.baseline_per_window,
         "example_trace_ids": a.example_trace_ids,
-    })
+    });
+    // Seasonal comparators are optional: absent in flat mode and when no past window counted.
+    if let Some(d) = a.baseline_day {
+        v["baseline_day"] = json!(d);
+    }
+    if let Some(w) = a.baseline_week {
+        v["baseline_week"] = json!(w);
+    }
+    v
 }
 
 #[cfg(test)]
@@ -183,6 +210,8 @@ mod tests {
             window_count: 30,
             peak_count: 40,
             baseline_per_window: 1.5,
+            baseline_day: Some(4.0),
+            baseline_week: None,
             example_trace_ids: vec!["t1".into()],
         }
     }
@@ -232,6 +261,50 @@ mod tests {
     }
 
     #[test]
+    fn kept_status_codes_stay_exact_across_a_restart() {
+        let line = |status: u16, path: &str| {
+            format!(
+                r#"[2026-10-05T10:00:00.000Z] "GET {path} HTTP/1.1" {status} - 0 9 1 - "-" "py""#
+            )
+        };
+        let mut m = Miner::new(DrainConfig::default());
+        let (_, ok) = m.mine(&log(1, &line(200, "/a"), "t1"));
+        let (_, err) = m.mine(&log(2, &line(503, "/a"), "t2"));
+        m.mine(&log(3, &line(503, "/b"), "t3"));
+        assert_ne!(ok.template_id, err.template_id);
+        let rows = m.dirty_templates(5);
+        assert_eq!(rows.len(), 2);
+        let err_row = rows
+            .iter()
+            .find(|r| r.template_id == err.template_id)
+            .unwrap();
+        assert!(err_row.template.contains(" 503 "), "{}", err_row.template);
+
+        // Rebuilt from the stored strings, the 503 template is still exact-match only.
+        let mut r = Miner::new(DrainConfig::default());
+        r.restore(rows);
+        let (_, a) = r.mine(&log(4, &line(503, "/c"), "t4"));
+        assert_eq!((a.created, a.template_id), (false, err.template_id));
+        let (_, a) = r.mine(&log(5, &line(200, "/c"), "t5"));
+        assert_eq!((a.created, a.template_id), (false, ok.template_id));
+        let (_, a) = r.mine(&log(6, &line(500, "/c"), "t6"));
+        assert!(
+            a.created,
+            "a 500 is absorbed by neither the 200 nor the 503 template"
+        );
+        let after = r.dirty_templates(7);
+        let restored_err = after
+            .iter()
+            .find(|t| t.template_id == err.template_id)
+            .unwrap();
+        assert!(
+            restored_err.template.contains(" 503 "),
+            "{}",
+            restored_err.template
+        );
+    }
+
+    #[test]
     fn restore_order_does_not_depend_on_input_order() {
         let mut m = Miner::new(DrainConfig::default());
         m.mine(&log(1, "Payment failed for order 1234", "t1"));
@@ -247,6 +320,54 @@ mod tests {
         b.restore(reversed);
         let probe = log(3, "Payment failed for order 42", "t3");
         assert_eq!(a.mine(&probe).1.template_id, b.mine(&probe).1.template_id);
+    }
+
+    fn access(status: u16, flags: &str) -> String {
+        format!(
+            r#"[2026-10-05T18:49:39.000Z] "GET /api/cart HTTP/1.1" {status} {flags} upstream_reset 0 95 2 - "-" "py""#
+        )
+    }
+
+    #[test]
+    fn pre_epoch_match_survives_a_restore_and_spares_non_http_templates() {
+        const EPOCH: i64 = 10_000;
+        // Before the epoch: one `<*>`-status template (masking v1 shape), stored and restored.
+        let old_row = LogTemplateRow {
+            template_id: 1,
+            service: "payment".into(),
+            template: r#"<*> "GET <*> <*> <*> <*> upstream_reset <*> <*> <*> - "-" "py""#.into(),
+            first_seen: EPOCH - 5,
+            last_seen: EPOCH - 1,
+            count: 13,
+            max_severity: 9,
+            sample: String::new(),
+            version: 1,
+        };
+        let mut m = Miner::new(DrainConfig::default());
+        m.restore(vec![old_row]);
+        let mut l = log(1, &access(503, "UC"), "t1");
+        l.ts = EPOCH + 100;
+        let (_, a) = m.mine(&l);
+        assert!(a.created);
+        let rows = m.dirty_templates(1);
+        let new = rows
+            .iter()
+            .find(|r| r.template_id == a.template_id)
+            .unwrap();
+        assert!(new.template.contains(" 503 "), "{}", new.template);
+        assert!(m.would_have_matched_pre_epoch("payment", &new.template, EPOCH));
+
+        // A new non-HTTP template is judged as before, even with an old template of its shape.
+        let mut l = log(2, "Payment failed for order 1234", "t2");
+        l.ts = EPOCH + 200;
+        let (_, b) = m.mine(&l);
+        let rows = m.dirty_templates(2);
+        let t = &rows
+            .iter()
+            .find(|r| r.template_id == b.template_id)
+            .unwrap()
+            .template;
+        assert!(!m.would_have_matched_pre_epoch("payment", t, EPOCH));
     }
 
     #[test]
@@ -265,6 +386,8 @@ mod tests {
         assert_eq!(v["started_at_ns"], 10);
         assert_eq!(v["last_at_ns"], 20);
         assert_eq!(v["example_trace_ids"], json!(["t1"]));
+        assert_eq!(v["baseline_day"], 4.0);
+        assert!(v.get("baseline_week").is_none(), "absent, not null");
     }
 
     #[test]

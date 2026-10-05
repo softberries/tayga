@@ -232,6 +232,9 @@ export const LogAlertViewSchema = z.strictObject({
   window_count: int,
   peak_count: int,
   baseline_per_window: num,
+  /** Seasonal mode only; omitted when absent (hits of the same window 1 day / 7 days earlier). */
+  baseline_day: num.nullish(),
+  baseline_week: num.nullish(),
   active: z.boolean(),
   example_traces: z.array(ExampleTraceSchema),
 })

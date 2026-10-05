@@ -1,3 +1,4 @@
+use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
@@ -6,6 +7,24 @@ use prometheus_client::registry::Registry;
 use std::sync::atomic::AtomicU64;
 use tayga_common::metrics::KindLabel;
 use tayga_drain::detect::AlertKind;
+
+/// `reason` label on `spike_skipped` (`coverage`) and `new_suppressed` (`pre_epoch_match`).
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct ReasonLabel {
+    pub reason: String,
+}
+
+impl ReasonLabel {
+    pub fn new(reason: &str) -> Self {
+        Self {
+            reason: reason.to_string(),
+        }
+    }
+}
+
+/// `reason` of a new-template candidate suppressed because a pre-epoch template would have
+/// matched it.
+pub const PRE_EPOCH_MATCH: &str = "pre_epoch_match";
 
 /// `kind` label on `alerts`: `new` | `spike`.
 #[derive(Clone)]
@@ -19,6 +38,14 @@ pub struct LogminerMetrics {
     pub detect_seconds: Histogram,
     /// Wall clock minus the latest mined log's `ts`, set each detection tick.
     pub data_lag_seconds: Gauge<f64, AtomicU64>,
+    /// Failed saves of the new-template watermark to `logminer_state`.
+    pub state_save_failures: Counter,
+    /// Template windows not judged for a spike, by reason.
+    pub spike_skipped: Family<ReasonLabel, Counter>,
+    /// Failed seasonal comparator lookups (the tick fell back to flat).
+    pub seasonal_failures: Counter,
+    /// New-template candidates not alerted, by reason.
+    pub new_suppressed: Family<ReasonLabel, Counter>,
 }
 
 impl Default for LogminerMetrics {
@@ -33,6 +60,10 @@ impl Default for LogminerMetrics {
             // 10 ms .. ~20 s.
             detect_seconds: Histogram::new(exponential_buckets(0.01, 2.0, 12)),
             data_lag_seconds: Gauge::default(),
+            state_save_failures: Counter::default(),
+            spike_skipped: Family::default(),
+            seasonal_failures: Counter::default(),
+            new_suppressed: Family::default(),
         }
     }
 }
@@ -80,6 +111,32 @@ impl LogminerMetrics {
             "Wall clock minus the newest mined log timestamp, at the last detection pass",
             m.data_lag_seconds.clone(),
         );
+        registry.register(
+            "tayga_logminer_state_save_failures",
+            "Failed saves of the new-template watermark to logminer_state",
+            m.state_save_failures.clone(),
+        );
+        registry.register(
+            "tayga_logminer_spike_skipped",
+            "Spike candidates not judged, by reason (coverage: under half the baseline minutes had logs)",
+            m.spike_skipped.clone(),
+        );
+        registry.register(
+            "tayga_logminer_seasonal_failures",
+            "Failed seasonal comparator lookups; the pass fell back to the flat rule",
+            m.seasonal_failures.clone(),
+        );
+        registry.register(
+            "tayga_logminer_new_suppressed",
+            "New-template candidates not alerted, by reason (pre_epoch_match: a kept status code \
+             split out of a template that existed before the masking epoch)",
+            m.new_suppressed.clone(),
+        );
+        drop(m.spike_skipped.get_or_create(&ReasonLabel::new("coverage")));
+        drop(
+            m.new_suppressed
+                .get_or_create(&ReasonLabel::new(PRE_EPOCH_MATCH)),
+        );
         // Export both series at 0 so the family is visible before the first alert.
         for kind in [AlertKind::New, AlertKind::Spike] {
             drop(m.alerts.get_or_create(&KindLabel::new(kind.as_str())));
@@ -101,6 +158,9 @@ mod tests {
         m.alerts.get_or_create(&KindLabel::new("new")).inc();
         m.detect_seconds.observe(0.015);
         m.data_lag_seconds.set(2.5);
+        m.spike_skipped
+            .get_or_create(&ReasonLabel::new("coverage"))
+            .inc();
         let out = tayga_common::metrics::render(&registry);
         for line in [
             "tayga_logminer_logs_mined_total 1",
@@ -114,6 +174,10 @@ mod tests {
             "tayga_logminer_detect_seconds_bucket{le=\"0.02\"} 1",
             "# TYPE tayga_logminer_data_lag_seconds gauge",
             "tayga_logminer_data_lag_seconds 2.5",
+            "tayga_logminer_state_save_failures_total 0",
+            "tayga_logminer_seasonal_failures_total 0",
+            "tayga_logminer_spike_skipped_total{reason=\"coverage\"} 1",
+            "tayga_logminer_new_suppressed_total{reason=\"pre_epoch_match\"} 0",
         ] {
             assert!(out.contains(line), "missing {line:?} in\n{out}");
         }

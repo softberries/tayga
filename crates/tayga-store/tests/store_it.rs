@@ -1,7 +1,7 @@
 use tayga_store::ClickHouseSettings;
 use tayga_store::migrate::migrate;
 use tayga_store::rows::{LogRow, SpanRow};
-use tayga_store::store::Store;
+use tayga_store::store::{EndpointCaps, Store};
 
 fn settings() -> ClickHouseSettings {
     let url =
@@ -48,7 +48,7 @@ fn span(id: &str) -> SpanRow {
 #[ignore = "requires ClickHouse: make it"]
 async fn migrate_is_idempotent_and_rows_roundtrip() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     assert!(migrate(&s).await.unwrap().is_empty());
 
     let store = Store::new(&s);
@@ -150,7 +150,7 @@ fn story_row(id: &str) -> StoryRow {
 #[ignore = "requires ClickHouse: run against the live stack"]
 async fn analysis_tables_roundtrip_and_baseline_queries() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     let store = Store::new(&s);
 
     let mut summaries: Vec<TraceSummaryRow> = (0..60).map(|i| summary_row(i, i % 2 == 0)).collect();
@@ -187,10 +187,13 @@ async fn analysis_tables_roundtrip_and_baseline_queries() {
         .await
         .unwrap();
 
-    let eps = store.endpoint_stats(60).await.unwrap();
+    let eps = store
+        .endpoint_stats(60, &EndpointCaps::default())
+        .await
+        .unwrap();
     assert_eq!(eps.len(), 1);
-    assert_eq!(eps[0].traces, 60, "error trace excluded");
-    let ops = store.op_stats(60).await.unwrap();
+    assert_eq!(eps[0].kept, 60, "error trace excluded");
+    let ops = store.op_stats(60, &EndpointCaps::default()).await.unwrap();
     let cart = ops.iter().find(|o| o.op == "cart:GetCart").unwrap();
     assert_eq!(cart.present, 30);
     let back: Vec<StoryRow> = store
@@ -221,7 +224,7 @@ async fn analysis_tables_roundtrip_and_baseline_queries() {
 #[ignore = "requires ClickHouse: run against the live stack"]
 async fn replayed_trace_collapses_to_most_complete_row() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     let store = Store::new(&s);
 
     let full = TraceSummaryRow {
@@ -294,7 +297,7 @@ async fn replayed_trace_collapses_to_most_complete_row() {
 #[ignore = "requires ClickHouse: make it"]
 async fn slow_story_traces_are_excluded_from_baselines() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     let store = Store::new(&s);
 
     let summaries: Vec<TraceSummaryRow> = (0..60).map(|i| summary_row(i, i % 2 == 0)).collect();
@@ -313,16 +316,184 @@ async fn slow_story_traces_are_excluded_from_baselines() {
         .await
         .unwrap();
 
-    let eps = store.endpoint_stats(60).await.unwrap();
+    let eps = store
+        .endpoint_stats(60, &EndpointCaps::default())
+        .await
+        .unwrap();
     assert_eq!(eps.len(), 1);
-    assert_eq!(eps[0].traces, 59, "slow-story trace excluded");
-    let ops = store.op_stats(60).await.unwrap();
+    assert_eq!(eps[0].kept, 59, "slow-story trace excluded");
+    assert_eq!(eps[0].seen, 60, "slow-story trace still counted as seen");
+    let ops = store.op_stats(60, &EndpointCaps::default()).await.unwrap();
     let root = ops.iter().find(|o| o.op == "frontend:GET").unwrap();
     assert_eq!(root.present, 59, "presence denominator matches traces");
     let cart = ops.iter().find(|o| o.op == "cart:GetCart").unwrap();
     assert_eq!(
         cart.present, 29,
         "slow-story trace excluded from op presence"
+    );
+    store
+        .client()
+        .query(&format!("DROP DATABASE `{}`", s.database))
+        .execute()
+        .await
+        .unwrap();
+}
+
+const MS_NS: u64 = 1_000_000;
+
+fn timed_row(service: &str, name: &str, id: &str, duration_ms: u64) -> TraceSummaryRow {
+    TraceSummaryRow {
+        trace_id: format!("{service}-{id}"),
+        ts: now_ns(),
+        endpoint_service: service.into(),
+        endpoint_name: name.into(),
+        duration_ns: duration_ms * MS_NS,
+        is_error: 0,
+        op_durations: vec![(format!("{service}:op"), duration_ms * MS_NS / 2)],
+        span_count: 2,
+    }
+}
+
+/// Endpoint `frontend` GET /: 64 traces of 100..=150 ms plus one 5 s outlier.
+/// Endpoint `cart` Get: 64 traces of 10..=20 ms, nothing unusual.
+async fn seed_outlier_endpoints(store: &Store) {
+    let mut rows: Vec<TraceSummaryRow> = (0..64)
+        .map(|i| timed_row("frontend", "GET /", &i.to_string(), 100 + i % 51))
+        .collect();
+    rows.push(timed_row("frontend", "GET /", "outlier", 5_000));
+    rows.extend((0..64).map(|i| timed_row("cart", "Get", &i.to_string(), 10 + i % 11)));
+    store.insert_rows("trace_summaries", &rows).await.unwrap();
+}
+
+fn stats_of<'a>(
+    eps: &'a [tayga_store::rows::EndpointStatsRow],
+    service: &str,
+) -> &'a tayga_store::rows::EndpointStatsRow {
+    eps.iter().find(|e| e.endpoint_service == service).unwrap()
+}
+
+/// The previous refresh's limit for an endpoint caps this refresh, so one missed outlier cannot
+/// raise p99. The uncapped endpoint is unchanged and `op_stats` uses the same trace set.
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn one_outlier_does_not_raise_p99_with_previous_cap() {
+    let s = settings();
+    migrate(&s).await.unwrap();
+    let store = Store::new(&s);
+    seed_outlier_endpoints(&store).await;
+
+    let none = EndpointCaps::default();
+    let before = store.endpoint_stats(60, &none).await.unwrap();
+    // No previous baseline: the 10 x p50 bootstrap cap already drops the outlier.
+    assert_eq!(stats_of(&before, "frontend").kept, 64);
+
+    let caps = EndpointCaps {
+        keys: vec!["frontend\0GET /".into(), "cart\0Get".into()],
+        caps_ns: vec![250 * MS_NS, 1_000 * MS_NS],
+    };
+    let eps = store.endpoint_stats(60, &caps).await.unwrap();
+    let frontend = stats_of(&eps, "frontend");
+    assert_eq!(frontend.kept, 64);
+    assert!(frontend.p99 <= (150 * MS_NS) as f64, "p99 {}", frontend.p99);
+    assert_eq!(stats_of(&eps, "cart"), stats_of(&before, "cart"));
+    assert_eq!(frontend.excluded, 1);
+
+    // A tight cap proves the bound key matches (the bootstrap alone would keep these).
+    let tight = EndpointCaps {
+        keys: vec!["frontend\0GET /".into()],
+        caps_ns: vec![120 * MS_NS],
+    };
+    let tight_eps = store.endpoint_stats(60, &tight).await.unwrap();
+    assert!(stats_of(&tight_eps, "frontend").kept < 64);
+    assert_eq!(stats_of(&tight_eps, "cart").kept, 64);
+    assert!(stats_of(&tight_eps, "frontend").excluded > 1);
+
+    let ops = store.op_stats(60, &caps).await.unwrap();
+    let present = |service: &str| {
+        ops.iter()
+            .find(|o| o.endpoint_service == service)
+            .unwrap()
+            .present
+    };
+    assert_eq!(present("frontend"), 64, "op presence uses the capped set");
+    assert_eq!(present("cart"), 64);
+    let frontend_op = ops
+        .iter()
+        .find(|o| o.endpoint_service == "frontend")
+        .unwrap();
+    assert!(frontend_op.p95 <= (75 * MS_NS) as f64);
+    store
+        .client()
+        .query(&format!("DROP DATABASE `{}`", s.database))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// A brand-new endpoint has no previous limit: its first baseline is capped at 10 x p50.
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn bootstrap_cap_is_ten_times_p50() {
+    let s = settings();
+    migrate(&s).await.unwrap();
+    let store = Store::new(&s);
+    seed_outlier_endpoints(&store).await;
+
+    let none = EndpointCaps::default();
+    let eps = store.endpoint_stats(60, &none).await.unwrap();
+    let frontend = stats_of(&eps, "frontend");
+    assert_eq!(frontend.kept, 64, "5 s outlier is above 10 x p50");
+    assert!(frontend.p99 <= (150 * MS_NS) as f64, "p99 {}", frontend.p99);
+    assert_eq!(stats_of(&eps, "cart").kept, 64);
+    assert_eq!(frontend.excluded, 1);
+    let ops = store.op_stats(60, &none).await.unwrap();
+    assert!(
+        ops.iter()
+            .filter(|o| o.endpoint_service == "frontend")
+            .all(|o| o.present == 64)
+    );
+    store
+        .client()
+        .query(&format!("DROP DATABASE `{}`", s.database))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// An endpoint whose traces are all above the cap (or slow-storied) still reports `seen`.
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn all_traces_above_cap_still_reported() {
+    let s = settings();
+    migrate(&s).await.unwrap();
+    let store = Store::new(&s);
+    let rows: Vec<TraceSummaryRow> = (0..65)
+        .map(|i| timed_row("frontend", "GET /", &i.to_string(), 5_000))
+        .collect();
+    store.insert_rows("trace_summaries", &rows).await.unwrap();
+    let caps = EndpointCaps {
+        keys: vec!["frontend\0GET /".into()],
+        caps_ns: vec![250 * MS_NS],
+    };
+    let eps = store.endpoint_stats(60, &caps).await.unwrap();
+    assert_eq!(eps.len(), 1);
+    let e = &eps[0];
+    assert_eq!((e.seen, e.kept, e.excluded), (65, 0, 65));
+    assert!(store.op_stats(60, &caps).await.unwrap().is_empty());
+
+    let stories: Vec<StoryRow> = (0..65)
+        .map(|i| StoryRow {
+            kind: 2,
+            ..story_row(&format!("frontend-{i}"))
+        })
+        .collect();
+    store.insert_rows("error_stories", &stories).await.unwrap();
+    let eps = store.endpoint_stats(60, &caps).await.unwrap();
+    let e = &eps[0];
+    assert_eq!(
+        (e.seen, e.kept, e.excluded),
+        (65, 0, 0),
+        "slow-storied, not capped"
     );
     store
         .client()
@@ -392,6 +563,8 @@ fn alert(id: &str, kind: i8, template_id: u64, last_at: i64) -> LogAlertRow {
         baseline_per_window: 1.5,
         example_trace_ids: vec!["tr1".into()],
         version: 1,
+        baseline_day: Some(3.0),
+        baseline_week: None,
     }
 }
 
@@ -447,6 +620,49 @@ async fn template_windows_counts_current_and_baseline() {
     assert_eq!(w[0].current, 12);
     assert_eq!(w[0].baseline_total, 6);
     assert!(store.template_windows(5, 60, 13).await.unwrap().is_empty());
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn covered_minute_buckets_are_distinct_minutes_with_any_hit() {
+    let (s, store) = log_store().await;
+    let now = now_ns();
+    assert!(
+        store
+            .covered_minute_buckets(5, 60)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let at = |m: i64| now - m * MIN_NS - MIN_NS / 2;
+    let mut hits = Vec::new();
+    let mut id = 0;
+    // Template 1 covers baseline minutes 6..=15, template 2 minutes 46..=55: a 30-minute gap.
+    for m in 6..=15 {
+        id += 1;
+        hits.push(hit(id, 1, at(m), ""));
+    }
+    for m in 46..=55 {
+        id += 1;
+        hits.push(hit(id, 2, at(m), ""));
+        id += 1;
+        hits.push(hit(id, 2, at(m) + 1_000, "")); // same minute: counted once
+    }
+    // Outside the baseline window: the spike window and before it.
+    id += 1;
+    hits.push(hit(id, 1, at(1), ""));
+    id += 1;
+    hits.push(hit(id, 1, at(70), ""));
+    store.insert_log_hits(&hits).await.unwrap();
+    let buckets = store.covered_minute_buckets(5, 60).await.unwrap();
+    assert_eq!(buckets.len(), 20);
+    assert!(
+        buckets.windows(2).all(|w| w[0] < w[1]),
+        "ascending, distinct"
+    );
+    let now_min = now / MIN_NS;
+    assert!(buckets.iter().all(|&m| m > now_min - 66 && m < now_min - 4));
     drop_db(&s, &store).await;
 }
 
@@ -532,6 +748,19 @@ async fn data_now_is_the_latest_recent_hit_or_zero() {
         now - 5 * MIN_NS,
         "a log stamped an hour ahead is ignored"
     );
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn logminer_state_round_trips_and_keeps_latest() {
+    let (s, store) = log_store().await;
+    assert_eq!(store.state_get("k").await.unwrap(), None);
+    store.state_put("k", 1).await.unwrap();
+    store.state_put("k", 2).await.unwrap();
+    store.state_put("other", 9).await.unwrap();
+    assert_eq!(store.state_get("k").await.unwrap(), Some(2));
+    assert_eq!(store.state_get("other").await.unwrap(), Some(9));
     drop_db(&s, &store).await;
 }
 
@@ -818,5 +1047,199 @@ async fn metric_buckets_keep_the_last_value_per_series_and_step() {
         "only samples before the window's end, in epoch-aligned buckets"
     );
 
+    drop_db(&s, &store).await;
+}
+
+const DAY_SECS: u32 = 86_400;
+const WEEK_SECS: u32 = 7 * DAY_SECS;
+
+fn shifted(shift_secs: u32, back_min: i64) -> i64 {
+    now_ns() - i64::from(shift_secs) * 1_000_000_000 - back_min * MIN_NS
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn minutes_mv_does_not_double_count_replayed_hits() {
+    let (s, store) = log_store().await;
+    // Ten hits inside one past minute (mid-minute, so none crosses a boundary).
+    let minute_start = (now_ns() - 10 * MIN_NS).div_euclid(MIN_NS) * MIN_NS;
+    let batch = |ids: std::ops::RangeInclusive<u64>| -> Vec<LogHitRow> {
+        ids.map(|i| hit(i, 7, minute_start + 20_000_000_000 + i as i64, ""))
+            .collect()
+    };
+    let merged = |store: &Store| {
+        let c = store.client().clone();
+        async move {
+            c.query(
+                "SELECT count(), uniqExactMerge(hits) FROM log_template_minutes \
+                 WHERE template_id = 7 AND minute = fromUnixTimestamp(?)",
+            )
+            .bind(minute_start / 1_000_000_000)
+            .fetch_one::<(u64, u64)>()
+            .await
+            .unwrap()
+        }
+    };
+    store.insert_log_hits(&batch(1..=10)).await.unwrap();
+    assert_eq!(merged(&store).await, (1, 10));
+    // The same 10 log_ids again: a second state row lands in the table (the MV fires per
+    // insert), but the merged distinct count stays 10.
+    store.insert_log_hits(&batch(1..=10)).await.unwrap();
+    let (state_rows, distinct) = merged(&store).await;
+    assert_eq!(state_rows, 2, "each insert block adds a state row");
+    assert_eq!(distinct, 10, "uniqExactMerge dedups the replay");
+    // A partial replay with new ids only adds the new ones.
+    store.insert_log_hits(&batch(6..=15)).await.unwrap();
+    assert_eq!(merged(&store).await.1, 15);
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn seasonal_counts_cover_shifted_windows() {
+    let (s, store) = log_store().await;
+    let mut hits = Vec::new();
+    // Template 1: 10 hits one day ago (inserted twice below), 4 hits a week ago.
+    for i in 1..=10u64 {
+        hits.push(hit(i, 1, shifted(DAY_SECS, 3) + i as i64, ""));
+    }
+    // Template 3 is active in the day window only, so template 2 has coverage but no row.
+    for i in 101..=102u64 {
+        hits.push(hit(i, 3, shifted(DAY_SECS, 2) + i as i64, ""));
+    }
+    store.insert_log_hits(&hits).await.unwrap();
+    store.insert_log_hits(&hits).await.unwrap(); // replay
+    // A hit outside the day window (30 minutes before it) must not count.
+    store
+        .insert_log_hits(&[hit(201, 1, shifted(DAY_SECS, 30), "")])
+        .await
+        .unwrap();
+
+    let w = store
+        .seasonal_counts(&[1, 2], 5, &[DAY_SECS, WEEK_SECS])
+        .await
+        .unwrap();
+    assert_eq!(w.len(), 2);
+    assert_eq!((w[0].shift_secs, w[0].covered), (DAY_SECS, true));
+    assert_eq!(
+        w[0].counts,
+        vec![(1, 10), (2, 0)],
+        "replay deduped, no row in a covered window is 0"
+    );
+    assert_eq!((w[1].shift_secs, w[1].covered), (WEEK_SECS, false));
+    assert!(
+        w[1].counts.is_empty(),
+        "no rows at all: no coverage, no counts"
+    );
+
+    // Seed the week window: only template 3 and template 1 (4 hits).
+    let mut week = vec![hit(301, 3, shifted(WEEK_SECS, 3), "")];
+    for i in 1..=4u64 {
+        week.push(hit(310 + i, 1, shifted(WEEK_SECS, 4) + i as i64, ""));
+    }
+    store.insert_log_hits(&week).await.unwrap();
+    let w = store
+        .seasonal_counts(&[1, 2], 5, &[DAY_SECS, WEEK_SECS])
+        .await
+        .unwrap();
+    assert_eq!(w[0].counts, vec![(1, 10), (2, 0)]);
+    assert!(w[1].covered);
+    assert_eq!(w[1].counts, vec![(1, 4), (2, 0)]);
+    assert!(
+        store.seasonal_counts(&[], 5, &[DAY_SECS]).await.unwrap()[0]
+            .counts
+            .is_empty()
+    );
+    drop_db(&s, &store).await;
+}
+
+const BACKFILL_SQL: &str = include_str!("../migrations/0009_backfill_log_template_minutes.sql");
+const MINUTES_MV_SQL: &str = "CREATE MATERIALIZED VIEW IF NOT EXISTS log_template_minutes_mv \
+     TO log_template_minutes AS \
+     SELECT template_id, toStartOfMinute(ts) AS minute, uniqExactState(log_id) AS hits \
+     FROM log_template_hits GROUP BY template_id, minute";
+
+/// `(state rows, distinct log_ids)` per minute offset (minutes after `base_ns`) for template 7.
+async fn minute_counts(store: &Store, base_ns: i64) -> Vec<(i64, u64, u64)> {
+    store
+        .client()
+        .query(
+            "SELECT intDiv(toUnixTimestamp(minute) - ?, 60) AS m, count(), uniqExactMerge(hits) \
+             FROM log_template_minutes WHERE template_id = 7 GROUP BY m ORDER BY m",
+        )
+        .bind(base_ns / 1_000_000_000)
+        .fetch_all::<(i64, u64, u64)>()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn backfill_fills_minutes_before_the_view_without_double_counting() {
+    let (s, store) = log_store().await;
+    let c = store.client().clone();
+    let base = (now_ns() - 40 * MIN_NS).div_euclid(MIN_NS) * MIN_NS;
+    let at = |minute: i64, i: u64| base + minute * MIN_NS + 1_000_000_000 + i as i64;
+    let hits = |minute: i64, ids: std::ops::RangeInclusive<u64>| -> Vec<LogHitRow> {
+        ids.map(|i| hit(i, 7, at(minute, i), "")).collect()
+    };
+    // Upgrade shape: hits from before the view existed (minutes 0 and 10, and the first half of
+    // minute 20), then the view is created mid-minute 20 and sees the rest.
+    c.query("DROP VIEW log_template_minutes_mv")
+        .execute()
+        .await
+        .unwrap();
+    for h in [hits(0, 1..=4), hits(10, 11..=13), hits(20, 21..=25)] {
+        store.insert_log_hits(&h).await.unwrap();
+    }
+    c.query(MINUTES_MV_SQL).execute().await.unwrap();
+    store.insert_log_hits(&hits(20, 26..=30)).await.unwrap();
+    store.insert_log_hits(&hits(30, 31..=33)).await.unwrap();
+    assert_eq!(
+        minute_counts(&store, base).await,
+        vec![(20, 1, 5), (30, 1, 3)],
+        "the view saw only its own inserts"
+    );
+
+    c.query(BACKFILL_SQL).execute().await.unwrap();
+    let want = vec![(0, 1, 4), (10, 1, 3), (20, 2, 10), (30, 1, 3)];
+    assert_eq!(
+        minute_counts(&store, base).await,
+        want,
+        "older minutes filled, the boundary minute completed, later minutes not re-inserted"
+    );
+    // A re-run only re-reads the (new) earliest minute; uniqExactMerge counts its ids once.
+    c.query(BACKFILL_SQL).execute().await.unwrap();
+    let rerun = minute_counts(&store, base).await;
+    assert_eq!(
+        rerun[0],
+        (0, 2, 4),
+        "a second state row, same distinct count"
+    );
+    assert_eq!(&rerun[1..], &want[1..]);
+    // After background merges the states combine and the distinct counts are unchanged.
+    c.query("OPTIMIZE TABLE log_template_minutes FINAL")
+        .execute()
+        .await
+        .unwrap();
+    let merged: Vec<(i64, u64)> = minute_counts(&store, base)
+        .await
+        .into_iter()
+        .map(|(m, _, n)| (m, n))
+        .collect();
+    assert_eq!(merged, vec![(0, 4), (10, 3), (20, 10), (30, 3)]);
+
+    // An empty minutes table (no hit since the view was created) backfills every hit.
+    c.query("TRUNCATE TABLE log_template_minutes")
+        .execute()
+        .await
+        .unwrap();
+    c.query(BACKFILL_SQL).execute().await.unwrap();
+    let all: Vec<(i64, u64)> = minute_counts(&store, base)
+        .await
+        .into_iter()
+        .map(|(m, _, n)| (m, n))
+        .collect();
+    assert_eq!(all, vec![(0, 4), (10, 3), (20, 10), (30, 3)]);
     drop_db(&s, &store).await;
 }
