@@ -6,7 +6,7 @@
 
 Tayga turns OpenTelemetry traces and logs into "error stories". For each failing or slow request it shows the root-cause span, the request path across services, the critical path, a diff against the endpoint's normal baseline, and the related logs. Stories are grouped by fingerprint, so one underlying problem shows up as one group rather than as hundreds of traces.
 
-It runs next to the [OpenTelemetry demo](https://github.com/open-telemetry/opentelemetry-demo) (vendored as a git submodule, pinned to 3.1.0). The demo's collector forwards OTLP to Tayga; Tayga stores raw spans and logs in ClickHouse, assembles traces, and serves a web UI and JSON API.
+It runs next to the [OpenTelemetry demo](https://github.com/open-telemetry/opentelemetry-demo) (vendored as a git submodule, pinned to 3.1.0). The demo's collector forwards OTLP to Tayga; Tayga stores raw spans and logs in ClickHouse, assembles traces, and serves a web app and a JSON API.
 
 ## Architecture
 
@@ -23,8 +23,8 @@ OTel demo services ──► demo otel-collector ──OTLP gRPC──► tayga-
                                      ▼                                                │
                                  ClickHouse ◄─────────────────────────────────────────┤
                                      │                                                ▼
-                         tayga-api (JSON + web UI)                       Redpanda topic `tayga.stories`
-                         tayga-grafana (dashboards)
+                         tayga-api (JSON API + web app)                  Redpanda topic `tayga.stories`
+                         tayga-grafana, tayga-prometheus (optional: `make up-extras`)
 
 Redpanda topic `tayga.signals` ──► tayga-logminer (separate consumer group, one replica)
                                      │  Drain template mining per service, detection every 60 s
@@ -44,12 +44,13 @@ cd tayga
 make up
 ```
 
-`make up` initializes the submodule, builds the `tayga:dev` image, and starts the demo plus Tayga.
+`make up` initializes the submodule, builds the `tayga:dev` image (the web app is built inside the image; no Node needed on the host), and starts the demo plus Tayga. It does not start Grafana or Prometheus.
 
-- Stories UI: http://localhost:8090
-- Grafana: http://localhost:3001 (anonymous Viewer access is enabled; admin password is `admin`)
-- Prometheus: http://localhost:19090
+- Web app: http://localhost:8090
 - Demo shop: http://localhost:8080
+- Optional, after `make up-extras` (see [Grafana and Prometheus](#grafana-and-prometheus-optional)):
+  - Grafana: http://localhost:3001 (anonymous Viewer access is enabled; admin password is `admin`)
+  - Prometheus: http://localhost:19090
 
 Trigger a failure with a demo feature flag, then watch a story appear:
 
@@ -58,7 +59,47 @@ make flag NAME=paymentFailure VARIANT=100%
 make flags-reset        # restore the demo's default flags
 ```
 
-Other targets: `make ps`, `make logs SERVICE=<name>`, `make down`.
+Other targets: `make ps`, `make logs SERVICE=<name>`, `make down` (also removes Grafana and Prometheus if they are running).
+
+## Web app
+
+The app is a single-page React app in `ui/`, built into `ui/dist` and embedded in the `tayga-api` binary, so port 8090 serves the app and the JSON API. It replaced the earlier server-rendered pages. Every filter and the time range live in the URL, so a page can be shared as a link.
+
+| Page | Path | What it shows |
+|---|---|---|
+| Stories | `/` | KPI tiles, the story-groups table (kind, service, endpoint filters, search), an inspector for the selected group (request path, compact waterfall, comparison with normal), a mini service map and the log alerts |
+| Story | `/stories/{id}` | One story: root cause, group trend, full waterfall, comparison with normal, logs with their templates, related alerts |
+| Traces | `/traces`, `/traces/{id}` | Trace explorer (filters, duration scatter with brush selection, results table); the trace page has the waterfall and a span drawer |
+| Service map | `/map` | Services and their calls with health, rate, error ratio and p99; a node opens a drawer with RED charts and related stories |
+| Logs | `/logs/alerts`, `/logs/templates`, `/logs/templates/{id}` | Log alerts, templates and a template's detail (`/logs` redirects to the alerts tab) |
+| Pipeline | `/pipeline` | Component status, metric history charts and consumer lag, from the recorder below; needs no Prometheus |
+
+Header and shortcuts:
+
+- Time range: 15m, 1h, 24h or 7d (default 1h). A live toggle refreshes every 10 s and pauses while the browser tab is hidden.
+- Theme: a switch that cycles light, dark and system (the default). The choice is stored in the browser.
+- `Cmd+K` or `Ctrl+K` opens the command palette: jump to a page, a service, a trace id (32 hex characters), a story group or a template, or switch the theme and the time range.
+- `g` then `s`, `t`, `m`, `l` or `p` goes to Stories, Traces, Service map, Log alerts or Pipeline. `?` lists the shortcuts. They are ignored while you type in a field or a dialog is open.
+- "Open in Jaeger" (span drawer, trace page) links to the demo's Jaeger (`TAYGA__JAEGER_URL`, set in `deploy/compose.tayga.yaml`). "Open in Grafana" on the map appears only when `TAYGA__GRAFANA_URL` is set, which `make up-extras` does. Both are empty when unset.
+
+Pipeline history comes from a recorder inside `tayga-api`: every 15 s (`record_secs`) it scrapes the `/metrics` of ingest, writer, assembler and logminer plus its own registry, and stores the samples in ClickHouse `metric_samples` (7-day TTL). The scrape targets are in `deploy/tayga-api.toml` (`TAYGA_CONFIG`); a list of targets cannot be set through `TAYGA__` environment variables. Consumer lag is read from Kafka on request, so `tayga-api` has Kafka settings.
+
+### Grafana and Prometheus (optional)
+
+They are the compose profile `extras`. `make up-extras` starts them and sets the Grafana link in the app; `make up` leaves them out. `make up` does not stop them if they are already running (compose leaves profiled services alone), so after upgrading an existing stack run `make down` once, or stop `tayga-grafana` and `tayga-prometheus` by hand. The Grafana dashboards (`tayga-stories`, `tayga-service-map`, `tayga-pipeline`, `tayga-logs`) are unchanged and still available there.
+
+### Developing the UI
+
+Node 24 or newer is needed only for UI development (`engines` in `ui/package.json`; Docker builds the app with `node:24`). Building the Rust crates needs no Node: without `ui/dist`, `tayga-api` compiles and serves a "UI not built" placeholder page.
+
+```sh
+npm --prefix ui ci
+make ui-dev                  # Vite dev server; proxies /api and /metrics to http://127.0.0.1:8090 (TAYGA_API overrides)
+npm --prefix ui test         # unit and component tests (vitest)
+npm --prefix ui run lint
+npm --prefix ui run typecheck
+make ui-e2e                  # Playwright against the live app (see ui/playwright.config.ts)
+```
 
 ## Log templates and alerts
 
@@ -81,10 +122,10 @@ The API decides whether an alert is "active" (the `active` field, the `alerting`
 
 Where to look:
 
-- `/alerts`: alerts with kind badge, count against baseline and example traces.
-- `/templates` and `/templates/{id}`: templates by count, search, sparkline, sample and recent hits.
+- `/logs/alerts`: alerts with kind badge, count against baseline and example traces.
+- `/logs/templates` and `/logs/templates/{id}`: templates by count, search, sparkline, sample and recent hits.
 - Story pages: the log table has a Template column, with a `new` or `spike` badge when the template was alerting at the story's time.
-- Grafana "Tayga · Logs" dashboard (`tayga-logs`) and logminer panels in "Tayga · Pipeline health".
+- With `make up-extras`: Grafana "Tayga · Logs" dashboard (`tayga-logs`) and logminer panels in "Tayga · Pipeline health". The app's Pipeline page charts the logminer metrics too.
 
 Limits: one logminer replica only (Drain state is global per service while records are partitioned by trace); no seasonal baselines; no alert when a template disappears; history is not re-mined. Open questions are in `docs/superpowers/followups.md`.
 
@@ -101,6 +142,10 @@ The command prints the trace id it used. An alert fires only if the service alre
 | Command | What it does |
 |---|---|
 | `cargo test --workspace` | Unit tests (integration and e2e tests are `#[ignore]`d) |
+| `make up-extras` | Also starts Grafana and Prometheus (compose profile `extras`) and enables the app's Grafana link |
+| `make ui-dev` | Starts the Vite dev server for the web app (Node 24 or newer; proxies to the API on 8090) |
+| `make ui-e2e` | Runs the Playwright suite (`npm --prefix ui run e2e`) against the running app; needs `make up` first |
+| `npm --prefix ui test` | UI unit and component tests (vitest) |
 | `make it` | Starts Redpanda + ClickHouse standalone (compose project `tayga-it`) and runs the ignored integration tests (all crates except `tayga-e2e`; the ClickHouse tests each seed a uniquely named database). Run it with the full stack down: both use the same host ports 19092 and 18123 |
 | `make infra-down` | Stops the standalone infra and removes its volumes |
 | `make e2e` | Resets flags, then runs the end-to-end tests against the live stack (`make up` first). Nine tests: the seven from before (flag-driven story scenarios for payment, payment unreachable, shipping, product catalog and ad, the service map, and raw span counts versus Jaeger) plus `log_spike_on_payment_failure` and `new_template_from_probe`. The spike scenario fails up front if a payment spike alert is still active from an earlier run (wait about 10 minutes). The first run on a fresh stack waits up to 16 more minutes for the probe service warmup |
@@ -109,21 +154,21 @@ The command prints the trace id it used. An alert fires only if the service alre
 
 ## Ports
 
-Tayga's own published ports (8090, 3001, 19090, 19092, 18123, 14318) are bound to 127.0.0.1. The upstream OpenTelemetry demo is not: it publishes 8080 (frontend proxy), 9090 (the demo's Prometheus), 10000 (Envoy admin) and 26 other container ports (on ephemeral host ports, counted on demo 3.1.0) on all interfaces, so they are reachable from your network. Run the stack only on a trusted network, or firewall those ports.
+Tayga's own published ports (8090, 3001, 19090, 19092, 18123, 14318) are bound to 127.0.0.1. 3001 and 19090 are published only after `make up-extras`. The upstream OpenTelemetry demo is not: it publishes 8080 (frontend proxy), 9090 (the demo's Prometheus), 10000 (Envoy admin) and 26 other container ports (on ephemeral host ports, counted on demo 3.1.0) on all interfaces, so they are reachable from your network. Run the stack only on a trusted network, or firewall those ports.
 
 | Port | Service | Defined in |
 |---|---|---|
 | 8080 | OTel demo frontend proxy (shop, Jaeger UI under `/jaeger/ui`) | demo compose (not published by Tayga's compose files) |
-| 8090 | tayga-api: web UI, JSON API, `/healthz`, `/metrics` | `deploy/compose.tayga.yaml` |
-| 3001 | Grafana (container port 3000) | `deploy/compose.tayga.yaml` |
-| 19090 | Prometheus (container port 9090) | `deploy/compose.tayga.yaml` |
+| 8090 | tayga-api: web app, JSON API, `/healthz`, `/metrics` | `deploy/compose.tayga.yaml` |
+| 3001 | Grafana (container port 3000), `extras` profile only | `deploy/compose.tayga.yaml` |
+| 19090 | Prometheus (container port 9090), `extras` profile only | `deploy/compose.tayga.yaml` |
 | 19092 | Redpanda Kafka API (external listener) | `deploy/compose.infra.yaml` |
 | 18123 | ClickHouse HTTP (container port 8123) | `deploy/compose.infra.yaml` |
 | 14318 | tayga-ingest OTLP/HTTP (container port 4318), used by `tayga-devtools emit-log` | `deploy/compose.tayga.yaml` |
 
 ## HTTP routes (tayga-api, port 8090)
 
-`since` takes `<n>[smhd]`, from `1s` to `7d`. Invalid values return 400. Fingerprints are decimal u64 strings; story and trace ids are 32 hex characters.
+`since` takes `<n>[smhd]`, from `1s` to `7d` on the API routes; the app's time range offers 15m, 1h, 24h and 7d. Invalid values return 400. Fingerprints are decimal u64 strings; story and trace ids are 32 hex characters.
 
 JSON API:
 
@@ -138,28 +183,45 @@ JSON API:
 | `GET /api/v1/log-templates` | `since` (default `1h`), `service`, `q` (substring, at most 200 chars) | Top 200 templates with hits in the window, by count; each has `alerting` |
 | `GET /api/v1/log-templates/{id}` | `since` (default `24h`) | One template with `buckets`, the 20 most recent hits and its alerts |
 | `GET /api/v1/traces/{trace_id}/log-templates` | none | `[{log_id, template_id, template, alert}]` for the trace's logs |
+| `GET /api/v1/overview` | `since` | KPI values and bucket series for the Stories page |
+| `GET /api/v1/stories/series` | `since`, `kind`, `service` | Stories per bucket, for charts |
+| `GET /api/v1/traces/search` | `since`, `service`, `touched` (0 or 1), `endpoint`, `min_ms`, `max_ms`, `errors` (0 or 1), `limit` (1 to 500, default 100) | Trace rows for the explorer, newest first, each with `story_id` and `story_kind` when a story exists |
+| `GET /api/v1/services` | none | Service names |
+| `GET /api/v1/services/{name}` | `since` | RED series (rate, error ratio, p50/p95/p99) for one service |
+| `GET /api/v1/search` | `q` | Command palette: matching services, templates and story groups; a trace id when `q` is 32 hex characters |
+| `GET /api/v1/pipeline/series` | `metric`, `kind` (required), `job`, `labels` (`k=v`), `since` | A rate, gauge or quantile series from the recorded metrics |
+| `GET /api/v1/pipeline/lag` | none | Consumer lag per group (committed, end offset, lag) |
+| `GET /api/v1/config` | none | `{jaeger_url, grafana_url}` (null when unset) |
 | `GET /healthz` | none | `ok` |
 | `GET /metrics` | none | Prometheus metrics |
 
-Errors on these routes are JSON `{"error": "..."}`. A ClickHouse failure returns 503.
+Errors on these routes are JSON `{"error": "..."}`. A ClickHouse failure returns 503. `GET /api/v1/traces/{trace_id}` and `GET /api/v1/service-map` also carry the extra fields the app uses (span attributes, resource, events, self time; per-node RED summary and health).
 
-HTML UI:
+App routes (client-side; every path below serves `index.html`, and the app renders the page):
 
 | Route | Query | Page |
 |---|---|---|
-| `GET /` | `since`, `kind`, `service` | Story groups |
-| `GET /groups/{fingerprint}` | `since` | Group detail |
-| `GET /stories/{story_id}` | none | Story detail |
-| `GET /service-map` | `since` | Service map |
-| `GET /alerts` | `since` (default `24h`), `kind`, `service` | Log alerts |
-| `GET /templates` | `since` (default `1h`), `service`, `q` | Log templates |
-| `GET /templates/{id}` | `since` (default `24h`) | Template detail |
+| `/` | `since`, `kind`, `service`, `group` | Stories |
+| `/stories/{story_id}` | `since` | Story |
+| `/traces`, `/traces/{trace_id}` | `since`, filters | Trace explorer, trace |
+| `/map` | `since` | Service map |
+| `/logs/alerts`, `/logs/templates`, `/logs/templates/{id}` | `since`, filters | Logs |
+| `/pipeline` | `since` | Pipeline health |
 
-Unknown routes return axum's plain 404.
+Redirects from the removed server-rendered pages (HTTP 308, query string kept):
+
+| Old route | Now |
+|---|---|
+| `/groups/{fingerprint}` | `/?group="{fingerprint}"` (the group is selected on Stories; the id is JSON-quoted in the URL) |
+| `/service-map` | `/map` |
+| `/alerts` | `/logs/alerts` |
+| `/templates`, `/templates/{id}` | `/logs/templates`, `/logs/templates/{id}` |
+
+Static files: `/assets/*` is served with `Cache-Control: public, max-age=31536000, immutable`; `index.html` with `no-cache`. A GET to a path the app does not know serves `index.html` with status 200 (the app shows its own not-found page). A missing `/api/*` route or `/assets/*` file returns a JSON 404.
 
 ## Verified
 
-Rows above the `Plan 4` row were checked 2026-10-03 on branch `feat/plan-3-api-ui-e2e`; rows from the `Plan 4` row on were checked 2026-10-04 on branch `feat/plan-4-log-templates`. The stack was running for both.
+Rows above the `Plan 4` row were checked 2026-10-03 on branch `feat/plan-3-api-ui-e2e`; rows from the `Plan 4` row on were checked 2026-10-04 on branch `feat/plan-4-log-templates`; rows from the `Plan 5` row on were checked 2026-10-05 on branch `feat/plan-5-ui`. The stack was running for all three. Rows about the removed server-rendered pages are kept as history and marked **superseded**.
 
 | Claim | How verified | Result |
 |---|---|---|
@@ -171,13 +233,13 @@ Rows above the `Plan 4` row were checked 2026-10-03 on branch `feat/plan-3-api-u
 | Tayga's ports bind 127.0.0.1; the demo publishes 8080, 9090, 10000 and ephemeral service ports on all interfaces | `lsof -nP -iTCP -sTCP:LISTEN` showed `127.0.0.1:8090`, `:3001`, `:19090`, `:19092`, `:18123` and `*:8080`, `*:9090`, `*:10000`, `*:574xx`, `*:627xx`, `*:648xx`; `docker ps` mapped the `*` listeners to containers of compose project `opentelemetry-demo` (frontend-proxy, prometheus, otel-collector, flagd and the demo services) | verified live 2026-10-03 |
 | Port 8080 = demo frontend proxy | `docker ps` shows `frontend-proxy` on 8080; `curl localhost:8080/` returned HTTP 200; the compose definition is in the submodule, not read | verified live, definition not read |
 | Jaeger UI at `/jaeger/ui` on 8080 | default `jaeger_url` in `crates/tayga-api/src/main.rs` and `TAYGA__JAEGER_URL` in compose | verified in config only, URL not fetched |
-| Grafana anonymous Viewer, admin password `admin` | `GF_AUTH_ANONYMOUS_*`, `GF_SECURITY_ADMIN_PASSWORD` in `deploy/compose.tayga.yaml` | verified in config; login not tried |
-| API and UI routes and their query parameters | `crates/tayga-api/src/routes.rs`, `ui.rs`, `params.rs` | verified in code |
+| Grafana anonymous Viewer, admin password `admin` | `GF_AUTH_ANONYMOUS_*`, `GF_SECURITY_ADMIN_PASSWORD` in `deploy/compose.tayga.yaml` | verified in config; login not tried; since plan 5 Grafana runs only after `make up-extras` |
+| API and UI routes and their query parameters | `crates/tayga-api/src/routes.rs`, `ui.rs`, `params.rs` | verified in code; **superseded** for the HTML routes (`ui.rs` is removed, see the Plan 5 rows) |
 | `since` range 1s-7d, defaults 1h / 24h / 1h | `parse_since`, `group_filter`, `group`, `service_map` | verified in code; live `since=8d` returned 400, `since=1h&kind=error` returned 200 |
 | `kind` accepts only `error` or `slow` | `group_filter` in `params.rs` | verified in code |
 | `/metrics` on tayga-api | `tayga_common::metrics::router` merged in `main.rs`; live `curl localhost:8090/metrics` returned Prometheus text | verified |
-| Unknown route returns plain 404 | live `curl localhost:8090/nope` returned 404 (body not inspected); no fallback in the routers | verified status; "plain" inferred from code |
-| `/` UI returns 200 | live `curl localhost:8090/` | verified |
+| Unknown route returns plain 404 | live `curl localhost:8090/nope` returned 404 (body not inspected); no fallback in the routers | verified status; "plain" inferred from code; **superseded**: unknown paths now serve the app (see the Plan 5 rows) |
+| `/` UI returns 200 | live `curl localhost:8090/` | verified (still 200, now the web app) |
 | `make up/down/ps/logs/flag/flags-reset/it/e2e/verify-raw/capture/infra-down` | `Makefile` | verified in Makefile; only `up`-state commands were observed, `make it`, `make e2e`, `make down`, `make infra-up` and flag changes were not run |
 | `make it` conflicts with the full stack | both compose files publish 19092 and 18123 on the host (`compose.infra.yaml`) | inferred from port definitions, not run |
 | Demo pinned to 3.1.0 | `.gitmodules`, `git submodule status` shows `(3.1.0)`; `DEMO_VERSION` in Makefile | verified |
@@ -192,7 +254,7 @@ Rows above the `Plan 4` row were checked 2026-10-03 on branch `feat/plan-3-api-u
 | Flush at 5,000 logs or 1 s, detect every 60 s, topic `tayga.alerts` | `LogminerSettings::default` | verified in code |
 | TTLs 3 d (hits) / 30 d (templates) / 7 d (alerts) | `TTL` lines in `crates/tayga-store/migrations/0004*` | verified in code |
 | New routes and their defaults (`since` 24h / 1h / 24h, 200 alert and template limit, `q` at most 200 chars) | `routes.rs`, `ui.rs`, `params.rs`, `repo.rs` (limit 200 at `log_alerts` and `TEMPLATES_IN_WINDOW`) | verified in code |
-| `/alerts` and `/templates` return 200; `/api/v1/log-alerts?since=24h` | live `curl`: 200, 200; 8 alerts in the last 24 h | verified live 2026-10-04 |
+| `/alerts` and `/templates` return 200; `/api/v1/log-alerts?since=24h` | live `curl`: 200, 200; 8 alerts in the last 24 h | verified live 2026-10-04; **superseded**: `/alerts` and `/templates` now return 308 |
 | About 60-120 templates | live `log_templates FINAL`: 293 rows in total (all ever mined, 30-day TTL), 72 with `last_seen` in the last hour; `/api/v1/log-templates?since=1h` returned 72 | verified live; the 60-120 range is the plan's estimate, the live hourly count (72) is inside it |
 | Golden Drain test: 64 templates on the 5,000-line sample, `frontend-proxy` 5, bound is 120 and 10 | `cargo test -p tayga-drain --test '*' -- --nocapture` printed `templates: 64 {... "frontend-proxy": 5 ...}`, 3 passed | verified |
 | Restoring the first half of the golden sample and mining the rest gives every line the same template id as one pass | `restore_mid_corpus_matches_a_single_pass` in `crates/tayga-drain/tests/golden.rs`. It fails (116 of 5,000 lines differ) when the restore is skipped. It still passes when clusters are restored in reverse order, so the sample does not exercise leaf-order ties | verified 2026-10-04 |
@@ -206,3 +268,23 @@ Rows above the `Plan 4` row were checked 2026-10-03 on branch `feat/plan-3-api-u
 | Latest `make e2e` run, 2026-10-04, on commit `7c0d35a`: 8 of 9 passed. `shipping_slowdown_produces_slow_story_blaming_shipping` found no shipping slow story within 600 s. Run alone right after, on the same commit, it passed in 40 s. Alert times: log spike 200 s; new-template probe 45 s, after a 556 s first-run warmup wait for the `tayga-e2e-probe` service | one `make e2e` run plus one single-test re-run | single run, not a latency guarantee; the shipping failure fits the rarity of international orders (see the `make e2e` row and followups) |
 | Story scenario times in that run: ad 85 s, payment 95 s, unreachable 65 s, catalog 25 s, shipping failed (40 s in the re-run) | same run | single run; earlier runs differed (see followups) |
 | Performance, scale, or latency claims | none made beyond the single-run timings above | n/a |
+| **Plan 5 (web app)** | | |
+| Rows below checked 2026-10-05 on branch `feat/plan-5-ui` at `870bfaa`, against the stack from `make up` (5 tayga containers running; Grafana and Prometheus not running) | | |
+| App served on 8090: `/`, `/map`, `/logs`, `/logs/alerts`, `/pipeline`, `/traces` return 200 `text/html`; an unknown path (`/nope`) also returns 200 `text/html` | live `curl -D -` | verified |
+| `/api/v1/nope` and `/assets/nope.js` return 404 `application/json`; `/metrics` returns 200 | live `curl` | verified |
+| Redirects are 308 with the query kept: `/groups/1` to `/?group=%221%22`, `/service-map?since=1h` to `/map?since=1h`, `/alerts` to `/logs/alerts` | live `curl -D -` (the other two redirects, `/templates` and `/templates/{id}`, are in `OLD_URL_REDIRECTS` in `crates/tayga-api/src/spa.rs`, and the Task 13 report lists them live as 308) | verified live (3), in code and in the Task 13 report (2) |
+| `GET /api/v1/config` returns `{"jaeger_url":"http://localhost:8080/jaeger/ui","grafana_url":null}` on a plain `make up` | live `curl` | verified |
+| New API routes `overview`, `stories/series`, `traces/search`, `search?q=`, `pipeline/series` return 200; `services` returns a list of names; `pipeline/lag` returns three groups (writer, assembler, logminer) | live `curl` (`pipeline/series?metric=up&kind=gauge&job=tayga-api&since=15m`; `services/{name}` not called) | verified live |
+| Route list, parameters and limits (`limit` 1 to 500, default 100; `touched`, `errors` flags; `kind` required for `pipeline/series`) | `crates/tayga-api/src/routes_v2.rs`, `params.rs` | verified in code |
+| Immutable cache on `/assets/*`, `no-cache` on `index.html` | `IMMUTABLE` and `NO_CACHE` in `spa.rs`; Task 13 report shows live response headers (`cache-control: public, max-age=31536000, immutable` on the asset, `no-cache` on `/`) | verified in code and in the Task 13 report; not re-fetched today |
+| Pages, paths, shortcuts (`g` then `s t m l p`, `?`, `Cmd/Ctrl+K`), theme cycle light, dark, system, time ranges 15m/1h/24h/7d, live refresh 10 s paused while hidden, palette contents | `ui/src/router.tsx`, `components/shell/{Shortcuts,CommandPalette,ThemeSwitch,TimeRange,LiveToggle}.tsx`, `app/search.ts`, `theme/theme.ts` | verified in code; not clicked through in a browser today (the Playwright suite in the Task 14 report covers pages, redirects, theme switch and palette) |
+| Recorder: every 15 s, 7-day TTL, targets in `deploy/tayga-api.toml` via `TAYGA_CONFIG`, not settable by `TAYGA__` env | `default_record_secs` in `crates/tayga-api/src/main.rs`; `TTL ... INTERVAL 7 DAY` in `0005_metric_samples.sql`; Task 13 report (config 0.15.27 rejected the env form with `invalid type: map, expected a sequence`) | verified in code; the env failure is cited from the Task 13 report, not re-run |
+| Grafana and Prometheus are the compose profile `extras`; `make up-extras` starts them and sets the Grafana link; `make down` removes them | `Makefile`, `deploy/compose.tayga.yaml`, `deploy/compose.extras.yaml`; Task 13 report (live: `up-extras` gave `grafana_url` set, Prometheus ready, 4 dashboards provisioned; a second `make up` left them running) | verified in files; live results cited from the Task 13 report; `make up-extras` not run today |
+| Node 24 or newer only for UI development; Docker builds with `node:24`; `make ui-dev`, `make ui-e2e` | `engines` in `ui/package.json`; first stage of `docker/Dockerfile`; `Makefile`; `node --version` here prints v24.18.0 | verified |
+| Without `ui/dist`, `tayga-api` compiles and serves a placeholder | `spa.rs` module comment, `PLACEHOLDER`, `allow_missing`; Task 4 ledger ruling | verified in code; a build without `ui/dist` not run today |
+| Dev server proxies to 8090 by default, `TAYGA_API` overrides | `ui/vite.config.ts` | verified in code |
+| UI unit tests: 371 pass | `npm --prefix ui test` run today: `Tests 371 passed (371)` | verified |
+| Playwright suite: 139 tests in 11 files across 4 projects | `npx playwright test --list` run today (list only, no run). The Task 14 report records 88 passed and 12 skipped across dark, light and reduced-motion for the first run; fix rounds 1 and 2 ran 104 passed, 12 skipped on the Vite dev server (redirect specs excluded) and the final run on the rebuilt 8090 app is pending | list verified; no full pass claimed here |
+| Budgets (spec section 10), measured in Task 14, unthrottled on the development machine against the live stack, medians of 5 cold-cache contexts: initial JS 180.7 KB gzip (limit 350 KB); JS fetched by a cold home load 227.8 KB (350 KB); home first render with data 155 ms (1000 ms); waterfall of the largest live trace (32 spans) 25 ms and of 5,000 synthetic spans 37 ms (200 ms); map layout 155 ms for 19 live nodes and 196 ms for 60 synthetic nodes (300 ms); live refresh gaps 10088 and 10046 ms; 0 requests in 13 s while the tab is hidden | Task 14 report, "Budgets" table (Playwright `perf` project) | cited, not re-measured today; a single machine, not a guarantee |
+| Last `make e2e` (Task 14): 8 of 9 passed; `shipping_slowdown_produces_slow_story_blaming_shipping` found no group within 600 s, twice | Task 14 report | cited; cause under investigation (see followups) |
+| Performance, scale, or latency claims | none beyond the cited budgets and single runs above | n/a |
