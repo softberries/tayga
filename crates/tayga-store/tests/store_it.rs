@@ -443,11 +443,7 @@ async fn bootstrap_cap_is_ten_times_p50() {
     let eps = store.endpoint_stats(60, &none).await.unwrap();
     let frontend = stats_of(&eps, "frontend");
     assert_eq!(frontend.kept, 64, "5 s outlier is above 10 x p50");
-    assert!(
-        frontend.p99 < (1_000 * MS_NS) as f64,
-        "p99 {}",
-        frontend.p99
-    );
+    assert!(frontend.p99 <= (150 * MS_NS) as f64, "p99 {}", frontend.p99);
     assert_eq!(stats_of(&eps, "cart").kept, 64);
     assert_eq!(frontend.excluded, 1);
     let ops = store.op_stats(60, &none).await.unwrap();

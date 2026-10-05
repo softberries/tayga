@@ -54,6 +54,12 @@ pub fn build(
                 continue;
             }
         }
+        // No kept traces (or NaN quantiles from none) means no baseline: a 0-trace baseline
+        // would later turn into a cap of 0 and lock the endpoint out. The next refresh then
+        // learns it through the 10 x p50 bootstrap.
+        if r.kept == 0 || ![r.p50, r.p95, r.p99].iter().all(|q| q.is_finite()) {
+            continue;
+        }
         let baseline = Baseline {
             traces: r.kept,
             p50_ns: r.p50,
@@ -92,9 +98,14 @@ pub fn build(
 pub fn caps_from(previous: &HashMap<Endpoint, Baseline>, t: &Thresholds) -> EndpointCaps {
     let mut caps = EndpointCaps::default();
     for (endpoint, b) in previous {
+        let limit = slow_limit_ns(b, t);
+        // A NaN or non-positive limit would cap everything at 0; leave it to the bootstrap.
+        if !limit.is_finite() || limit <= 0.0 {
+            continue;
+        }
         caps.keys
             .push(format!("{}\0{}", endpoint.service, endpoint.name));
-        caps.caps_ns.push(slow_limit_ns(b, t).ceil() as u64);
+        caps.caps_ns.push(limit.ceil() as u64);
     }
     caps
 }
@@ -284,8 +295,13 @@ mod tests {
             &carried,
             2 * WINDOW_SECS,
         );
-        assert_eq!(r.baselines[&ep()].traces, 0, "new data accepted");
+        assert!(r.baselines.is_empty(), "no kept traces, so no baseline");
         assert!(r.carried.is_empty());
+        // Next refresh: no previous baseline, so no cap and the bootstrap applies.
+        assert_eq!(
+            caps_from(&r.baselines, &Thresholds::default()),
+            EndpointCaps::default()
+        );
     }
 
     #[test]
@@ -300,6 +316,40 @@ mod tests {
             HashMap::from([(ep(), 0)]),
             "carry start kept"
         );
+    }
+
+    #[test]
+    fn restart_shaped_fold_with_no_kept_traces_inserts_no_baseline() {
+        let r = run(
+            vec![row(100, 0, f64::NAN)],
+            &HashMap::new(),
+            &HashMap::new(),
+            0,
+        );
+        assert!(r.baselines.is_empty());
+        assert!(r.carried.is_empty());
+        let mut nan = row(100, 60, f64::NAN);
+        nan.p50 = f64::NAN;
+        let r = run(vec![nan], &HashMap::new(), &HashMap::new(), 0);
+        assert!(
+            r.baselines.is_empty(),
+            "non-finite quantiles insert nothing"
+        );
+    }
+
+    #[test]
+    fn caps_skip_baselines_without_a_finite_positive_limit() {
+        let mut previous = prev(0, f64::NAN);
+        assert_eq!(
+            caps_from(&previous, &Thresholds::default()),
+            EndpointCaps::default()
+        );
+        previous = prev(100, 0.0);
+        let t = Thresholds {
+            slow_trace_margin_ms: 0.0,
+            ..Thresholds::default()
+        };
+        assert_eq!(caps_from(&previous, &t), EndpointCaps::default());
     }
 
     #[test]
