@@ -95,6 +95,8 @@ interface CanvasProps {
   map: ServiceMapView
   layout: MapLayout
   range: Range
+  /** Callers kept on the map by their infra badge alone (no edge or node of their own). */
+  extra: readonly string[]
   /** Hidden infrastructure callees per caller. */
   infra: ReadonlyMap<string, InfraBadge>
   matches: ReadonlySet<string>
@@ -102,7 +104,7 @@ interface CanvasProps {
   onOpen: (service: string) => void
 }
 
-function Canvas({ map, layout, range, infra, matches, active, onOpen }: CanvasProps) {
+function Canvas({ map, layout, range, extra, infra, matches, active, onOpen }: CanvasProps) {
   const { fitView, getViewport, setViewport } = useReactFlow()
   const narrow = useMediaQuery(NARROW_QUERY)
   const reduce = useMediaQuery(REDUCED_MOTION_QUERY)
@@ -143,7 +145,7 @@ function Canvas({ map, layout, range, infra, matches, active, onOpen }: CanvasPr
   const nodes = useMemo<ServiceNodeType[]>(() => {
     const views = new Map(map.nodes.map((n) => [n.service, n]))
     // A layout kept from before a toggle may still place services the map no longer has.
-    const drawn = new Set(servicesOf(map))
+    const drawn = new Set(servicesOf(map, extra))
     return Object.entries(layout.positions)
       .filter(([service]) => drawn.has(service))
       .map(([service, position]) => ({
@@ -169,7 +171,7 @@ function Canvas({ map, layout, range, infra, matches, active, onOpen }: CanvasPr
       }))
       // Tab order follows the picture: left to right, then top to bottom.
       .sort((a, b) => a.position.x - b.position.x || a.position.y - b.position.y)
-  }, [map, layout, infra, matches, searching, active, onOpen, reveal])
+  }, [map, layout, extra, infra, matches, searching, active, onOpen, reveal])
 
   const edges = useMemo<ServiceEdgeType[]>(
     () =>
@@ -303,11 +305,11 @@ function MapView() {
   const showInfra = search.infra === true
   const infraServices = config.data?.infra_services ?? DEFAULT_INFRA_SERVICES
   // The drawer's service stays drawn even when it is infrastructure.
-  const { visible, badges } = useMemo(() => {
-    if (!map.data) return { visible: undefined, badges: new Map<string, InfraBadge>() }
-    const r = hideInfra(map.data, showInfra ? [] : infraServices, search.service, range.secs)
-    return { visible: r.map, badges: r.badges }
-  }, [map.data, showInfra, infraServices, search.service, range.secs])
+  const { visible, badges, extra } = useMemo(() => {
+    if (!map.data) return { visible: undefined, badges: new Map<string, InfraBadge>(), extra: [] as string[] }
+    const r = hideInfra(map.data, showInfra ? [] : infraServices, { keep: search.service, range })
+    return { visible: r.map, badges: r.badges, extra: r.extra }
+  }, [map.data, showInfra, infraServices, search.service, range])
   const hiddenInfra = useMemo(() => {
     if (!map.data || showInfra) return 0
     const seen = new Set(servicesOf(map.data))
@@ -315,7 +317,7 @@ function MapView() {
   }, [map.data, showInfra, infraServices, search.service])
 
   // The layout's key is the drawn topology, so toggling infrastructure lays the map out again.
-  const graph = useMemo(() => (visible ? mapGraph(visible) : null), [visible])
+  const graph = useMemo(() => (visible ? mapGraph(visible, extra) : null), [visible, extra])
   const key = graph ? topologyKey(graph) : ''
   const layout = useQuery({
     queryKey: ['map-layout', key],
@@ -363,7 +365,7 @@ function MapView() {
       <Card className="flex flex-wrap items-center gap-x-4 gap-y-2.5 px-4 py-3">
         <PanelTitle>Service map</PanelTitle>
         <span aria-live="polite" className="text-xs text-muted">
-          {drawn && !empty ? `${mapSummary(drawn)}${hiddenInfra ? ` · ${hiddenInfra} infra hidden` : ''}` : map.isPending ? 'Loading…' : ''}
+          {drawn && !empty ? `${mapSummary(drawn, extra)}${hiddenInfra ? ` · ${hiddenInfra} infra hidden` : ''}` : map.isPending ? 'Loading…' : ''}
         </span>
         <div className="ml-auto flex min-w-0 flex-wrap items-center gap-2 max-sm:w-full">
           <label className="relative flex min-w-0 items-center max-sm:flex-1">
@@ -394,7 +396,7 @@ function MapView() {
                 checked={showInfra}
                 onCheckedChange={(on) => setSearch({ infra: on ? true : undefined })}
               />
-              <label htmlFor="map-show-infra" className="cursor-pointer select-none text-xs text-muted">
+              <label htmlFor="map-show-infra" className="cursor-pointer select-none text-[13px] text-ink">
                 Show infrastructure
               </label>
             </div>
@@ -432,8 +434,8 @@ function MapView() {
           <CanvasSkeleton label={`Laying out ${graph?.services.length ?? 0} services`} />
         ) : (
           <section aria-label="Service map canvas" className="absolute inset-0">
-            <p className="sr-only">{describeMap(drawn)}</p>
-            <Canvas map={drawn} layout={layout.data} range={range} infra={badges} matches={matches} active={search.service} onOpen={onOpen} />
+            <p className="sr-only">{describeMap(drawn, extra)}</p>
+            <Canvas map={drawn} layout={layout.data} range={range} extra={extra} infra={badges} matches={matches} active={search.service} onOpen={onOpen} />
             <Legend />
           </section>
         )}

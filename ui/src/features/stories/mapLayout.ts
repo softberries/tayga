@@ -34,9 +34,12 @@ export const MINI = { r: 9, colGap: 132, rowGap: 40, padX: 66, padY: 22, labelGa
 /** An edge fails when at least 1 % of its calls returned an error. */
 export const FAILING_EDGE_RATE = 0.01
 
-/** Every service: nodes plus services seen only as callers or callees, by name. */
-export function servicesOf(map: ServiceMapView): string[] {
-  const s = new Set(map.nodes.map((n) => n.service))
+/**
+ * Every service: nodes plus services seen only as callers or callees, by name. `extra` are
+ * callers kept on the map although every call they made went to hidden infrastructure.
+ */
+export function servicesOf(map: ServiceMapView, extra: readonly string[] = []): string[] {
+  const s = new Set([...map.nodes.map((n) => n.service), ...extra])
   for (const e of map.edges) {
     s.add(e.parent)
     s.add(e.child)
@@ -93,8 +96,9 @@ function edgePath(a: MiniNode, b: MiniNode): string {
   return `M${a.x + r} ${a.y}Q${cx} ${(a.y + b.y) / 2} ${b.x + r} ${b.y}`
 }
 
-export function layoutMiniMap(map: ServiceMapView): MiniMapLayout {
+export function layoutMiniMap(map: ServiceMapView, extra: readonly string[] = []): MiniMapLayout {
   const health = new Map<string, Health>(map.nodes.map((n) => [n.service, n.health]))
+  for (const s of extra) if (!health.has(s)) health.set(s, 'ok')
   for (const e of map.edges) {
     if (!health.has(e.parent)) health.set(e.parent, 'ok')
     if (!health.has(e.child)) health.set(e.child, 'ok')

@@ -10,7 +10,7 @@ import type { MapGraph, Pos } from './layout'
 
 export { servicesOf } from '../stories/mapLayout'
 
-export function mapGraph(map: ServiceMapView): MapGraph {
+export function mapGraph(map: ServiceMapView, extra: readonly string[] = []): MapGraph {
   const seen = new Set<string>()
   const links: [string, string][] = []
   for (const e of map.edges) {
@@ -20,7 +20,7 @@ export function mapGraph(map: ServiceMapView): MapGraph {
     links.push([e.parent, e.child])
   }
   links.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]))
-  return { services: servicesOf(map), links }
+  return { services: servicesOf(map, extra), links }
 }
 
 /** What a caller's card says about the infrastructure services hidden from the map. */
@@ -35,17 +35,18 @@ export interface InfraBadge {
  * Drops the infrastructure services and every call touching them, and summarises the calls a
  * visible service made into them as a badge on that caller. `keep` stays drawn even when it is
  * infrastructure (the service whose drawer is open). Calls between infrastructure services,
- * and from them, produce no badge.
+ * and from them, produce no badge. `extra` lists badged callers that would otherwise vanish
+ * (every call they made went to hidden infrastructure, so no edge or node names them): pass it
+ * on to `mapGraph`, `servicesOf` and `mapSummary` so they stay on the map.
  */
 export function hideInfra(
   map: ServiceMapView,
   infra: readonly string[],
-  keep: string | undefined,
-  windowSecs: number,
-): { map: ServiceMapView; badges: Map<string, InfraBadge> } {
-  const hidden = new Set(infra.filter((s) => s !== keep))
+  opts: { keep?: string; range: Range },
+): { map: ServiceMapView; badges: Map<string, InfraBadge>; extra: string[] } {
+  const hidden = new Set(infra.filter((s) => s !== opts.keep))
   const badges = new Map<string, InfraBadge>()
-  if (hidden.size === 0) return { map, badges }
+  if (hidden.size === 0) return { map, badges, extra: [] }
   const edges: EdgeView[] = []
   for (const e of map.edges) {
     if (hidden.has(e.parent)) continue
@@ -55,12 +56,14 @@ export function hideInfra(
     }
     if (e.parent === e.child) continue
     const badge = badges.get(e.parent) ?? { services: [], failing: false }
-    badge.services.push({ name: e.child, perMin: e.calls / (windowSecs / 60), errorRate: e.error_rate })
+    badge.services.push({ name: e.child, perMin: callsPerMin(e.calls, opts.range), errorRate: e.error_rate })
     badge.failing ||= edgeTone(e) === 'err'
     badges.set(e.parent, badge)
   }
   for (const b of badges.values()) b.services.sort((a, c) => c.perMin - a.perMin || a.name.localeCompare(c.name))
-  return { map: { edges, nodes: map.nodes.filter((n) => !hidden.has(n.service)) }, badges }
+  const kept: ServiceMapView = { edges, nodes: map.nodes.filter((n) => !hidden.has(n.service)) }
+  const present = new Set(servicesOf(kept))
+  return { map: kept, badges, extra: [...badges.keys()].filter((s) => !present.has(s)).sort() }
 }
 
 /** Identifies the topology: a live refresh with the same services and calls keeps the layout. */
@@ -147,8 +150,8 @@ export function nodeOf(map: ServiceMapView, service: string): NodeView | undefin
 }
 
 /** One-line page summary: "17 services · 2 degraded · 1 failing call". */
-export function mapSummary(map: ServiceMapView): string {
-  const services = servicesOf(map).length
+export function mapSummary(map: ServiceMapView, extra: readonly string[] = []): string {
+  const services = servicesOf(map, extra).length
   const degraded = map.nodes.filter((n) => n.health !== 'ok').length
   const failing = map.edges.filter((e) => e.parent !== e.child && isFailingEdge(e)).length
   const parts = [`${services} ${services === 1 ? 'service' : 'services'}`]

@@ -3,9 +3,9 @@
  * nodes, failing edges, the drawer opened from the URL and from a node, search, the Grafana
  * link, and the empty and error states.
  */
-import { act, cleanup, screen, waitFor, within } from '@testing-library/react'
+import { act, configure, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import logAlerts from '../api/__fixtures__/log-alerts.json'
 import logTemplates from '../api/__fixtures__/log-templates.json'
 import service from '../api/__fixtures__/service.json'
@@ -93,28 +93,19 @@ afterEach(() => {
 })
 
 /**
- * The first render of /map used to pay for the cold start inside its 1 s `findBy` wait: the
- * lazy route chunk (React Flow, the drawer and their transforms, ~0.7 s alone), ELK's 1.4 MB
- * bundle and its first layout, and the first React Flow render. That fits on an idle machine
- * and not while other test files compete for the CPU. One throwaway render here moves the cost
- * into a hook with its own generous timeout; it is not ELK's work (a layout takes ~15 ms warm).
+ * The first test used to pay for the cold start inside its `findBy` wait: the lazy route chunk
+ * (React Flow, the drawer and their transforms, ~0.7 s alone), ELK's 1.4 MB bundle and its first
+ * layout (~60 ms; ~15 ms warm). That fits in the default 1 s on an idle machine and not while
+ * other test files compete for the CPU. Load the modules up front (own timeout), and give waits
+ * on this heavy page 5 s: a load spike then slows a test instead of failing it.
  */
 beforeAll(async () => {
-  vi.stubGlobal('ResizeObserver', MeasuringResizeObserver)
-  vi.stubGlobal('DOMMatrixReadOnly', DOMMatrixStub)
-  const offsetWidth = vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(1000)
-  const offsetHeight = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(600)
-  stubApi(routes())
-  try {
-    renderApp('/map')
-    await screen.findByRole('button', { name: /^payment[,:]/ }, { timeout: 30_000 })
-  } finally {
-    cleanup()
-    offsetWidth.mockRestore()
-    offsetHeight.mockRestore()
-    vi.unstubAllGlobals()
-  }
-}, 40_000)
+  await import('./map')
+  await layoutGraph({ services: ['a', 'b'], links: [['a', 'b']] })
+  configure({ asyncUtilTimeout: 5000 })
+}, 30_000)
+
+afterAll(() => configure({ asyncUtilTimeout: 1000 }))
 
 describe('service map', () => {
   it('renders every service with its health, and failing calls as flowing edges', async () => {
@@ -145,7 +136,7 @@ describe('service map', () => {
     expect(screen.queryByRole('button', { name: /^flagd[,:]/ })).toBeNull()
     // cart -> flagd is healthy: a slow-toned badge. ad -> flagd is failing: red.
     const cart = await node('cart')
-    expect(cart.querySelector('[data-infra-badge]')).toHaveTextContent('+1 infra')
+    expect(cart.querySelector('[data-infra-badge]')).toHaveTextContent('+1')
     expect(cart.querySelector('[data-infra-badge]')).toHaveAttribute('data-infra-badge', 'slow')
     expect(cart).toHaveAccessibleName(/Calls hidden infrastructure: flagd\. Open details\.$/)
     const ad = await node('ad')
@@ -156,11 +147,32 @@ describe('service map', () => {
     expect(document.querySelectorAll('.react-flow__node')).toHaveLength(18)
   })
 
+  it('a caller whose only calls go to hidden infra stays on the map with its badge', async () => {
+    const m = degraded()
+    m.edges.push({ parent: 'batch', child: 'flagd', calls: 60, errors: 0, error_rate: 0, avg_duration_ns: 1 })
+    stubApi(routes({ '/service-map': { body: m } }))
+    const { router } = renderApp('/map')
+    const batch = await node('batch')
+    expect(batch).toHaveAccessibleName(/no server spans/)
+    expect(batch.querySelector('[data-infra-badge]')).toHaveTextContent('+1')
+    expect(screen.getAllByRole('button', { name: /Open details\.$/ })).toHaveLength(19)
+    expect(screen.getByText('19 services · 3 degraded · 1 failing call · 1 infra hidden')).toBeInTheDocument()
+    expect(screen.getByText(/callers without spans of their own: batch, frontend-web, load-generator;/)).toBeInTheDocument()
+    // With infrastructure shown it is an ordinary caller of flagd.
+    await userEvent.setup().click(screen.getByRole('switch', { name: 'Show infrastructure' }))
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ infra: true }))
+    expect(await node('flagd')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /Open details\.$/ })).toHaveLength(20)
+  })
+
   it('the badge tooltip opens with the card keyboard focus and lists the hidden callees', async () => {
     stubApi(routes())
     renderApp('/map')
     const ad = await node('ad')
     expect(screen.queryByText(/flagd · /)).toBeNull()
+    // Keyboard modality, as Tab sets it (a test that used the pointer before would otherwise
+    // focus without :focus-visible).
+    fireEvent.keyDown(document.body, { key: 'Tab' })
     act(() => ad.focus())
     // 5 calls in the 1h window.
     const tip = await screen.findByRole('tooltip')

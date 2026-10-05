@@ -30,10 +30,10 @@ const LABEL_CHARS = 16
 
 const label = (s: string) => (s.length > LABEL_CHARS ? `${s.slice(0, LABEL_CHARS - 1)}…` : s)
 
-export function describeMap(map: ServiceMapView): string {
+export function describeMap(map: ServiceMapView, extra: readonly string[] = []): string {
   const bad = map.nodes.filter((n) => n.health !== 'ok')
   const failing = map.edges.filter((e) => isFailingEdge(e) && e.parent !== e.child)
-  const services = servicesOf(map)
+  const services = servicesOf(map, extra)
   const withSpans = new Set(map.nodes.map((n) => n.service))
   const callerOnly = services.filter((s) => !withSpans.has(s))
   const parts = [`${services.length} services`]
@@ -47,8 +47,11 @@ export function describeMap(map: ServiceMapView): string {
 export function MiniMap({ map: full, range }: { map: ServiceMapView; range: Range }) {
   const config = useQuery(api.config())
   const infra = config.data?.infra_services ?? DEFAULT_INFRA_SERVICES
-  const map = useMemo(() => hideInfra(full, infra, undefined, range.secs).map, [full, infra, range.secs])
-  const layout = useMemo(() => layoutMiniMap(map), [map])
+  const { map, extra } = useMemo(() => {
+    const r = hideInfra(full, infra, { range })
+    return { map: r.map, extra: r.extra }
+  }, [full, infra, range])
+  const layout = useMemo(() => layoutMiniMap(map, extra), [map, extra])
   const narrow = useMediaQuery(NARROW_QUERY)
   const glowId = `${useId()}-glow`
   const slowGlowId = `${glowId}-slow`
@@ -58,7 +61,7 @@ export function MiniMap({ map: full, range }: { map: ServiceMapView; range: Rang
       to="/map"
       search={rangeSearch(range)}
       className="group -mx-1 block overflow-x-auto rounded-field px-1 focus-visible:outline-offset-0"
-      aria-label={`${describeMap(map)} Open the service map.`}
+      aria-label={`${describeMap(map, extra)} Open the service map.`}
     >
       <svg
         role="presentation"

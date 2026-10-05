@@ -4,6 +4,7 @@
  * real button that opens the service drawer, so the map is keyboard reachable.
  */
 import { Handle, Position, useStore } from '@xyflow/react'
+import { Layers } from 'lucide-react'
 import type { Node, NodeProps } from '@xyflow/react'
 import { memo, useState } from 'react'
 import type { Health, NodeView } from '../../api/types'
@@ -50,8 +51,22 @@ export function nodeLabel(service: string, view: NodeView | null, infra: InfraBa
   )
 }
 
-/** "+2 infra" on the card's lower edge: red when a call into a hidden service is failing. */
-function InfraPill({ infra, open, onOpenChange }: { infra: InfraBadge; open: boolean; onOpenChange: (o: boolean) => void }) {
+/**
+ * "+1 infra" inside the card's lower right corner, on a solid panel so no edge runs through it: red
+ * when a call into a hidden service is failing. The compact card (zoomed out) shows a layers
+ * icon and the count instead, large enough to read at fit zoom.
+ */
+function InfraPill({
+  infra,
+  tight,
+  open,
+  onOpenChange,
+}: {
+  infra: InfraBadge
+  tight: boolean
+  open: boolean
+  onOpenChange: (o: boolean) => void
+}) {
   const tip = (
     <span className="tabular flex flex-col gap-0.5 font-mono">
       {infra.services.map((s) => (
@@ -66,11 +81,18 @@ function InfraPill({ infra, open, onOpenChange }: { infra: InfraBadge; open: boo
       <span
         data-infra-badge={infra.failing ? 'err' : 'slow'}
         className={cx(
-          'absolute -bottom-2.5 right-3 rounded-full border bg-panel px-1.5 font-mono text-[10px] font-semibold leading-4',
+          'absolute bottom-1.5 right-2 flex items-center rounded-full border bg-panel font-mono font-semibold',
+          tight ? 'gap-1 px-2 py-0.5 text-[15px] leading-5' : 'gap-1 px-1.5 text-[12px] leading-4',
           infra.failing ? 'border-err text-err' : 'border-slow text-slow',
         )}
       >
-        +{infra.services.length} infra
+        {tight ? (
+          <>
+            <Layers aria-hidden size={15} />+{infra.services.length}
+          </>
+        ) : (
+          `+${infra.services.length} infra`
+        )}
       </span>
     </Tooltip>
   )
@@ -225,7 +247,7 @@ function ServiceNodeImpl({ data }: NodeProps<ServiceNodeType>) {
             )}
           />
         ) : null}
-        {infra ? <InfraPill infra={infra} open={hover || focused} onOpenChange={setHover} /> : null}
+        {infra ? <InfraPill infra={infra} tight={compact} open={hover || focused} onOpenChange={setHover} /> : null}
       </button>
       <Handle type="source" position={Position.Right} isConnectable={false} className="tg-map-handle" />
     </>
