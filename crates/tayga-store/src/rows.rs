@@ -99,7 +99,12 @@ pub struct StoryRow {
 pub struct EndpointStatsRow {
     pub endpoint_service: String,
     pub endpoint_name: String,
-    pub traces: u64,
+    /// All non-error traces of the window, slow-story and capped ones included.
+    pub seen: u64,
+    /// Traces kept for the baseline: no slow story, within the duration cap.
+    pub kept: u64,
+    /// Traces without a slow story that the duration cap excluded.
+    pub excluded: u64,
     pub p50: f64,
     pub p95: f64,
     pub p99: f64,

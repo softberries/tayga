@@ -19,6 +19,8 @@ pub struct AssemblerMetrics {
     pub baseline_endpoints: Gauge,
     /// Traces the duration caps excluded from the last baseline refresh.
     pub baseline_excluded_traces: Gauge,
+    /// Endpoints whose previous baseline was carried over at the last refresh.
+    pub baseline_carried_endpoints: Gauge,
 }
 
 impl AssemblerMetrics {
@@ -71,8 +73,13 @@ impl AssemblerMetrics {
         );
         registry.register(
             "tayga_assembler_baseline_excluded_traces",
-            "Traces above their duration cap, excluded from the last baseline refresh",
+            "Traces above their duration cap, excluded from the last successful baseline refresh",
             m.baseline_excluded_traces.clone(),
+        );
+        registry.register(
+            "tayga_assembler_baseline_carried_endpoints",
+            "Endpoints whose previous baseline was carried over at the last successful refresh",
+            m.baseline_carried_endpoints.clone(),
         );
         m
     }

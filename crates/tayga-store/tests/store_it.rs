@@ -192,7 +192,7 @@ async fn analysis_tables_roundtrip_and_baseline_queries() {
         .await
         .unwrap();
     assert_eq!(eps.len(), 1);
-    assert_eq!(eps[0].traces, 60, "error trace excluded");
+    assert_eq!(eps[0].kept, 60, "error trace excluded");
     let ops = store.op_stats(60, &EndpointCaps::default()).await.unwrap();
     let cart = ops.iter().find(|o| o.op == "cart:GetCart").unwrap();
     assert_eq!(cart.present, 30);
@@ -321,7 +321,8 @@ async fn slow_story_traces_are_excluded_from_baselines() {
         .await
         .unwrap();
     assert_eq!(eps.len(), 1);
-    assert_eq!(eps[0].traces, 59, "slow-story trace excluded");
+    assert_eq!(eps[0].kept, 59, "slow-story trace excluded");
+    assert_eq!(eps[0].seen, 60, "slow-story trace still counted as seen");
     let ops = store.op_stats(60, &EndpointCaps::default()).await.unwrap();
     let root = ops.iter().find(|o| o.op == "frontend:GET").unwrap();
     assert_eq!(root.present, 59, "presence denominator matches traces");
@@ -384,7 +385,7 @@ async fn one_outlier_does_not_raise_p99_with_previous_cap() {
     let none = EndpointCaps::default();
     let before = store.endpoint_stats(60, &none).await.unwrap();
     // No previous baseline: the 10 x p50 bootstrap cap already drops the outlier.
-    assert_eq!(stats_of(&before, "frontend").traces, 64);
+    assert_eq!(stats_of(&before, "frontend").kept, 64);
 
     let caps = EndpointCaps {
         keys: vec!["frontend\0GET /".into(), "cart\0Get".into()],
@@ -392,10 +393,10 @@ async fn one_outlier_does_not_raise_p99_with_previous_cap() {
     };
     let eps = store.endpoint_stats(60, &caps).await.unwrap();
     let frontend = stats_of(&eps, "frontend");
-    assert_eq!(frontend.traces, 64);
+    assert_eq!(frontend.kept, 64);
     assert!(frontend.p99 <= (150 * MS_NS) as f64, "p99 {}", frontend.p99);
     assert_eq!(stats_of(&eps, "cart"), stats_of(&before, "cart"));
-    assert_eq!(store.capped_traces(60, &caps).await.unwrap(), 1);
+    assert_eq!(frontend.excluded, 1);
 
     // A tight cap proves the bound key matches (the bootstrap alone would keep these).
     let tight = EndpointCaps {
@@ -403,9 +404,9 @@ async fn one_outlier_does_not_raise_p99_with_previous_cap() {
         caps_ns: vec![120 * MS_NS],
     };
     let tight_eps = store.endpoint_stats(60, &tight).await.unwrap();
-    assert!(stats_of(&tight_eps, "frontend").traces < 64);
-    assert_eq!(stats_of(&tight_eps, "cart").traces, 64);
-    assert!(store.capped_traces(60, &tight).await.unwrap() > 1);
+    assert!(stats_of(&tight_eps, "frontend").kept < 64);
+    assert_eq!(stats_of(&tight_eps, "cart").kept, 64);
+    assert!(stats_of(&tight_eps, "frontend").excluded > 1);
 
     let ops = store.op_stats(60, &caps).await.unwrap();
     let present = |service: &str| {
@@ -441,19 +442,62 @@ async fn bootstrap_cap_is_ten_times_p50() {
     let none = EndpointCaps::default();
     let eps = store.endpoint_stats(60, &none).await.unwrap();
     let frontend = stats_of(&eps, "frontend");
-    assert_eq!(frontend.traces, 64, "5 s outlier is above 10 x p50");
+    assert_eq!(frontend.kept, 64, "5 s outlier is above 10 x p50");
     assert!(
         frontend.p99 < (1_000 * MS_NS) as f64,
         "p99 {}",
         frontend.p99
     );
-    assert_eq!(stats_of(&eps, "cart").traces, 64);
-    assert_eq!(store.capped_traces(60, &none).await.unwrap(), 1);
+    assert_eq!(stats_of(&eps, "cart").kept, 64);
+    assert_eq!(frontend.excluded, 1);
     let ops = store.op_stats(60, &none).await.unwrap();
     assert!(
         ops.iter()
             .filter(|o| o.endpoint_service == "frontend")
             .all(|o| o.present == 64)
+    );
+    store
+        .client()
+        .query(&format!("DROP DATABASE `{}`", s.database))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// An endpoint whose traces are all above the cap (or slow-storied) still reports `seen`.
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn all_traces_above_cap_still_reported() {
+    let s = settings();
+    migrate(&s).await.unwrap();
+    let store = Store::new(&s);
+    let rows: Vec<TraceSummaryRow> = (0..65)
+        .map(|i| timed_row("frontend", "GET /", &i.to_string(), 5_000))
+        .collect();
+    store.insert_rows("trace_summaries", &rows).await.unwrap();
+    let caps = EndpointCaps {
+        keys: vec!["frontend\0GET /".into()],
+        caps_ns: vec![250 * MS_NS],
+    };
+    let eps = store.endpoint_stats(60, &caps).await.unwrap();
+    assert_eq!(eps.len(), 1);
+    let e = &eps[0];
+    assert_eq!((e.seen, e.kept, e.excluded), (65, 0, 65));
+    assert!(store.op_stats(60, &caps).await.unwrap().is_empty());
+
+    let stories: Vec<StoryRow> = (0..65)
+        .map(|i| StoryRow {
+            kind: 2,
+            ..story_row(&format!("frontend-{i}"))
+        })
+        .collect();
+    store.insert_rows("error_stories", &stories).await.unwrap();
+    let eps = store.endpoint_stats(60, &caps).await.unwrap();
+    let e = &eps[0];
+    assert_eq!(
+        (e.seen, e.kept, e.excluded),
+        (65, 0, 0),
+        "slow-storied, not capped"
     );
     store
         .client()
