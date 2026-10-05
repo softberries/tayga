@@ -6,9 +6,10 @@ import type { Range } from './range'
 
 /** The validated time range from the URL (`since` and `until`), defaulting to the last 1h. */
 export function useRange(): Range {
-  // From the root match: its search is validated, while location.search keeps raw values.
-  const since = useSearch({ from: '__root__', select: (s) => s.since })
-  const until = useSearch({ from: '__root__', select: (s) => s.until })
+  // From the matches (the shell route validates since/until), not location.search, which keeps
+  // raw values. Not strict: the login page and a root-level not-found sit outside the shell.
+  const since = useSearch({ strict: false, select: (s) => s.since })
+  const until = useSearch({ strict: false, select: (s) => s.until })
   return useMemo(() => rangeOf({ since, until }), [since, until])
 }
 

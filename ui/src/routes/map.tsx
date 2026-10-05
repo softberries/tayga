@@ -281,7 +281,7 @@ function CanvasSkeleton({ label }: { label: string }) {
 
 function MapView() {
   const range = useRange()
-  const search = useSearch({ from: '/map' })
+  const search = useSearch({ from: '/_shell/map' })
   const navigate = useNavigate({ from: '/map' })
   const refetchInterval = useAutoRefresh()
   const reduce = useMediaQuery(REDUCED_MOTION_QUERY)

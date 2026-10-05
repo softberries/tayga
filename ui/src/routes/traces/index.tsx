@@ -66,7 +66,7 @@ function ResultsSkeleton() {
 
 export function TracesExplorer() {
   const range = useRange()
-  const search = useSearch({ from: '/traces/' })
+  const search = useSearch({ from: '/_shell/traces/' })
   const navigate = useNavigate({ from: '/traces/' })
   const refetchInterval = useAutoRefresh()
   const narrow = useMediaQuery(NARROW_QUERY)

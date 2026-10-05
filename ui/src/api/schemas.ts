@@ -371,5 +371,8 @@ export const ClientConfigSchema = z.strictObject({
   auth_enabled: z.boolean(),
 })
 
+/** `GET /auth/me` */
+export const MeSchema = z.strictObject({ username: str })
+
 /** Every error response: `{"error": "..."}`. */
 export const ErrorBodySchema = z.strictObject({ error: str })

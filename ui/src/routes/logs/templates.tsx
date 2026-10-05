@@ -70,7 +70,7 @@ function TableSkeleton() {
 
 export function LogTemplatesPage() {
   const range = useRange()
-  const search = useSearch({ from: '/logs/templates/' })
+  const search = useSearch({ from: '/_shell/logs/templates/' })
   const navigate = useNavigate({ from: '/logs/templates/' })
   const refetchInterval = useAutoRefresh()
   const [sort, setSort] = useState<TemplateSort>({ key: 'count', desc: true })

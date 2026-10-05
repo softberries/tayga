@@ -170,6 +170,8 @@
   --tg-brand-to: #7cc4ff;
   --tg-cta-from: #2b6cb0;
   --tg-cta-to: #3d8bdb;
+  /* Strength of the login page's brand glow. */
+  --tg-login-glow: 22%;
 
   --tg-shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 8px 24px rgba(16, 24, 40, 0.07);
   --tg-shadow-lg: 0 1px 2px rgba(16, 24, 40, 0.06), 0 16px 40px rgba(16, 24, 40, 0.12);
@@ -235,6 +237,8 @@
 
   --tg-chart-5: #b79cff;
   --tg-chart-6: #5ed6d6;
+
+  --tg-login-glow: 16%;
 
   --tg-svc-1: #6fa8ff;
   --tg-svc-2: #5ed6d6;
@@ -425,6 +429,12 @@
   }
   .tg-cta {
     background: linear-gradient(135deg, var(--tg-cta-from), var(--tg-cta-to));
+  }
+  /* The login page's ground: two soft brand glows behind the card. */
+  .tg-login-ground {
+    background-image:
+      radial-gradient(48rem 30rem at 50% -8%, color-mix(in srgb, var(--tg-brand-to) var(--tg-login-glow), transparent), transparent 70%),
+      radial-gradient(36rem 26rem at 88% 108%, color-mix(in srgb, var(--tg-brand-from) var(--tg-login-glow), transparent), transparent 70%);
   }
 }
 

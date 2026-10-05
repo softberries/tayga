@@ -15,7 +15,7 @@ import type { LogAlertView, LogTemplateDetail, LogTemplateListItem } from '../..
 import { clearOutage } from '../../app/apiStatus'
 import type { EChartProps } from '../../components/charts/EChart'
 import { countVsBaseline, exampleLink, sortAlerts, sortTemplates, timeline } from '../../features/logs/model'
-import { renderApp, stubApi } from '../../test/renderApp'
+import { renderApp, stubApi, stubPendingApi } from '../../test/renderApp'
 import type { Routes } from '../../test/renderApp'
 import { SEARCH_DEBOUNCE_MS } from './templates'
 
@@ -269,7 +269,7 @@ describe('log alerts', () => {
   })
 
   it('shows skeletons while loading', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})))
+    stubPendingApi()
     renderApp('/logs/alerts')
     expect(await screen.findByLabelText('Loading log alerts')).toBeInTheDocument()
   })
@@ -373,7 +373,7 @@ describe('log templates', () => {
   })
 
   it('shows skeletons while loading', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})))
+    stubPendingApi()
     renderApp('/logs/templates')
     expect(await screen.findByLabelText('Loading log templates')).toBeInTheDocument()
   })
@@ -460,7 +460,7 @@ describe('log template page', () => {
   })
 
   it('shows a skeleton while loading, and 404s a malformed id', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})))
+    stubPendingApi()
     const { unmount } = renderApp(`/logs/templates/${TID}`)
     expect(await screen.findByLabelText('Loading log template')).toBeInTheDocument()
     unmount()

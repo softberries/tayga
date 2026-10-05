@@ -9,19 +9,37 @@ import { TooltipProvider } from '../components/ui/Tooltip'
 import { createAppRouter } from '../router'
 import { ThemeProvider } from '../theme/ThemeProvider'
 
-/** Responses by API path (without /api/v1 and query); unknown paths return 404. */
-export type Routes = Record<string, { status?: number; body: unknown }>
+/**
+ * Responses by API path (without /api/v1 and query); unknown paths return 404. A route is read
+ * at request time, so a test can change it between steps. A 204 sends no body.
+ */
+export type Routes = Record<string, { status?: number; body: unknown; headers?: Record<string, string> }>
 
 export function stubApi(routes: Routes) {
-  const fetch = vi.fn(async (input: string) => {
+  const fetch = vi.fn(async (input: string, _init?: RequestInit) => {
     const url = new URL(input, 'http://test')
     const path = url.pathname.replace(/^\/api\/v1/, '')
     const r = routes[path] ?? { status: 404, body: { error: 'not found' } }
-    return new Response(JSON.stringify(r.body), {
-      status: r.status ?? 200,
-      headers: { 'content-type': 'application/json' },
+    const status = r.status ?? 200
+    return new Response(status === 204 ? null : JSON.stringify(r.body), {
+      status,
+      headers: { 'content-type': 'application/json', ...r.headers },
     })
   })
+  vi.stubGlobal('fetch', fetch)
+  return fetch
+}
+
+/**
+ * Every request but `/config` (auth off) stays pending, for loading states. The config answers
+ * because the shell's session guard waits for it before the page renders.
+ */
+export function stubPendingApi() {
+  const fetch = vi.fn((input: string, _init?: RequestInit) =>
+    new URL(input, 'http://test').pathname === '/api/v1/config'
+      ? Promise.resolve(new Response(JSON.stringify({ jaeger_url: null, grafana_url: null, auth_enabled: false })))
+      : new Promise<Response>(() => {}),
+  )
   vi.stubGlobal('fetch', fetch)
   return fetch
 }

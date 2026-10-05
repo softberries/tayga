@@ -13,7 +13,7 @@ import story from '../../api/__fixtures__/story.json'
 import trace from '../../api/__fixtures__/trace.json'
 import { clearOutage } from '../../app/apiStatus'
 import { endpointOf, splitSummary } from '../../features/stories/model'
-import { renderApp, stubApi } from '../../test/renderApp'
+import { renderApp, stubApi, stubPendingApi } from '../../test/renderApp'
 import type { Routes } from '../../test/renderApp'
 
 const top = groups[0] as (typeof groups)[number]
@@ -215,7 +215,7 @@ describe('stories home', () => {
 
   it('shows skeletons while loading', async () => {
     stubApi(routes())
-    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})))
+    stubPendingApi()
     renderApp('/')
     expect(await screen.findByLabelText('Loading story groups')).toBeInTheDocument()
     expect(screen.getByLabelText('Loading summary')).toBeInTheDocument()

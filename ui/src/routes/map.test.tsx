@@ -45,7 +45,7 @@ const paymentGroup = { ...groups[0], fingerprint: '42', kind: 'error', rc_servic
 function routes(extra: Routes = {}): Routes {
   return {
     '/service-map': { body: degraded() },
-    '/config': { body: { jaeger_url: null, grafana_url: null } },
+    '/config': { body: { jaeger_url: null, grafana_url: null, auth_enabled: false } },
     '/services/payment': { body: { ...service, service: 'payment' } },
     '/story-groups': { body: [paymentGroup] },
     '/log-alerts': { body: [{ ...logAlerts[0], service: 'payment', template: 'Payment request failed. Invalid token.' }] },
@@ -247,7 +247,7 @@ describe('service map', () => {
   })
 
   it('shows "Open in Grafana" when the API reports a Grafana URL', async () => {
-    stubApi(routes({ '/config': { body: { jaeger_url: null, grafana_url: 'http://localhost:3001/' } } }))
+    stubApi(routes({ '/config': { body: { jaeger_url: null, grafana_url: 'http://localhost:3001/', auth_enabled: false } } }))
     renderApp('/map')
     expect(await screen.findByRole('link', { name: /Open in Grafana/ })).toHaveAttribute(
       'href',

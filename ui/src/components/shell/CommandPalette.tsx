@@ -1,10 +1,11 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { Command } from 'cmdk'
-import { Activity, CalendarClock, ChartGantt, Clock, History, Moon, ScrollText, Server, TextAlignStart, Waypoints } from 'lucide-react'
+import { Activity, CalendarClock, ChartGantt, Clock, History, LogOut, Moon, ScrollText, Server, TextAlignStart, Waypoints } from 'lucide-react'
 import type { ReactElement, ReactNode } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../api/queries'
+import { signOut, useSession } from '../../app/auth'
 import { DEFAULT_SINCE, HEX32, SINCE_VALUES } from '../../app/search'
 import { setCustomRangeOpen } from '../../app/customRangeDialog'
 import { rangeSearch } from '../../app/range'
@@ -129,6 +130,8 @@ function PaletteBody({ onOpenChange, runAfterClose }: { onOpenChange: (o: boolea
   const { setMode } = useTheme()
   const navigate = useNavigate()
   const openItem = useOpenItem()
+  const queryClient = useQueryClient()
+  const { authEnabled } = useSession()
 
   // Focus after the dialog's focus scope has recorded the opener, so closing returns focus
   // to it (an autoFocus here would make the scope remember this input instead).
@@ -206,9 +209,10 @@ function PaletteBody({ onOpenChange, runAfterClose }: { onOpenChange: (o: boolea
         // interaction and close the popover at once.
         run: () => runAfterClose(() => setCustomRangeOpen(true)),
       },
+      ...(authEnabled ? [{ id: 'sign-out', label: 'Sign out', icon: <LogOut size={15} />, run: () => void signOut(queryClient, navigate) }] : []),
     ]
     return list.filter((a) => !needle || a.label.toLowerCase().includes(needle) || 'action'.includes(needle))
-  }, [setMode, navigate, needle, runAfterClose])
+  }, [setMode, navigate, needle, runAfterClose, authEnabled, queryClient])
 
   const showRecent = !query && recent.length > 0
   return (

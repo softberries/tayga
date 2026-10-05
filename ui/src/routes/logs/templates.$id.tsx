@@ -123,7 +123,7 @@ function RecentHits({ hits, range, nowMs }: { hits: readonly TemplateHit[]; rang
 }
 
 export function LogTemplatePage() {
-  const { templateId } = useParams({ from: '/logs/templates/$templateId' })
+  const { templateId } = useParams({ from: '/_shell/logs/templates/$templateId' })
   const range = useRange()
   const refetchInterval = useAutoRefresh()
   const detail = useQuery({ ...api.logTemplate(templateId, rangeParams(range)), refetchInterval })

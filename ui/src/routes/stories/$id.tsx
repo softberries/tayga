@@ -346,8 +346,8 @@ function WaterfallCard({
 }
 
 export function StoryPage() {
-  const { storyId } = useParams({ from: '/stories/$storyId' })
-  const search = useSearch({ from: '/stories/$storyId' })
+  const { storyId } = useParams({ from: '/_shell/stories/$storyId' })
+  const search = useSearch({ from: '/_shell/stories/$storyId' })
   const onSearch = useStorySearchUpdater()
   const range = useRange()
   const story = useQuery(api.story(storyId))

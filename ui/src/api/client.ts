@@ -2,14 +2,19 @@
 
 export const API_BASE = '/api/v1'
 
-/** A non-2xx response (or a network failure, status 0). `message` is the API's `error` text. */
+/**
+ * A non-2xx response (or a network failure, status 0). `message` is the API's `error` text;
+ * `retryAfter` is a 429's `Retry-After` in seconds.
+ */
 export class ApiError extends Error {
   readonly status: number
+  readonly retryAfter: number | undefined
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, retryAfter?: number) {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.retryAfter = retryAfter
   }
 }
 
@@ -57,4 +62,25 @@ export async function getJson<T>(path: string, params?: Params, signal?: AbortSi
   }
   if (!res.ok) throw new ApiError(res.status, await errorMessage(res))
   return (await res.json()) as T
+}
+
+/** `Retry-After` as whole seconds; the API sends delta-seconds, never an HTTP date. */
+function retryAfter(res: Response): number | undefined {
+  const v = Number(res.headers.get('retry-after'))
+  return Number.isFinite(v) && v > 0 ? Math.ceil(v) : undefined
+}
+
+/** POST JSON to `/api/v1{path}`; resolves on any 2xx (the auth routes answer 204, no body). */
+export async function postJson(path: string, body: unknown): Promise<void> {
+  let res: Response
+  try {
+    res = await fetch(apiUrl(path), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(body),
+    })
+  } catch (e) {
+    throw new ApiError(0, e instanceof Error ? e.message : 'network error')
+  }
+  if (!res.ok) throw new ApiError(res.status, await errorMessage(res), res.status === 429 ? retryAfter(res) : undefined)
 }

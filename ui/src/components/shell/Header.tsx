@@ -1,3 +1,5 @@
+import { Suspense, lazy } from 'react'
+import { useSession } from '../../app/auth'
 import { Breadcrumb } from './Breadcrumb'
 import { CommandTrigger } from './CommandTrigger'
 import { DegradedBadge } from './DegradedBadge'
@@ -6,7 +8,11 @@ import { ThemeSwitch } from './ThemeSwitch'
 import { TimeRange } from './TimeRange'
 import { WidgetBoundary } from './WidgetBoundary'
 
+// Its Radix menu stays out of the initial bundle, and is never loaded with auth off.
+const UserMenu = lazy(() => import('./UserMenu').then((m) => ({ default: m.UserMenu })))
+
 export function Header() {
+  const { authEnabled } = useSession()
   return (
     <header className="sticky top-0 z-30 flex flex-wrap items-center gap-3 border-b border-line bg-header px-6 py-3.5 backdrop-blur-[8px]">
       <Breadcrumb />
@@ -18,6 +24,11 @@ export function Header() {
       <TimeRange />
       <LiveToggle />
       <ThemeSwitch />
+      {authEnabled ? (
+        <Suspense fallback={null}>
+          <UserMenu />
+        </Suspense>
+      ) : null}
     </header>
   )
 }

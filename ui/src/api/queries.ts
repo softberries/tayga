@@ -3,7 +3,7 @@
  * can be invalidated together. Every queryFn forwards Query's AbortSignal to fetch.
  */
 import { queryOptions } from '@tanstack/react-query'
-import { getJson } from './client'
+import { getJson, postJson } from './client'
 import type { Params } from './client'
 import type {
   ClientConfig,
@@ -12,6 +12,7 @@ import type {
   LogAlertView,
   LogTemplateDetail,
   LogTemplateListItem,
+  Me,
   OverviewView,
   SearchView,
   SeriesView,
@@ -71,4 +72,22 @@ export const api = {
   pipelineLag: () => q<ConsumerLag[]>('pipeline-lag', '/pipeline/lag'),
   /** Read from the API's own config, not ClickHouse: kept out of the storage banner. */
   config: () => queryOptions({ ...q<ClientConfig>('config', '/config'), staleTime: Infinity, meta: { outage: false } }),
+  /**
+   * The signed-in user. Fetched by the shell's guard, which turns its 401 into the redirect
+   * itself (`sessionProbe`: the session-lost handler skips it). Kept until sign-in or sign-out
+   * clears the cache.
+   */
+  me: () => queryOptions({ ...q<Me>('auth-me', '/auth/me'), staleTime: Infinity, meta: { outage: false, sessionProbe: true } }),
+}
+
+export interface Credentials {
+  username: string
+  password: string
+}
+
+/** Mutation functions for the auth routes (the login page's `useMutation`, `signOut`). */
+export const authApi = {
+  login: (c: Credentials) => postJson('/auth/login', c),
+  /** The API wants a JSON body here too (`{}`); logout is open, so an expired session still works. */
+  logout: () => postJson('/auth/logout', {}),
 }

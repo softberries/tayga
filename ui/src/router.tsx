@@ -9,6 +9,9 @@ import {
   redirect,
   retainSearchParams,
 } from '@tanstack/react-router'
+import { isApiError } from './api/client'
+import { api } from './api/queries'
+import { setSessionLostHandler, singleFlight } from './app/auth'
 import { HEX32, U64, validateHomeSearch, validateLogAlertsSearch, validateLogTemplatesSearch, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch, validateTracesSearch } from './app/search'
 import type { RootSearch } from './app/search'
 import { AppShell } from './components/shell/AppShell'
@@ -28,16 +31,64 @@ declare module '@tanstack/react-router' {
   }
 }
 
+/** Not-found pages keep the rail and header. */
+function ShellNotFound() {
+  return (
+    <AppShell>
+      <NotFound />
+    </AppShell>
+  )
+}
+
+/**
+ * The bare root renders only its outlet. Under it sit the login page and `_shell`, a pathless
+ * layout with the rail and header that owns every app page, the range search params (so
+ * /login neither keeps nor shows `since`/`until`) and the session guard.
+ */
 const rootRoute = createRootRouteWithContext<RouterContext>()({
-  validateSearch: (s: Record<string, unknown>): RootSearch => validateRootSearch(s),
-  search: { middlewares: [retainSearchParams<RootSearch>(['since', 'until'])] },
-  component: AppShell,
-  notFoundComponent: NotFound,
+  notFoundComponent: ShellNotFound,
   errorComponent: RouteError,
 })
 
-const storiesRoute = createRoute({
+/**
+ * With auth on, no session sends every app page to /login with `next` set to where the user
+ * was going. A config or `auth/me` failure other than 401 lets the page load: the API still
+ * guards its data, and a 401 from any query redirects later (createQueryClient).
+ */
+const shellRoute = createRoute({
   getParentRoute: () => rootRoute,
+  id: '_shell',
+  validateSearch: (s: Record<string, unknown>): RootSearch => validateRootSearch(s),
+  search: { middlewares: [retainSearchParams<RootSearch>(['since', 'until'])] },
+  beforeLoad: async ({ context: { queryClient }, location }) => {
+    const config = await queryClient.ensureQueryData(api.config()).catch(() => undefined)
+    if (!config?.auth_enabled) return
+    try {
+      await queryClient.ensureQueryData(api.me())
+    } catch (e) {
+      if (isApiError(e) && e.status === 401) throw redirect({ to: '/login', search: { next: location.href } })
+    }
+  },
+  component: AppShell,
+  // A not-found under the shell replaces the shell's own component, so it brings the shell.
+  notFoundComponent: ShellNotFound,
+  errorComponent: RouteError,
+})
+
+/** Outside the shell: no rail, no header. With auth off it only redirects home. */
+const loginRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: 'login',
+  validateSearch: (s: Record<string, unknown>): { next?: string } => (typeof s.next === 'string' ? { next: s.next } : {}),
+  beforeLoad: async ({ context: { queryClient } }) => {
+    const config = await queryClient.ensureQueryData(api.config()).catch(() => undefined)
+    if (!config?.auth_enabled) throw redirect({ to: '/', replace: true })
+  },
+  component: lazyRouteComponent(() => import('./routes/login'), 'LoginPage'),
+})
+
+const storiesRoute = createRoute({
+  getParentRoute: () => shellRoute,
   path: '/',
   staticData: { crumb: 'Stories' },
   validateSearch: validateHomeSearch,
@@ -45,7 +96,7 @@ const storiesRoute = createRoute({
 })
 
 const storyRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => shellRoute,
   path: 'stories/$storyId',
   staticData: { crumb: 'Story', crumbParam: 'storyId' },
   validateSearch: validateStorySearch,
@@ -56,7 +107,7 @@ const storyRoute = createRoute({
 })
 
 const tracesRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => shellRoute,
   path: 'traces',
   staticData: { crumb: 'Traces' },
 })
@@ -80,7 +131,7 @@ const traceRoute = createRoute({
 })
 
 const mapRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => shellRoute,
   path: 'map',
   staticData: { crumb: 'Service map' },
   validateSearch: validateMapSearch,
@@ -88,7 +139,7 @@ const mapRoute = createRoute({
 })
 
 const logsRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => shellRoute,
   path: 'logs',
   staticData: { crumb: 'Logs' },
 })
@@ -133,28 +184,31 @@ const logTemplateRoute = createRoute({
 })
 
 const pipelineRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => shellRoute,
   path: 'pipeline',
   staticData: { crumb: 'Pipeline' },
   component: lazyRouteComponent(() => import('./routes/pipeline'), 'PipelinePage'),
 })
 
 export const routeTree = rootRoute.addChildren([
-  storiesRoute,
-  storyRoute,
-  tracesRoute.addChildren([tracesIndexRoute, traceRoute]),
-  mapRoute,
-  logsRoute.addChildren([
-    logsIndexRoute,
-    logAlertsRoute,
-    logTemplatesRoute.addChildren([logTemplatesIndexRoute, logTemplateRoute]),
+  loginRoute,
+  shellRoute.addChildren([
+    storiesRoute,
+    storyRoute,
+    tracesRoute.addChildren([tracesIndexRoute, traceRoute]),
+    mapRoute,
+    logsRoute.addChildren([
+      logsIndexRoute,
+      logAlertsRoute,
+      logTemplatesRoute.addChildren([logTemplatesIndexRoute, logTemplateRoute]),
+    ]),
+    pipelineRoute,
   ]),
-  pipelineRoute,
 ])
 
 /** `history` defaults to the browser; tests pass a memory history. */
 export function createAppRouter(queryClient: QueryClient, history?: RouterHistory) {
-  return createRouter({
+  const router = createRouter({
     routeTree,
     history,
     context: { queryClient },
@@ -166,6 +220,17 @@ export function createAppRouter(queryClient: QueryClient, history?: RouterHistor
     defaultPreloadStaleTime: 0,
     scrollRestoration: true,
   })
+  // A 401 mid-session (expired or revoked): forget the user, so the guard asks again, and go
+  // to /login once, back to here after signing in.
+  setSessionLostHandler(
+    singleFlight(() => {
+      const { pathname, href } = router.state.location
+      if (pathname === '/login') return undefined
+      queryClient.removeQueries({ queryKey: api.me().queryKey })
+      return router.navigate({ to: '/login', search: { next: href } })
+    }),
+  )
+  return router
 }
 
 declare module '@tanstack/react-router' {
