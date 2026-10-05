@@ -20,7 +20,7 @@ export type Routes = Record<string, { status?: number; body: unknown; headers?: 
 
 export function stubApi(routes: Routes) {
   const config = routes['/config']
-  seed(config && (config.status ?? 200) === 200 ? (config.body as ClientConfig) : AUTH_OFF)
+  seed(!config ? AUTH_OFF : (config.status ?? 200) === 200 ? (config.body as ClientConfig) : null)
   const fetch = vi.fn(async (input: string, _init?: RequestInit) => {
     const url = new URL(input, 'http://test')
     const path = url.pathname.replace(/^\/api\/v1/, '')
@@ -39,7 +39,8 @@ export function stubApi(routes: Routes) {
 export function renderApp(url: string) {
   const queryClient = createQueryClient()
   queryClient.setDefaultOptions({ queries: { ...queryClient.getDefaultOptions().queries, retry: false } })
-  queryClient.setQueryData(api.config().queryKey, seededConfig())
+  const config = seededConfig()
+  if (config) queryClient.setQueryData(api.config().queryKey, config)
   const history = createMemoryHistory({ initialEntries: [url] })
   const router = createAppRouter(queryClient, history)
   const utils = render(

@@ -60,10 +60,24 @@ describe('query client', () => {
   describe('a 401', () => {
     afterEach(() => setSessionLostHandler(null))
 
-    it('reports a lost session, not an outage, and the auth/me probe does not', async () => {
+    const fail401 = () => Promise.reject(new ApiError(401, 'unauthorized'))
+
+    it('with auth off or the config unknown, is only a failed query', async () => {
       const lost = vi.fn()
       setSessionLostHandler(lost)
       const qc = createQueryClient()
+      await qc.fetchQuery({ queryKey: ['k'], queryFn: fail401, retry: false }).catch(() => {})
+      qc.setQueryData(api.config().queryKey, { jaeger_url: null, grafana_url: null, auth_enabled: false, infra_services: [] })
+      await qc.fetchQuery({ queryKey: ['l'], queryFn: fail401, retry: false }).catch(() => {})
+      expect(lost).not.toHaveBeenCalled()
+      expect(getOutage()).toBeNull()
+    })
+
+    it('with auth on, reports a lost session, not an outage, and the auth/me probe does not', async () => {
+      const lost = vi.fn()
+      setSessionLostHandler(lost)
+      const qc = createQueryClient()
+      qc.setQueryData(api.config().queryKey, { jaeger_url: null, grafana_url: null, auth_enabled: true, infra_services: [] })
       await qc.fetchQuery({ queryKey: ['j'], queryFn: () => Promise.reject(new ApiError(401, 'unauthorized')), retry: false }).catch(() => {})
       expect(lost).toHaveBeenCalledTimes(1)
       expect(getOutage()).toBeNull()

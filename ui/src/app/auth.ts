@@ -81,6 +81,11 @@ export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return Promise.race([p, timeout]).finally(() => clearTimeout(timer))
 }
 
+/** Whether the cached config (loaded, not failed) turns Tayga's login on. */
+export function authEnabledInCache(queryClient: QueryClient): boolean {
+  return queryClient.getQueryData(api.config().queryKey)?.auth_enabled === true
+}
+
 let sessionLostHandler: (() => void) | null = null
 
 /** The router registers the redirect to /login here (see createAppRouter). */
@@ -88,7 +93,7 @@ export function setSessionLostHandler(fn: (() => void) | null): void {
   sessionLostHandler = fn
 }
 
-/** Called by the query cache for a 401 from any query but the guard's own `auth/me`. */
+/** Called by the query cache for a 401 (auth on) from any query but the guard's own `auth/me`. */
 export function sessionLost(): void {
   sessionLostHandler?.()
 }

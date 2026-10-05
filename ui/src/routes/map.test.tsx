@@ -181,6 +181,22 @@ describe('service map', () => {
     await waitFor(() => expect(screen.queryByRole('tooltip')).toBeNull())
   })
 
+  it('a search that only finds hidden infrastructure offers to show it instead of "No match"', async () => {
+    const user = userEvent.setup()
+    stubApi(routes())
+    const { router } = renderApp('/map')
+    await node('payment')
+    await user.type(screen.getByRole('searchbox', { name: 'Find a service' }), 'flag')
+    const status = document.getElementById('map-search-status')!
+    await waitFor(() => expect(status).toHaveTextContent('flagd is hidden · Show infrastructure'))
+    expect(status).not.toHaveClass('text-err')
+    expect(screen.queryByText('No match')).toBeNull()
+    await user.click(within(status).getByRole('button', { name: 'Show infrastructure' }))
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ infra: true, q: 'flag' }))
+    expect(await node('flagd')).toBeInTheDocument()
+    await waitFor(() => expect(status).toHaveTextContent('1 match · Enter to zoom'))
+  })
+
   it('"Show infrastructure" draws flagd and its calls, and is kept in the URL', async () => {
     const user = userEvent.setup()
     const lay = vi.mocked(layoutGraph)

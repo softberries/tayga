@@ -171,6 +171,41 @@ describe('login', () => {
     expect(screen.queryByText(/storage/i)).toBeNull()
   })
 
+  it('with auth off, a 401 is only an error state: no redirect', async () => {
+    const r = routes({ auth: false, signedIn: false })
+    r['/service-map'] = UNAUTHORIZED
+    stubApi(r)
+    const { router } = renderApp('/map')
+    const navigate = vi.spyOn(router, 'navigate')
+    expect((await screen.findAllByText('401 · unauthorized')).length).toBeGreaterThan(0)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(router.state.location.pathname).toBe('/map')
+    expect(navigate).not.toHaveBeenCalled()
+    expect(screen.queryByRole('heading', { name: 'Tayga' })).toBeNull()
+  })
+
+  it('with auth on but /config failing, a 401 does not loop through /login', async () => {
+    const r = routes({ auth: true, signedIn: false })
+    r['/config'] = { status: 500, body: { error: 'boom' } }
+    const fetch = stubApi(r)
+    const { router } = renderApp('/map')
+    const navigate = vi.spyOn(router, 'navigate')
+    expect((await screen.findAllByText('401 · unauthorized')).length).toBeGreaterThan(0)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(router.state.location.pathname).toBe('/map')
+    expect(navigate).not.toHaveBeenCalled()
+    expect(calls(fetch, '/service-map').length).toBeLessThanOrEqual(2)
+  })
+
+  it('with /config failing, /login shows the form instead of redirecting', async () => {
+    const r = routes({ auth: true, signedIn: false })
+    r['/config'] = { status: 500, body: { error: 'boom' } }
+    stubApi(r)
+    const { router } = renderApp('/login?next=%2Fmap')
+    expect(await screen.findByRole('heading', { name: 'Tayga' })).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe('/login')
+  })
+
   it('signs out from the user menu', async () => {
     const user = userEvent.setup()
     const r = routes({ auth: true, signedIn: true })

@@ -11,7 +11,7 @@ import {
 } from '@tanstack/react-router'
 import { isApiError } from './api/client'
 import { api } from './api/queries'
-import { GUARD_TIMEOUT_MS, safeNext, setSessionLostHandler, singleFlight, withTimeout } from './app/auth'
+import { GUARD_TIMEOUT_MS, authEnabledInCache, safeNext, setSessionLostHandler, singleFlight, withTimeout } from './app/auth'
 import { HEX32, U64, validateHomeSearch, validateLogAlertsSearch, validateLogTemplatesSearch, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch, validateTracesSearch } from './app/search'
 import type { RootSearch } from './app/search'
 import { AppShell } from './components/shell/AppShell'
@@ -93,8 +93,9 @@ const shellRoute = createRoute({
 })
 
 /**
- * Outside the shell: no rail, no header. With auth off it only redirects home; a user who is
- * already signed in goes on to a safe `next`.
+ * Outside the shell: no rail, no header. When the loaded config says auth is off it only
+ * redirects home; a user who is already signed in goes on to a safe `next`. With the config
+ * unavailable it shows the form: redirecting home then could bounce between the two pages.
  */
 const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -102,8 +103,8 @@ const loginRoute = createRoute({
   validateSearch: (s: Record<string, unknown>): { next?: string } => (typeof s.next === 'string' ? { next: s.next } : {}),
   beforeLoad: async ({ context: { queryClient }, search }) => {
     const config = await guardConfig(queryClient)
-    if (!config?.auth_enabled) throw redirect({ to: '/', replace: true })
-    if ((await sessionState(queryClient)) === 'signed-in') throw redirect({ href: safeNext(search.next), replace: true })
+    if (config?.auth_enabled === false) throw redirect({ to: '/', replace: true })
+    if (config?.auth_enabled && (await sessionState(queryClient)) === 'signed-in') throw redirect({ href: safeNext(search.next), replace: true })
   },
   component: lazyRouteComponent(() => import('./routes/login'), 'LoginPage'),
 })
@@ -241,12 +242,13 @@ export function createAppRouter(queryClient: QueryClient, history?: RouterHistor
     defaultPreloadStaleTime: 0,
     scrollRestoration: true,
   })
-  // A 401 mid-session (expired or revoked): forget the user, so the guard asks again, and go
-  // to /login once, back to here after signing in.
+  // A 401 mid-session with auth on (expired or revoked): forget the user, so the guard asks
+  // again, and go to /login once, back to here after signing in.
   setSessionLostHandler(
     singleFlight(() => {
       const { pathname, href } = router.state.location
-      if (pathname === '/login') return undefined
+      // Only Tayga's own login can restore a session; without it /login redirects home.
+      if (pathname === '/login' || !authEnabledInCache(queryClient)) return undefined
       queryClient.removeQueries({ queryKey: api.me().queryKey })
       return router.navigate({ to: '/login', search: { next: href } })
     }),

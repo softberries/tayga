@@ -310,11 +310,12 @@ function MapView() {
     const r = hideInfra(map.data, showInfra ? [] : infraServices, { keep: search.service, range })
     return { visible: r.map, badges: r.badges, extra: r.extra }
   }, [map.data, showInfra, infraServices, search.service, range])
-  const hiddenInfra = useMemo(() => {
-    if (!map.data || showInfra) return 0
+  const hiddenInfraNames = useMemo(() => {
+    if (!map.data || showInfra) return []
     const seen = new Set(servicesOf(map.data))
-    return infraServices.filter((s) => s !== search.service && seen.has(s)).length
+    return infraServices.filter((s) => s !== search.service && seen.has(s))
   }, [map.data, showInfra, infraServices, search.service])
+  const hiddenInfra = hiddenInfraNames.length
 
   // The layout's key is the drawn topology, so toggling infrastructure lays the map out again.
   const graph = useMemo(() => (visible ? mapGraph(visible, extra) : null), [visible, extra])
@@ -330,6 +331,11 @@ function MapView() {
 
   const matchList = useMemo(() => (graph ? matchServices(graph.services, search.q) : []), [graph, search.q])
   const matches = useMemo(() => new Set(matchList), [matchList])
+  // A search that only finds hidden infrastructure says so, instead of "No match".
+  const hiddenMatches = useMemo(
+    () => (matchList.length === 0 ? matchServices(hiddenInfraNames, search.q) : []),
+    [matchList, hiddenInfraNames, search.q],
+  )
 
   const setSearch = useCallback(
     (patch: Partial<MapSearch>, replace = false) =>
@@ -386,8 +392,29 @@ function MapView() {
               className="h-[30px] w-56 min-w-0 rounded-control border border-field-line bg-field pl-8 pr-2 text-[13px] text-ink outline-none placeholder:text-faint focus-visible:border-accent max-sm:w-full"
             />
           </label>
-          <span id="map-search-status" aria-live="polite" className={cx('text-xs', q && matchList.length === 0 ? 'text-err' : 'text-muted')}>
-            {q ? (matchList.length === 0 ? 'No match' : `${matchList.length} ${matchList.length === 1 ? 'match' : 'matches'} · Enter to zoom`) : ''}
+          <span
+            id="map-search-status"
+            aria-live="polite"
+            className={cx('text-xs', q && matchList.length === 0 && hiddenMatches.length === 0 ? 'text-err' : 'text-muted')}
+          >
+            {!q ? (
+              ''
+            ) : matchList.length > 0 ? (
+              `${matchList.length} ${matchList.length === 1 ? 'match' : 'matches'} · Enter to zoom`
+            ) : hiddenMatches.length > 0 ? (
+              <>
+                {hiddenMatches.join(', ')} {hiddenMatches.length === 1 ? 'is' : 'are'} hidden ·{' '}
+                <button
+                  type="button"
+                  onClick={() => setSearch({ infra: true })}
+                  className="cursor-pointer rounded-chip font-medium text-accent underline-offset-2 hover:underline"
+                >
+                  Show infrastructure
+                </button>
+              </>
+            ) : (
+              'No match'
+            )}
           </span>
           {infraServices.length > 0 ? (
             <div className="flex items-center gap-2">
