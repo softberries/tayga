@@ -623,10 +623,16 @@ async fn template_windows_counts_current_and_baseline() {
 
 #[tokio::test]
 #[ignore = "requires ClickHouse: run against the live stack"]
-async fn covered_minutes_counts_distinct_minutes_with_any_hit() {
+async fn covered_minute_buckets_are_distinct_minutes_with_any_hit() {
     let (s, store) = log_store().await;
     let now = now_ns();
-    assert_eq!(store.covered_minutes(5, 60).await.unwrap(), 0, "no hits");
+    assert!(
+        store
+            .covered_minute_buckets(5, 60)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     let at = |m: i64| now - m * MIN_NS - MIN_NS / 2;
     let mut hits = Vec::new();
     let mut id = 0;
@@ -647,7 +653,14 @@ async fn covered_minutes_counts_distinct_minutes_with_any_hit() {
     id += 1;
     hits.push(hit(id, 1, at(70), ""));
     store.insert_log_hits(&hits).await.unwrap();
-    assert_eq!(store.covered_minutes(5, 60).await.unwrap(), 20);
+    let buckets = store.covered_minute_buckets(5, 60).await.unwrap();
+    assert_eq!(buckets.len(), 20);
+    assert!(
+        buckets.windows(2).all(|w| w[0] < w[1]),
+        "ascending, distinct"
+    );
+    let now_min = now / MIN_NS;
+    assert!(buckets.iter().all(|&m| m > now_min - 66 && m < now_min - 4));
     drop_db(&s, &store).await;
 }
 

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tayga_common::metrics::KindLabel;
 use tayga_common::retry::retry_until;
 use tayga_drain::detect::{
-    Alert, Coverage, DetectConfig, NewCandidate, SpikeSkip, SpikeTracker, TemplateWindow,
-    initial_watermark, is_new, new_alert, new_template_since, spike_baseline,
+    Alert, DetectConfig, NewCandidate, SpikeSkip, SpikeTracker, TemplateWindow, initial_watermark,
+    is_new, new_alert, new_template_since, spike_baseline, template_coverage,
 };
 use tayga_drain::drain::DrainConfig;
 use tayga_drain::preprocess::masking_version;
@@ -135,13 +135,17 @@ struct Pending {
     offsets: HashMap<i32, i64>,
     /// Newest hit `ts` mined per partition.
     max_ts: HashMap<i32, i64>,
+    /// Kafka timestamp (ns) of the newest record per partition, of any kind.
+    record_ts: HashMap<i32, i64>,
     since: Option<Instant>,
 }
 
 impl Pending {
-    fn record(&mut self, partition: i32, offset: i64, now: Instant) {
+    fn record(&mut self, partition: i32, offset: i64, record_ts_ns: i64, now: Instant) {
         let o = self.offsets.entry(partition).or_insert(offset);
         *o = (*o).max(offset);
+        let t = self.record_ts.entry(partition).or_insert(record_ts_ns);
+        *t = (*t).max(record_ts_ns);
         self.since.get_or_insert(now);
     }
 
@@ -365,7 +369,7 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
         if detect_due {
             let mut detect_stop = stop_rx.clone();
             tokio::select! {
-                snapshot = partition_snapshot(&consumer, &settings.kafka.topic, &mut seen) => {
+                snapshot = partition_snapshot(&consumer, &settings.kafka.topic, &mut seen, now_ns(), clock.watermark) => {
                     clock.partitions = snapshot;
                 }
                 _ = detect_stop.wait_for(|stop| *stop) => break,
@@ -392,7 +396,12 @@ fn on_message(
     pending: &mut Pending,
     metrics: &LogminerMetrics,
 ) {
-    pending.record(msg.partition(), msg.offset(), Instant::now());
+    // Without a broker timestamp the record counts as fresh (consumed now).
+    let record_ts = msg
+        .timestamp()
+        .to_millis()
+        .map_or_else(now_ns, |ms| ms.saturating_mul(1_000_000));
+    pending.record(msg.partition(), msg.offset(), record_ts, Instant::now());
     if !is_logs_record(msg) {
         return;
     }
@@ -528,8 +537,10 @@ struct NewTemplateClock {
     partitions: BTreeMap<i32, (i64, bool)>,
 }
 
-/// What the logminer has flushed per partition: the newest hit `ts` and the next offset to
-/// consume (last flushed offset + 1).
+/// A partition whose latest consumed record is older than this is replaying a backlog.
+const STALE_RECORD_NS: i64 = 60_000_000_000;
+
+/// What the logminer has flushed per partition, for records of any kind.
 #[derive(Default)]
 struct PartitionClocks {
     by_partition: BTreeMap<i32, Flushed>,
@@ -537,8 +548,11 @@ struct PartitionClocks {
 
 #[derive(Clone, Copy, Default)]
 struct Flushed {
-    /// Newest flushed hit `ts` in ns; 0 when the partition has not yielded a hit.
+    /// Newest flushed log hit `ts` in ns; 0 when the partition has not yielded a hit.
     max_ts: i64,
+    /// Kafka timestamp (ns) of the newest consumed record of any kind.
+    last_record_ts: i64,
+    /// Next offset to consume (last flushed offset + 1).
     next_offset: i64,
 }
 
@@ -548,6 +562,10 @@ impl PartitionClocks {
         for (partition, next) in batch.commit_offsets() {
             let f = self.by_partition.entry(partition).or_default();
             f.next_offset = f.next_offset.max(next);
+        }
+        for (&partition, &ts) in &batch.record_ts {
+            let f = self.by_partition.entry(partition).or_default();
+            f.last_record_ts = f.last_record_ts.max(ts);
         }
         for (&partition, &ts) in &batch.max_ts {
             let f = self.by_partition.entry(partition).or_default();
@@ -559,77 +577,120 @@ impl PartitionClocks {
     fn retain_assigned(&mut self, assigned: &HashSet<i32>) {
         self.by_partition.retain(|p, _| assigned.contains(p));
     }
+}
 
-    /// Partitions that yielded at least one hit: only those can hold the data clock back.
-    fn with_hits(&self) -> Vec<(i32, Flushed)> {
-        self.by_partition
-            .iter()
-            .filter(|(_, f)| f.max_ts > 0)
-            .map(|(&p, &f)| (p, f))
-            .collect()
+/// One assigned partition's contribution to the detection clock, as `(ts, caught_up)`, or
+/// `None` when it contributes nothing.
+///
+/// A partition is *behind* when records remain (`next_offset < high`) AND its newest consumed
+/// record is older than `STALE_RECORD_NS`: a busy partition always has records ahead of the
+/// consumer but its newest record is fresh, so it is not behind. A behind partition contributes
+/// `min(newest log hit ts if any, newest record ts)`, holding the clock back. Others contribute
+/// their newest log hit ts (if any) to the maximum.
+/// - Never consumed since start (`flushed` is `None`): behind when `position` (the consumer's
+///   position, else the low watermark) is below `high`, or either is unknown; it then holds the
+///   clock at `hold_ns` (the current watermark: hold, do not advance).
+/// - Unknown `high` (watermark fetch failed): behind only when the newest record is stale.
+fn partition_state(
+    flushed: Option<Flushed>,
+    position: Option<i64>,
+    high: Option<i64>,
+    now_ns: i64,
+    hold_ns: i64,
+) -> Option<(i64, bool)> {
+    let Some(f) = flushed else {
+        let behind = match (position, high) {
+            (Some(n), Some(h)) => n < h,
+            _ => true,
+        };
+        return behind.then_some((hold_ns, false));
+    };
+    let stale = now_ns.saturating_sub(f.last_record_ts) > STALE_RECORD_NS;
+    let behind = stale && high.is_none_or(|h| f.next_offset < h);
+    if behind {
+        let ts = [f.max_ts, f.last_record_ts]
+            .into_iter()
+            .filter(|&t| t > 0)
+            .min()
+            .unwrap_or(hold_ns);
+        Some((ts, false))
+    } else {
+        (f.max_ts > 0).then_some((f.max_ts, true))
     }
 }
 
-/// Whether a partition is caught up: the next offset to consume (last flushed offset + 1) is at
-/// or past the high watermark, i.e. every record in the log has been mined and flushed. Pending
-/// records are flushed before detection, so the flushed offset is current. An unknown high
-/// watermark (fetch failed or timed out) counts as not caught up, which only holds the clock back.
-fn caught_up(next_offset: i64, high: Option<i64>) -> bool {
-    high.is_some_and(|h| next_offset >= h)
-}
-
 /// Builds the per-partition view for one detection pass: prunes revoked partitions using the
-/// consumer's current assignment, then fetches the high watermark of each partition that has
-/// yielded hits (blocking librdkafka calls, run on the blocking pool, `WATERMARK_TIMEOUT` each;
-/// after the first failure the remaining partitions are not asked and count as not caught up).
+/// consumer's current assignment, then fetches the watermarks of every assigned partition
+/// (blocking librdkafka calls, run on the blocking pool, `WATERMARK_TIMEOUT` each; a failed
+/// partition is skipped and the others still asked) and classifies it with [`partition_state`].
 async fn partition_snapshot(
     consumer: &Arc<StreamConsumer>,
     topic: &str,
     seen: &mut PartitionClocks,
+    now_ns: i64,
+    hold_ns: i64,
 ) -> BTreeMap<i32, (i64, bool)> {
-    match consumer.assignment() {
-        Ok(tpl) => {
-            let assigned: HashSet<i32> = tpl
-                .elements()
-                .iter()
-                .filter(|e| e.topic() == topic)
-                .map(|e| e.partition())
-                .collect();
-            seen.retain_assigned(&assigned);
+    let assigned: Vec<i32> = match consumer.assignment() {
+        Ok(tpl) => tpl
+            .elements()
+            .iter()
+            .filter(|e| e.topic() == topic)
+            .map(|e| e.partition())
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "reading the consumer assignment failed");
+            return BTreeMap::new();
         }
-        Err(e) => tracing::warn!(error = %e, "reading the consumer assignment failed"),
-    }
-    let parts = seen.with_hits();
-    if parts.is_empty() {
+    };
+    seen.retain_assigned(&assigned.iter().copied().collect());
+    if assigned.is_empty() {
         return BTreeMap::new();
     }
+    let positions: HashMap<i32, i64> = consumer
+        .position()
+        .map(|tpl| {
+            tpl.elements()
+                .iter()
+                .filter(|e| e.topic() == topic)
+                .filter_map(|e| match e.offset() {
+                    Offset::Offset(o) => Some((e.partition(), o)),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let c = Arc::clone(consumer);
     let t = topic.to_string();
-    let ids: Vec<i32> = parts.iter().map(|(p, _)| *p).collect();
-    let highs = tokio::task::spawn_blocking(move || {
-        let mut highs = HashMap::new();
+    let ids = assigned.clone();
+    let marks = tokio::task::spawn_blocking(move || {
+        let mut marks = HashMap::new();
         for p in ids {
             match c.fetch_watermarks(&t, p, WATERMARK_TIMEOUT) {
-                Ok((_, high)) => {
-                    highs.insert(p, high);
+                Ok(lh) => {
+                    marks.insert(p, lh);
                 }
-                Err(e) => {
-                    tracing::warn!(partition = p, error = %e, "fetching watermarks failed");
-                    break;
-                }
+                Err(e) => tracing::warn!(partition = p, error = %e, "fetching watermarks failed"),
             }
         }
-        highs
+        marks
     })
     .await
     .unwrap_or_default();
-    parts
+    assigned
         .into_iter()
-        .map(|(p, f)| {
-            (
-                p,
-                (f.max_ts, caught_up(f.next_offset, highs.get(&p).copied())),
+        .filter_map(|p| {
+            let (low, high) = marks
+                .get(&p)
+                .map_or((None, None), |&(l, h)| (Some(l), Some(h)));
+            let position = positions.get(&p).copied().or(low);
+            partition_state(
+                seen.by_partition.get(&p).copied(),
+                position,
+                high,
+                now_ns,
+                hold_ns,
             )
+            .map(|st| (p, st))
         })
         .collect()
 }
@@ -742,11 +803,10 @@ async fn find_alerts(
     // Never ahead of the wall clock; the store's latest hit stands in until partitions report.
     let data_now = data_clock(detection_clock(&clock.partitions, stored_now), now);
     let mut out = Vec::new();
-    let cov = Coverage {
-        covered_min: store
-            .covered_minutes(cfg.spike_window_min, cfg.baseline_window_min)
-            .await?,
-    };
+    // Once per pass; each template's coverage is derived from these buckets.
+    let buckets = store
+        .covered_minute_buckets(cfg.spike_window_min, cfg.baseline_window_min)
+        .await?;
     let windows = store
         .template_windows(
             cfg.spike_window_min,
@@ -763,6 +823,7 @@ async fn find_alerts(
             current: r.current,
             baseline_total: r.baseline_total,
         };
+        let cov = template_coverage(cfg, &buckets, w.first_seen_ns, now);
         let baseline = match spike_baseline(cfg, &w, cov, now) {
             Ok(Some(b)) => b,
             Ok(None) => continue,
@@ -925,30 +986,111 @@ mod tests {
         assert_eq!(detection_clock(&BTreeMap::new(), 999), 999);
     }
 
+    const NOW_T: i64 = 1_000 * MIN_NS;
+
+    fn fl(max_ts: i64, last_record_ts: i64, next_offset: i64) -> Flushed {
+        Flushed {
+            max_ts,
+            last_record_ts,
+            next_offset,
+        }
+    }
+
     #[test]
-    fn caught_up_compares_the_next_offset_with_the_high_watermark() {
-        assert!(caught_up(10, Some(10)));
-        assert!(caught_up(11, Some(10)));
-        assert!(!caught_up(9, Some(10)));
-        assert!(
-            !caught_up(10, None),
-            "unknown high watermark holds the clock"
+    fn a_spans_only_lagging_partition_holds_the_clock() {
+        // No log hit, stale records, records remaining: contributes its record ts.
+        let st = partition_state(
+            Some(fl(0, NOW_T - 10 * MIN_NS, 5)),
+            None,
+            Some(50),
+            NOW_T,
+            7,
+        );
+        assert_eq!(st, Some((NOW_T - 10 * MIN_NS, false)));
+        let m = BTreeMap::from([(0, st.unwrap()), (1, (NOW_T - MIN_NS, true))]);
+        assert_eq!(detection_clock(&m, 0), NOW_T - 10 * MIN_NS);
+    }
+
+    #[test]
+    fn a_behind_partition_contributes_the_older_of_hit_and_record_ts() {
+        let st = partition_state(
+            Some(fl(NOW_T - 20 * MIN_NS, NOW_T - 10 * MIN_NS, 5)),
+            None,
+            Some(50),
+            NOW_T,
+            7,
+        );
+        assert_eq!(st, Some((NOW_T - 20 * MIN_NS, false)));
+    }
+
+    #[test]
+    fn a_busy_partition_with_a_stale_log_ts_but_fresh_records_does_not_hold() {
+        let st = partition_state(Some(fl(5, NOW_T - 1_000, 5)), None, Some(500), NOW_T, 7);
+        assert_eq!(st, Some((5, true)));
+    }
+
+    #[test]
+    fn a_stale_partition_that_reached_the_high_watermark_is_caught_up() {
+        let st = partition_state(
+            Some(fl(100, NOW_T - 10 * MIN_NS, 50)),
+            None,
+            Some(50),
+            NOW_T,
+            7,
+        );
+        assert_eq!(st, Some((100, true)));
+        let idle = partition_state(
+            Some(fl(0, NOW_T - 10 * MIN_NS, 50)),
+            None,
+            Some(50),
+            NOW_T,
+            7,
+        );
+        assert_eq!(idle, None);
+    }
+
+    #[test]
+    fn an_unpolled_assigned_behind_partition_holds_at_the_watermark() {
+        assert_eq!(
+            partition_state(None, Some(3), Some(9), NOW_T, 777),
+            Some((777, false))
+        );
+        assert_eq!(partition_state(None, Some(9), Some(9), NOW_T, 777), None);
+        assert_eq!(
+            partition_state(None, None, None, NOW_T, 777),
+            Some((777, false))
         );
     }
 
     #[test]
-    fn revoked_partitions_are_pruned_and_idle_ones_ignored() {
+    fn a_failed_watermark_fetch_only_matters_for_stale_partitions() {
+        let fresh = partition_state(Some(fl(100, NOW_T - 1_000, 5)), None, None, NOW_T, 7);
+        assert_eq!(fresh, Some((100, true)));
+        let stale = partition_state(Some(fl(100, NOW_T - 10 * MIN_NS, 5)), None, None, NOW_T, 7);
+        assert_eq!(stale, Some((100.min(NOW_T - 10 * MIN_NS), false)));
+        // One partition's failure leaves the others' states unchanged.
+        let ok = partition_state(
+            Some(fl(100, NOW_T - 10 * MIN_NS, 50)),
+            None,
+            Some(50),
+            NOW_T,
+            7,
+        );
+        assert_eq!(ok, Some((100, true)));
+    }
+
+    #[test]
+    fn revoked_partitions_are_pruned() {
         let mut seen = PartitionClocks::default();
         let mut b = Pending::default();
-        b.record(0, 4, Instant::now());
-        b.record(1, 9, Instant::now());
-        b.record(2, 1, Instant::now());
+        b.record(0, 4, 10, Instant::now());
+        b.record(1, 9, 20, Instant::now());
+        b.record(2, 1, 30, Instant::now());
         b.record_ts(0, 100);
-        b.record_ts(1, 200);
-        seen.record_flush(&b); // partition 2 consumed records but yielded no hit
-        let hits: Vec<_> = seen.with_hits().iter().map(|(p, _)| *p).collect();
-        assert_eq!(hits, vec![0, 1]);
+        seen.record_flush(&b);
         assert_eq!(seen.by_partition[&1].next_offset, 10);
+        assert_eq!(seen.by_partition[&1].last_record_ts, 20);
+        assert_eq!(seen.by_partition[&0].max_ts, 100);
         seen.retain_assigned(&HashSet::from([1, 2]));
         let left: Vec<_> = seen.by_partition.keys().copied().collect();
         assert_eq!(left, vec![1, 2]);
@@ -978,9 +1120,9 @@ mod tests {
         let mut p = Pending::default();
         assert!(p.is_empty());
         assert!(!p.should_flush(t0 + Duration::from_secs(10), 1, Duration::from_secs(1)));
-        p.record(0, 7, t0);
-        p.record(0, 5, t0);
-        p.record(3, 1, t0);
+        p.record(0, 7, 0, t0);
+        p.record(0, 5, 0, t0);
+        p.record(3, 1, 0, t0);
         assert_eq!(p.commit_offsets(), vec![(0, 8), (3, 2)]);
         assert!(!p.should_flush(t0, 10, Duration::from_secs(1)));
         assert!(p.should_flush(t0 + Duration::from_secs(1), 10, Duration::from_secs(1)));

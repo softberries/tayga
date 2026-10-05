@@ -87,7 +87,8 @@ fn id_hex(parts: &[&str]) -> String {
     format!("{:016x}", fingerprint(parts))
 }
 
-/// Minutes of the baseline window that had any log at all (any template), from the store.
+/// Minutes of the template's own baseline period that had any log at all (any template).
+/// Per template: see [`template_coverage`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Coverage {
     pub covered_min: u32,
@@ -96,8 +97,33 @@ pub struct Coverage {
 /// Why a template that may have spiked was not judged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpikeSkip {
-    /// Fewer than half of the baseline window's minutes had data (pipeline gap).
+    /// Under half of the minutes the template could have been seen in had any logs at all
+    /// (pipeline gap).
     Coverage,
+}
+
+/// Coverage of one template: the covered minute buckets (unix minutes, any template, within the
+/// baseline window) at or after `max(first_seen minute, baseline window start)`, so minutes
+/// before the template existed do not count as its coverage. Buckets are whole clock minutes
+/// while the window edges are `now`-relative instants, so the count can be off by one at the
+/// edges; it is capped at `baseline_window_min`.
+pub fn template_coverage(
+    cfg: &DetectConfig,
+    covered_buckets: &[i64],
+    first_seen_ns: i64,
+    now_ns: i64,
+) -> Coverage {
+    let window_start_ns =
+        now_ns - i64::from(cfg.baseline_window_min + cfg.spike_window_min) * MIN_NS;
+    let from = first_seen_ns
+        .div_euclid(MIN_NS)
+        .max(window_start_ns.div_euclid(MIN_NS));
+    let n = covered_buckets.iter().filter(|&&m| m >= from).count();
+    Coverage {
+        covered_min: u32::try_from(n)
+            .unwrap_or(u32::MAX)
+            .min(cfg.baseline_window_min),
+    }
 }
 
 /// `Ok(Some(baseline per spike window))` when the template spikes now, `Ok(None)` when it does
@@ -105,6 +131,8 @@ pub enum SpikeSkip {
 ///
 /// The baseline counts only minutes with data and only minutes the template existed before the
 /// spike window, so a gap or a young template cannot shrink the divisor into a false spike.
+/// `cov` is the template's own coverage; the 50% gate compares it with the minutes the template
+/// could have been seen in, `min(existed, baseline_window_min)`.
 pub fn spike_baseline(
     cfg: &DetectConfig,
     w: &TemplateWindow,
@@ -113,9 +141,6 @@ pub fn spike_baseline(
 ) -> Result<Option<f64>, SpikeSkip> {
     if w.template == OVERFLOW {
         return Ok(None);
-    }
-    if cov.covered_min.saturating_mul(2) < cfg.baseline_window_min {
-        return Err(SpikeSkip::Coverage);
     }
     let spike_min = i64::from(cfg.spike_window_min.max(1));
     let age_min = now_ns.saturating_sub(w.first_seen_ns) / MIN_NS;
@@ -126,9 +151,11 @@ pub fn spike_baseline(
     if existed_min < spike_min {
         return Ok(None);
     }
-    let effective_min = existed_min
-        .min(i64::from(cfg.baseline_window_min))
-        .min(i64::from(cov.covered_min));
+    let possible_min = existed_min.min(i64::from(cfg.baseline_window_min));
+    if i64::from(cov.covered_min) * 2 < possible_min {
+        return Err(SpikeSkip::Coverage);
+    }
+    let effective_min = possible_min.min(i64::from(cov.covered_min));
     let per_window = w.baseline_total as f64 / (effective_min / spike_min).max(1) as f64;
     Ok((w.current >= cfg.spike_min_count
         && w.current as f64 >= cfg.spike_factor * per_window.max(1.0))
@@ -351,6 +378,41 @@ mod tests {
             spike_baseline(&cfg, &window(100, 120, 64), cov(30), NOW),
             Ok(Some(20.0))
         );
+    }
+
+    #[test]
+    fn a_young_template_spanning_an_outage_is_not_judged() {
+        let cfg = DetectConfig::default();
+        let now_min = NOW / MIN_NS;
+        // Logs flowed until 30 min ago, then the pipeline was down through the spike window's
+        // start; the template (30 min old) saw only its first minute covered.
+        let buckets: Vec<i64> = ((now_min - 65)..=(now_min - 30)).collect();
+        let w = window(40, 20, 30);
+        let c = template_coverage(&cfg, &buckets, w.first_seen_ns, NOW);
+        assert_eq!(c.covered_min, 1);
+        assert_eq!(spike_baseline(&cfg, &w, c, NOW), Err(SpikeSkip::Coverage));
+    }
+
+    #[test]
+    fn a_young_template_with_full_lifetime_coverage_can_spike() {
+        let cfg = DetectConfig::default();
+        let now_min = NOW / MIN_NS;
+        let buckets: Vec<i64> = ((now_min - 65)..=(now_min - 5)).collect();
+        let w = window(40, 20, 30); // existed 25 min -> 5 windows -> 4 per window
+        let c = template_coverage(&cfg, &buckets, w.first_seen_ns, NOW);
+        assert!(c.covered_min >= 25);
+        assert_eq!(spike_baseline(&cfg, &w, c, NOW), Ok(Some(4.0)));
+    }
+
+    #[test]
+    fn coverage_before_the_template_existed_does_not_count() {
+        let cfg = DetectConfig::default();
+        let now_min = NOW / MIN_NS;
+        let buckets: Vec<i64> = ((now_min - 65)..=(now_min - 5)).collect();
+        let old = template_coverage(&cfg, &buckets, NOW - 120 * MIN_NS, NOW);
+        assert_eq!(old.covered_min, 60, "capped at the baseline window");
+        let young = template_coverage(&cfg, &buckets, NOW - 20 * MIN_NS, NOW);
+        assert!((16..=17).contains(&young.covered_min), "{young:?}");
     }
 
     fn candidate(first_seen_ns: i64, service_oldest_ns: i64) -> NewCandidate {
