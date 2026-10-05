@@ -210,14 +210,7 @@ App routes (client-side; every path below serves `index.html`, and the app rende
 | `/logs/alerts`, `/logs/templates`, `/logs/templates/{id}` | `since`, `until`, filters | Logs |
 | `/pipeline` | `since`, `until` | Pipeline health |
 
-Redirects from the removed server-rendered pages (HTTP 308, query string kept):
-
-| Old route | Now |
-|---|---|
-| `/groups/{fingerprint}` | `/?group="{fingerprint}"` (the group is selected on Stories; the id is JSON-quoted in the URL) |
-| `/service-map` | `/map` |
-| `/alerts` | `/logs/alerts` |
-| `/templates`, `/templates/{id}` | `/logs/templates`, `/logs/templates/{id}` |
+Old server-rendered URLs (`/service-map`, `/alerts`, `/templates`, `/groups/…`) are not redirected; they show the app's not-found page.
 
 Static files: `/assets/*` is served with `Cache-Control: public, max-age=31536000, immutable`; `index.html` with `no-cache`. A GET to a path the app does not know serves `index.html` with status 200 (the app shows its own not-found page). A missing `/api/*` route or `/assets/*` file returns a JSON 404.
 
@@ -256,7 +249,7 @@ Rows above the `Plan 4` row were checked 2026-10-03 on branch `feat/plan-3-api-u
 | Flush at 5,000 logs or 1 s, detect every 60 s, topic `tayga.alerts` | `LogminerSettings::default` | verified in code |
 | TTLs 3 d (hits) / 30 d (templates) / 7 d (alerts) | `TTL` lines in `crates/tayga-store/migrations/0004*` | verified in code |
 | New routes and their defaults (`since` 24h / 1h / 24h, 200 alert and template limit, `q` at most 200 chars) | `routes.rs`, `ui.rs`, `params.rs`, `repo.rs` (limit 200 at `log_alerts` and `TEMPLATES_IN_WINDOW`) | verified in code |
-| `/alerts` and `/templates` return 200; `/api/v1/log-alerts?since=24h` | live `curl`: 200, 200; 8 alerts in the last 24 h | verified live 2026-10-04; **superseded**: `/alerts` and `/templates` now return 308 |
+| `/alerts` and `/templates` return 200; `/api/v1/log-alerts?since=24h` | live `curl`: 200, 200; 8 alerts in the last 24 h | verified live 2026-10-04; **superseded**: `/alerts` and `/templates` are no longer redirected and show the app's not-found page |
 | About 60-120 templates | live `log_templates FINAL`: 293 rows in total (all ever mined, 30-day TTL), 72 with `last_seen` in the last hour; `/api/v1/log-templates?since=1h` returned 72 | verified live; the 60-120 range is the plan's estimate, the live hourly count (72) is inside it |
 | Golden Drain test: 64 templates on the 5,000-line sample, `frontend-proxy` 5, bound is 120 and 10 | `cargo test -p tayga-drain --test '*' -- --nocapture` printed `templates: 64 {... "frontend-proxy": 5 ...}`, 3 passed | verified |
 | Restoring the first half of the golden sample and mining the rest gives every line the same template id as one pass | `restore_mid_corpus_matches_a_single_pass` in `crates/tayga-drain/tests/golden.rs`. It fails (116 of 5,000 lines differ) when the restore is skipped. It still passes when clusters are restored in reverse order, so the sample does not exercise leaf-order ties | verified 2026-10-04 |
@@ -279,7 +272,7 @@ Rows above the `Plan 4` row were checked 2026-10-03 on branch `feat/plan-3-api-u
 | New API routes `overview`, `stories/series`, `traces/search`, `search?q=`, `pipeline/series` return 200; `services` returns a list of names; `pipeline/lag` returns three groups (writer, assembler, logminer) | live `curl` (`pipeline/series?metric=up&kind=gauge&job=tayga-api&since=15m`; `services/{name}` not called) | verified live |
 | Route list, parameters and limits (`limit` 1 to 500, default 100; `touched`, `errors` flags; `kind` required for `pipeline/series`) | `crates/tayga-api/src/routes_v2.rs`, `params.rs` | verified in code |
 | Immutable cache on `/assets/*`, `no-cache` on `index.html` | `IMMUTABLE` and `NO_CACHE` in `spa.rs`; Task 13 report shows live response headers (`cache-control: public, max-age=31536000, immutable` on the asset, `no-cache` on `/`) | verified in code and in the Task 13 report; not re-fetched today |
-| Pages, paths, shortcuts (`g` then `s t m l p`, `?`, `Cmd/Ctrl+K`), theme cycle light, dark, system, time ranges 15m/1h/24h/7d, live refresh 10 s paused while hidden, palette contents | `ui/src/router.tsx`, `components/shell/{Shortcuts,CommandPalette,ThemeSwitch,TimeRange,LiveToggle}.tsx`, `app/search.ts`, `theme/theme.ts` | verified in code; not clicked through in a browser today (the Playwright suite in the Task 14 report covers pages, redirects, theme switch and palette) |
+| Pages, paths, shortcuts (`g` then `s t m l p`, `?`, `Cmd/Ctrl+K`), theme cycle light, dark, system, time ranges 15m/1h/24h/7d, live refresh 10 s paused while hidden, palette contents | `ui/src/router.tsx`, `components/shell/{Shortcuts,CommandPalette,ThemeSwitch,TimeRange,LiveToggle}.tsx`, `app/search.ts`, `theme/theme.ts` | verified in code; not clicked through in a browser today (the Playwright suite in the Task 14 report covers pages, theme switch and palette) |
 | Recorder: every 15 s, 7-day TTL, targets in `deploy/tayga-api.toml` via `TAYGA_CONFIG`, not settable by `TAYGA__` env | `default_record_secs` in `crates/tayga-api/src/main.rs`; `TTL ... INTERVAL 7 DAY` in `0005_metric_samples.sql`; Task 13 report (config 0.15.27 rejected the env form with `invalid type: map, expected a sequence`) | verified in code; the env failure is cited from the Task 13 report, not re-run |
 | Grafana and Prometheus are the compose profile `extras`; `make up-extras` starts them and sets the Grafana link; `make down` removes them | `Makefile`, `deploy/compose.tayga.yaml`, `deploy/compose.extras.yaml`; Task 13 report (live: `up-extras` gave `grafana_url` set, Prometheus ready, 4 dashboards provisioned; a second `make up` left them running) | verified in files; live results cited from the Task 13 report; `make up-extras` not run today |
 | Node 24 or newer only for UI development; Docker builds with `node:24`; `make ui-dev`, `make ui-e2e` | `engines` in `ui/package.json`; first stage of `docker/Dockerfile`; `Makefile`; `node --version` here prints v24.18.0 | verified |
