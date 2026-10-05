@@ -1,4 +1,5 @@
 /** KPI tiles from /overview: count-up numbers, area sparklines and a delta to the previous window. */
+import { SINCE_SECS } from '../../app/search'
 import type { UseQueryResult } from '@tanstack/react-query'
 import type { LogAlertView, OverviewView } from '../../api/types'
 import type { Since } from '../../app/search'
@@ -10,16 +11,7 @@ import { Skeleton } from '../../components/ui/Skeleton'
 import { Tooltip } from '../../components/ui/Tooltip'
 import { StaggerItem, StaggerList } from '../../components/ui/Stagger'
 import { compact } from '../../lib/format'
-import {
-  SINCE_SECS,
-  activeAlertsText,
-  alertActivity,
-  bucketWord,
-  deltaText,
-  denseSeries,
-  peak,
-  previousCount,
-} from './model'
+import { activeAlertsText, alertActivity, bucketWord, deltaText, denseSeries, peak, previousCount } from './model'
 
 interface Tile {
   label: string

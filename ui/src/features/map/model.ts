@@ -2,10 +2,10 @@
  * Pure helpers for the /map page: the graph handed to ELK, edge width and tone, search
  * matching and each service's callers and callees.
  */
+import { SINCE_SECS } from '../../app/search'
 import type { EdgeView, Health, NodeView, ServiceMapView } from '../../api/types'
 import type { Since } from '../../app/search'
 import { compact, percent } from '../../lib/format'
-import { SINCE_SECS } from '../stories/model'
 import { isFailingEdge, servicesOf } from '../stories/mapLayout'
 import type { MapGraph, Pos } from './layout'
 

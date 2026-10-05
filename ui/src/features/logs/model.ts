@@ -1,6 +1,7 @@
+import { SINCE_SECS } from '../../app/search'
 import type { ExampleTrace, LogAlertView, LogTemplateListItem } from '../../api/types'
 import type { Since } from '../../app/search'
-import { SINCE_SECS, denseSeries } from '../stories/model'
+import { denseSeries } from '../stories/model'
 
 /** Seconds per bar of the alerts timeline: hourly for the long ranges, finer for short ones. */
 export const TIMELINE_STEP: Record<Since, number> = { '15m': 60, '1h': 300, '24h': 3600, '7d': 3600 }

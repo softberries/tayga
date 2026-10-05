@@ -1,3 +1,4 @@
+import { SINCE_SECS } from '../../app/search'
 import { useQueries } from '@tanstack/react-query'
 import { Activity } from 'lucide-react'
 import { useMemo } from 'react'
@@ -10,7 +11,6 @@ import { Reveal } from '../../components/ui/Reveal'
 import { Skeleton } from '../../components/ui/Skeleton'
 import { SectionNote, StaleNote } from '../../components/ui/StaleNote'
 import { ErrorBanner } from '../stories/ErrorBanner'
-import { SINCE_SECS } from '../stories/model'
 import { seriesPoints } from './model'
 import type { ChartSpec } from './model'
 

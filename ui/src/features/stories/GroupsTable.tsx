@@ -3,6 +3,7 @@
  * filters and the text search come from the URL, sorting is local. One row is selected (the
  * inspector shows it); ↑/↓ move the selection and Enter opens the group's sample story.
  */
+import { SINCE_SECS } from '../../app/search'
 import {
   columnFilteringFeature,
   createColumnHelper,
@@ -37,7 +38,7 @@ import { EmptyState } from '../../components/ui/EmptyState'
 import { SortHeader } from '../../components/ui/SortHeader'
 import { cx } from '../../lib/cx'
 import { ago } from '../../lib/format'
-import { SINCE_SECS, bucketWord, denseSeries, endpointOf, peak, splitSummary } from './model'
+import { bucketWord, denseSeries, endpointOf, peak, splitSummary } from './model'
 import { TruncationTooltip } from '../../components/ui/Tooltip'
 
 const features = tableFeatures({

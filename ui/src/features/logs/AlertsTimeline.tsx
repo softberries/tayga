@@ -1,8 +1,8 @@
+import { SINCE_SECS } from '../../app/search'
 import { useMemo } from 'react'
 import type { LogAlertView } from '../../api/types'
 import type { Since } from '../../app/search'
 import { TimeSeries } from '../../components/charts/TimeSeries'
-import { SINCE_SECS } from '../stories/model'
 import { TIMELINE_STEP, stepWord, timeline } from './model'
 
 /** Alerts started per bucket, stacked by kind (new in the accent color, spike in the slow one). */

@@ -27,7 +27,6 @@ export function splitSummary(summary: string): { title: string; detail: string }
   return { title: summary, detail: '' }
 }
 
-export const SINCE_SECS: Record<Since, number> = { '15m': 900, '1h': 3600, '24h': 86_400, '7d': 604_800 }
 
 /** Most points a sparkline is given; longer series keep their newest points. */
 const MAX_POINTS = 240
