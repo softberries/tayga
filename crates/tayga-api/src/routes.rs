@@ -1,8 +1,8 @@
 //! JSON API (spec §10).
 
 use crate::params::{
-    alert_filter, group_filter, parse_fingerprint, parse_hex_id, parse_since, since_or,
-    template_filter,
+    Window, alert_filter, group_filter, now_ms, parse_fingerprint, parse_hex_id, template_filter,
+    window,
 };
 use crate::repo::Repo;
 use axum::Json;
@@ -99,6 +99,7 @@ impl<R> AppState<R> {
 #[derive(Deserialize, Default)]
 pub struct GroupsQuery {
     pub since: Option<String>,
+    pub until: Option<String>,
     pub kind: Option<String>,
     pub service: Option<String>,
 }
@@ -106,6 +107,7 @@ pub struct GroupsQuery {
 #[derive(Deserialize, Default)]
 pub struct AlertsQuery {
     pub since: Option<String>,
+    pub until: Option<String>,
     pub kind: Option<String>,
     pub service: Option<String>,
 }
@@ -113,13 +115,26 @@ pub struct AlertsQuery {
 #[derive(Deserialize, Default)]
 pub struct TemplatesQuery {
     pub since: Option<String>,
+    pub until: Option<String>,
     pub service: Option<String>,
     pub q: Option<String>,
 }
 
+/// The window of a route that takes nothing else: `since` and `until`.
 #[derive(Deserialize, Default)]
-pub struct SinceQuery {
+pub struct WindowQuery {
     pub since: Option<String>,
+    pub until: Option<String>,
+}
+
+/// The request's window `[until - since, until]` (`until` defaults to now), or a 400.
+pub fn window_of(
+    since: &Option<String>,
+    until: &Option<String>,
+    default_since: &str,
+) -> Result<Window, ApiError> {
+    window(since.as_deref(), until.as_deref(), default_since, now_ms())
+        .map_err(ApiError::BadRequest)
 }
 
 pub fn api_router<R: Repo>(repo: Arc<R>, metrics: ApiMetrics) -> Router {
@@ -145,8 +160,9 @@ async fn groups<R: Repo>(
     q: Result<Query<GroupsQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let Query(q) = q.map_err(|r| ApiError::BadRequest(r.body_text()))?;
-    let f = group_filter(q.since.as_deref(), q.kind.as_deref(), q.service.as_deref())
-        .map_err(ApiError::BadRequest)?;
+    let w = window_of(&q.since, &q.until, "1h")?;
+    let f =
+        group_filter(w, q.kind.as_deref(), q.service.as_deref()).map_err(ApiError::BadRequest)?;
     let groups = s
         .repo
         .story_groups(&f)
@@ -158,14 +174,14 @@ async fn groups<R: Repo>(
 async fn group<R: Repo>(
     State(s): State<AppState<R>>,
     Path(fingerprint): Path<String>,
-    q: Result<Query<SinceQuery>, QueryRejection>,
+    q: Result<Query<WindowQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let Query(q) = q.map_err(|r| ApiError::BadRequest(r.body_text()))?;
     let fp = parse_fingerprint(&fingerprint).map_err(ApiError::BadRequest)?;
-    let since = parse_since(since_or(q.since.as_deref(), "24h")).map_err(ApiError::BadRequest)?;
+    let w = window_of(&q.since, &q.until, "24h")?;
     match s
         .repo
-        .story_group(&fp, since)
+        .story_group(&fp, w)
         .await
         .map_err(|e| s.unavailable(e))?
     {
@@ -199,13 +215,13 @@ async fn trace<R: Repo>(
 
 async fn service_map<R: Repo>(
     State(s): State<AppState<R>>,
-    q: Result<Query<SinceQuery>, QueryRejection>,
+    q: Result<Query<WindowQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let Query(q) = q.map_err(|r| ApiError::BadRequest(r.body_text()))?;
-    let since = parse_since(since_or(q.since.as_deref(), "1h")).map_err(ApiError::BadRequest)?;
+    let w = window_of(&q.since, &q.until, "1h")?;
     let graph = s
         .repo
-        .service_graph(since)
+        .service_graph(w)
         .await
         .map_err(|e| s.unavailable(e))?;
     Ok(Json(graph).into_response())
@@ -216,8 +232,9 @@ async fn log_alerts<R: Repo>(
     q: Result<Query<AlertsQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let Query(q) = q.map_err(|r| ApiError::BadRequest(r.body_text()))?;
-    let f = alert_filter(q.since.as_deref(), q.kind.as_deref(), q.service.as_deref())
-        .map_err(ApiError::BadRequest)?;
+    let w = window_of(&q.since, &q.until, "24h")?;
+    let f =
+        alert_filter(w, q.kind.as_deref(), q.service.as_deref()).map_err(ApiError::BadRequest)?;
     let alerts = s.repo.log_alerts(&f).await.map_err(|e| s.unavailable(e))?;
     Ok(Json(alerts).into_response())
 }
@@ -227,8 +244,9 @@ async fn log_templates<R: Repo>(
     q: Result<Query<TemplatesQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let Query(q) = q.map_err(|r| ApiError::BadRequest(r.body_text()))?;
-    let f = template_filter(q.since.as_deref(), q.service.as_deref(), q.q.as_deref())
-        .map_err(ApiError::BadRequest)?;
+    let w = window_of(&q.since, &q.until, "1h")?;
+    let f =
+        template_filter(w, q.service.as_deref(), q.q.as_deref()).map_err(ApiError::BadRequest)?;
     let templates = s
         .repo
         .log_templates(&f)
@@ -240,14 +258,14 @@ async fn log_templates<R: Repo>(
 async fn log_template<R: Repo>(
     State(s): State<AppState<R>>,
     Path(id): Path<String>,
-    q: Result<Query<SinceQuery>, QueryRejection>,
+    q: Result<Query<WindowQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let Query(q) = q.map_err(|r| ApiError::BadRequest(r.body_text()))?;
     let id = parse_fingerprint(&id).map_err(ApiError::BadRequest)?;
-    let since = parse_since(since_or(q.since.as_deref(), "24h")).map_err(ApiError::BadRequest)?;
+    let w = window_of(&q.since, &q.until, "24h")?;
     match s
         .repo
-        .log_template(&id, since)
+        .log_template(&id, w)
         .await
         .map_err(|e| s.unavailable(e))?
     {
@@ -341,14 +359,110 @@ mod tests {
         assert_eq!(json[0]["buckets"][0][1], 4);
         assert_eq!(json[0]["bucket_secs"], 60);
         assert_eq!(json[0]["rc_service"], "payment");
+        let f = repo.last_filter.lock().unwrap().clone().unwrap();
         assert_eq!(
-            repo.last_filter.lock().unwrap().clone(),
-            Some(crate::params::GroupFilter {
-                since_secs: 900,
-                kind: Some("error".into()),
-                service: Some("payment".into()),
-            })
+            (f.window.secs(), f.kind.as_deref(), f.service.as_deref()),
+            (900, Some("error"), Some("payment"))
         );
+        assert!(
+            (f.window.end - now_ms() / 1000).abs() <= 2,
+            "no until: the window ends now"
+        );
+    }
+
+    /// A moment `ago` seconds back, as unix seconds and as RFC 3339.
+    fn past(ago: i64) -> (i64, String) {
+        let t = now_ms() / 1000 - ago;
+        let (days, secs) = (t.div_euclid(86_400), t.rem_euclid(86_400));
+        // Civil date from days since the epoch (Howard Hinnant's `civil_from_days`).
+        let z = days + 719_468;
+        let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let (d, m) = (
+            doy - (153 * mp + 2) / 5 + 1,
+            if mp < 10 { mp + 3 } else { mp - 9 },
+        );
+        let y = yoe + era * 400 + i64::from(m <= 2);
+        let text = format!(
+            "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+            secs / 3600,
+            secs % 3600 / 60,
+            secs % 60
+        );
+        (t, text)
+    }
+
+    #[tokio::test]
+    async fn until_moves_the_window_on_every_windowed_route() {
+        let (end, rfc) = past(2 * 86_400);
+        let w = |secs: i64| Window {
+            start: end - secs,
+            end,
+        };
+        let repo = Arc::new(FakeRepo::default());
+        let call = |uri: String| get_with(repo.clone(), ApiMetrics::default(), uri.leak());
+
+        // Both formats of `until` name the same window.
+        for until in [end.to_string(), rfc] {
+            let (status, _) = call(format!("/api/v1/story-groups?since=2h&until={until}")).await;
+            assert_eq!(status, StatusCode::OK, "{until}");
+            let f = repo.last_filter.lock().unwrap().take().unwrap();
+            assert_eq!(f.window, w(7200), "{until}");
+        }
+        call(format!("/api/v1/story-groups/42?since=30m&until={end}")).await;
+        assert_eq!(repo.last_window.lock().unwrap().take(), Some(w(1800)));
+        call(format!("/api/v1/service-map?until={end}")).await;
+        assert_eq!(repo.last_window.lock().unwrap().take(), Some(w(3600)));
+        call(format!("/api/v1/log-alerts?until={end}")).await;
+        let a = repo.last_alert_filter.lock().unwrap().take().unwrap();
+        assert_eq!(a.window, w(86_400), "the alert default is 24h");
+        call(format!("/api/v1/log-templates?since=15m&until={end}")).await;
+        let t = repo.last_template_filter.lock().unwrap().take().unwrap();
+        assert_eq!(t.window, w(900));
+        call(format!("/api/v1/log-templates/42?since=15m&until={end}")).await;
+        assert_eq!(repo.last_window.lock().unwrap().take(), Some(w(900)));
+    }
+
+    #[tokio::test]
+    async fn bad_until_is_400_with_a_message() {
+        let now = now_ms() / 1000;
+        let ahead = now + 3600;
+        let old = now - 7 * 86_400 + 60;
+        for (uri, needle) in [
+            ("/api/v1/story-groups?until=yesterday".to_string(), "until"),
+            (
+                "/api/v1/story-groups?until=2026-10-04".to_string(),
+                "RFC 3339",
+            ),
+            (format!("/api/v1/story-groups?until={ahead}"), "future"),
+            (format!("/api/v1/story-groups/42?until={ahead}"), "future"),
+            (format!("/api/v1/service-map?until={ahead}"), "future"),
+            (format!("/api/v1/log-alerts?until={ahead}"), "future"),
+            (format!("/api/v1/log-templates?until={ahead}"), "future"),
+            (format!("/api/v1/log-templates/42?until={ahead}"), "future"),
+            // The window would start before the 7 days of retention.
+            (
+                format!("/api/v1/story-groups?since=1h&until={old}"),
+                "retention",
+            ),
+            (
+                format!("/api/v1/service-map?since=2m&until={old}"),
+                "retention",
+            ),
+            (format!("/api/v1/log-alerts?until={old}"), "retention"),
+            ("/api/v1/story-groups?until=1&until=2".to_string(), ""),
+        ] {
+            let (status, json) = get(FakeRepo::default(), &uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            let message = json["error"].as_str().unwrap_or_default();
+            assert!(message.contains(needle), "{uri}: {message}");
+        }
+        // Up to a minute ahead is clock skew, not an error.
+        let skew = now + 30;
+        let uri = format!("/api/v1/story-groups?until={skew}");
+        assert_eq!(get(FakeRepo::default(), &uri).await.0, StatusCode::OK);
     }
 
     #[tokio::test]
@@ -387,7 +501,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .as_ref()
-                .map(|f| f.since_secs),
+                .map(|f| f.window.secs()),
             Some(3600)
         );
         // No such group in the fake: 404 proves `since=` was accepted rather than a 400.
@@ -516,13 +630,10 @@ mod tests {
         assert_eq!(json[0]["active"], true);
         assert_eq!(json[0]["example_traces"][0]["story_id"], "ab".repeat(16));
         assert!(json[0]["example_traces"][1]["story_id"].is_null());
+        let f = repo.last_alert_filter.lock().unwrap().clone().unwrap();
         assert_eq!(
-            repo.last_alert_filter.lock().unwrap().clone(),
-            Some(crate::params::AlertFilter {
-                since_secs: 86_400,
-                kind: Some("spike".into()),
-                service: Some("payment".into()),
-            })
+            (f.window.secs(), f.kind.as_deref(), f.service.as_deref()),
+            (86_400, Some("spike"), Some("payment"))
         );
     }
 
@@ -557,7 +668,7 @@ mod tests {
         );
         let f = repo.last_template_filter.lock().unwrap().clone().unwrap();
         assert_eq!(
-            (f.since_secs, f.q.as_deref(), f.service.as_deref()),
+            (f.window.secs(), f.q.as_deref(), f.service.as_deref()),
             (3600, Some("failed"), Some("payment"))
         );
         let long = format!("/api/v1/log-templates?q={}", "a".repeat(201));
@@ -728,7 +839,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(*repo.last_since.lock().unwrap(), Some(900));
+        assert_eq!(
+            repo.last_window.lock().unwrap().map(|w| w.secs()),
+            Some(900)
+        );
         assert_eq!(json["edges"][0]["parent"], "frontend");
         assert_eq!(json["edges"][0]["error_rate"], 0.25);
         let node = &json["nodes"][0];

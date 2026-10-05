@@ -1,8 +1,10 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import serviceMap from '../../api/__fixtures__/service-map.json'
 import { clearOutage } from '../../app/apiStatus'
+import { customLabel, toLocalInput } from '../../app/range'
+import { formatUntil } from '../../app/search'
 import { renderApp, stubApi } from '../../test/renderApp'
 
 const TRACE = '334c8a31ddeaa3304a4e4e7f219bebbc'
@@ -119,6 +121,89 @@ describe('time range', () => {
     expect(within(group).getByRole('radio', { name: '1h' })).toHaveAttribute('data-state', 'on')
     await waitFor(() => expect(fetch).toHaveBeenCalled())
     expect(String(fetch.mock.calls[0]?.[0])).toBe('/api/v1/service-map?since=1h')
+  })
+
+  /** A custom range of two hours ending an hour ago, on whole minutes (as the fields hold them). */
+  const past = () => {
+    const end = Math.floor(Date.now() / 60_000) * 60_000 - 3_600_000
+    return { from: end - 7_200_000, to: end, until: formatUntil(end) }
+  }
+
+  it('applies a custom range from the popover: since and until in the URL and every request', async () => {
+    const user = userEvent.setup()
+    const fetch = stubApi({ '/service-map': { body: serviceMap } })
+    const { router } = renderApp('/map')
+    await user.click(await screen.findByRole('button', { name: 'Custom time range' }))
+    const form = await screen.findByRole('form', { name: 'Custom time range' })
+    const { from, to, until } = past()
+    fireEvent.change(within(form).getByLabelText('From'), { target: { value: toLocalInput(from) } })
+    fireEvent.change(within(form).getByLabelText('To'), { target: { value: toLocalInput(to) } })
+    await user.click(within(form).getByRole('button', { name: 'Apply' }))
+    await waitFor(() => expect(router.state.location.search).toEqual({ since: '2h', until }))
+    expect(screen.queryByRole('form')).toBeNull()
+    // The header shows the range; no preset is on.
+    const label = customLabel(from, to)
+    expect(screen.getByRole('button', { name: `Custom time range: ${label}` })).toHaveTextContent(label)
+    const group = screen.getByRole('radiogroup', { name: 'Time range' })
+    expect(within(group).queryByRole('radio', { checked: true })).toBeNull()
+    await waitFor(() => expect(fetch.mock.calls.map(([u]) => String(u))).toContain(`/api/v1/service-map?since=2h&until=${encodeURIComponent(until)}`))
+    // Section links carry the range too.
+    const nav = screen.getByRole('navigation', { name: 'Main' })
+    expect(within(nav).getByRole('link', { name: 'Traces' }).getAttribute('href')).toBe(`/traces?since=2h&until=${encodeURIComponent(until)}`)
+  })
+
+  it('refuses a custom range the API would reject, saying why', async () => {
+    const user = userEvent.setup()
+    const { router } = renderApp('/map')
+    await user.click(await screen.findByRole('button', { name: 'Custom time range' }))
+    const form = await screen.findByRole('form', { name: 'Custom time range' })
+    const { from, to } = past()
+    const set = (f: number, t: number) => {
+      fireEvent.change(within(form).getByLabelText('From'), { target: { value: toLocalInput(f) } })
+      fireEvent.change(within(form).getByLabelText('To'), { target: { value: toLocalInput(t) } })
+    }
+    const cases: [number, number, string][] = [
+      [to, from, 'The end must be after the start.'],
+      [from, Date.now() + 3_600_000, 'The end must not be in the future.'],
+      [from - 8 * 86_400_000, to, 'A range can be at most 7 days long.'],
+      [to - 7 * 86_400_000 - 3_600_000, to - 6 * 86_400_000, 'The start must be within the last 7 days (data retention).'],
+    ]
+    for (const [f, t, message] of cases) {
+      set(f, t)
+      await user.click(within(form).getByRole('button', { name: 'Apply' }))
+      expect(within(form).getByRole('alert')).toHaveTextContent(message)
+      expect(within(form).getByLabelText('From')).toHaveAttribute('aria-invalid', 'true')
+    }
+    // Editing clears the message; Cancel closes without touching the URL.
+    set(from, to)
+    expect(within(form).queryByRole('alert')).toBeNull()
+    await user.click(within(form).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('form')).toBeNull())
+    expect(router.state.location.search).toEqual({})
+  })
+
+  it('a preset clears a custom range', async () => {
+    const user = userEvent.setup()
+    const { router } = renderApp(`/map?since=2h&until=${past().until}`)
+    const group = await screen.findByRole('radiogroup', { name: 'Time range' })
+    await user.click(within(group).getByRole('radio', { name: '15m' }))
+    await waitFor(() => expect(router.state.location.search).toEqual({ since: '15m' }))
+    expect(router.state.location.search).not.toHaveProperty('until', expect.anything())
+    expect(screen.getByRole('button', { name: 'Custom time range' })).toHaveTextContent('Custom…')
+  })
+
+  it('turns Live off for a past range and explains why', async () => {
+    const user = userEvent.setup()
+    renderApp(`/map?since=2h&until=${past().until}`)
+    const live = await screen.findByRole('button', { name: 'Live' })
+    expect(live).toHaveAttribute('aria-pressed', 'false')
+    expect(live).toHaveAttribute('aria-disabled', 'true')
+    act(() => live.focus())
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Live is off for a past range')
+    await user.click(live)
+    expect(live).toHaveAttribute('aria-pressed', 'false')
+    // The stored choice is untouched: Live comes back with a preset.
+    expect(window.localStorage.getItem('tayga-live')).toBeNull()
   })
 
   it('passes since to the API', async () => {

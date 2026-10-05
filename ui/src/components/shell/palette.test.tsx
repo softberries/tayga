@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import search from '../../api/__fixtures__/search.json'
 import serviceMap from '../../api/__fixtures__/service-map.json'
 import { clearOutage } from '../../app/apiStatus'
+import { fromLocalInput } from '../../app/range'
+import { formatUntil } from '../../app/search'
 import { RECENT_KEY, readRecent } from '../../lib/recent'
 import { renderApp, stubApi } from '../../test/renderApp'
 
@@ -90,6 +92,29 @@ describe('command palette', () => {
     await user.keyboard('{Meta>}k{/Meta}')
     await user.click(await screen.findByRole('option', { name: 'Time range: 24h' }))
     await waitFor(() => expect(router.state.location.search).toEqual({ since: '24h' }))
+  })
+
+  it('the custom range action opens the header popover', async () => {
+    const user = userEvent.setup()
+    await openPalette('/map?since=24h')
+    await user.keyboard('{Meta>}k{/Meta}')
+    await user.type(await screen.findByRole('combobox'), 'custom')
+    await user.click(await screen.findByRole('option', { name: 'Time range: Custom range…' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Command palette' })).toBeNull())
+    const form = await screen.findByRole('form', { name: 'Custom time range' })
+    // It starts from the range on screen: the last 24h.
+    const from = fromLocalInput((within(form).getByLabelText('From') as HTMLInputElement).value)
+    const to = fromLocalInput((within(form).getByLabelText('To') as HTMLInputElement).value)
+    expect(to - from).toBe(86_400_000)
+  })
+
+  it('a preset action clears a custom range', async () => {
+    const user = userEvent.setup()
+    const until = formatUntil(Math.floor(Date.now() / 60_000) * 60_000 - 3_600_000)
+    const { router } = await openPalette(`/map?since=2h&until=${until}`)
+    await user.keyboard('{Meta>}k{/Meta}')
+    await user.click(await screen.findByRole('option', { name: 'Time range: 15m' }))
+    await waitFor(() => expect(router.state.location.search).toEqual({ since: '15m' }))
   })
 
   it('recent items persist and show on the next open', async () => {

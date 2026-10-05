@@ -666,8 +666,11 @@ async fn metric_samples_roundtrip_through_metric_buckets() {
         .await
         .unwrap();
 
+    // Windows ending just after now, `secs` long.
+    let end = now_ms / 1000 + 1;
+    let last = |secs: i64| (end - secs, end);
     let writer = store
-        .metric_buckets(Some("tayga-writer"), m, &[], 60, 1)
+        .metric_buckets(Some("tayga-writer"), m, &[], last(60), 1)
         .await
         .unwrap();
     assert_eq!(
@@ -688,17 +691,23 @@ async fn metric_samples_roundtrip_through_metric_buckets() {
         ]
     );
 
-    let all = store.metric_buckets(None, m, &[], 60, 1).await.unwrap();
+    let all = store
+        .metric_buckets(None, m, &[], last(60), 1)
+        .await
+        .unwrap();
     assert_eq!(all.len(), 3, "both jobs, old sample excluded: {all:?}");
     assert!(all.iter().any(|p| p.job == "other-job"));
 
     let wide = store
-        .metric_buckets(Some("tayga-writer"), m, &[], 7_200, 1)
+        .metric_buckets(Some("tayga-writer"), m, &[], last(7_200), 1)
         .await
         .unwrap();
     assert_eq!(wide.len(), 3);
 
-    let inf = store.metric_buckets(None, le, &[], 60, 1).await.unwrap();
+    let inf = store
+        .metric_buckets(None, le, &[], last(60), 1)
+        .await
+        .unwrap();
     assert_eq!(inf.len(), 1, "the infinite sample is dropped: {inf:?}");
     assert_eq!(inf[0].value, 4.0);
     assert_eq!(inf[0].labels, vec![("le".to_string(), "+Inf".to_string())]);
@@ -734,8 +743,12 @@ async fn metric_buckets_keep_the_last_value_per_series_and_step() {
         .await
         .unwrap();
 
+    // A 30 min window ending after now whose start is a whole number of steps before `b0`, so
+    // `b0` and `b1` are bucket starts (buckets are anchored to the window's start).
+    let end = b0 / 1000 + 6 * step;
+    let w30 = (end - 1800, end);
     let all = store
-        .metric_buckets(Some("tayga-writer"), m, &[], 1800, 60)
+        .metric_buckets(Some("tayga-writer"), m, &[], w30, 60)
         .await
         .unwrap();
     let pt = |ts_ms, labels: &[(&str, &str)], value| MetricPointRow {
@@ -763,7 +776,7 @@ async fn metric_buckets_keep_the_last_value_per_series_and_step() {
     );
 
     let filtered = store
-        .metric_buckets(None, m, &[("kind".into(), "spans".into())], 1800, 60)
+        .metric_buckets(None, m, &[("kind".into(), "spans".into())], w30, 60)
         .await
         .unwrap();
     assert_eq!(filtered.len(), 3, "both jobs, spans only: {filtered:?}");
@@ -771,20 +784,43 @@ async fn metric_buckets_keep_the_last_value_per_series_and_step() {
     // A label value with a quote is bound, not interpolated.
     assert!(
         store
-            .metric_buckets(None, m, &[("kind".into(), "' OR 1=1 --".into())], 1800, 60)
+            .metric_buckets(None, m, &[("kind".into(), "' OR 1=1 --".into())], w30, 60)
             .await
             .unwrap()
             .is_empty()
     );
+    let wide_start = end - 3 * 3600;
     let wide = store
-        .metric_buckets(Some("tayga-writer"), m, &[], 3 * 3600, 3600)
+        .metric_buckets(Some("tayga-writer"), m, &[], (wide_start, end), 3600)
         .await
         .unwrap();
     assert!(
         wide.iter().any(|p| p.value == 1.0),
         "the 2h-old sample is in a 3h window"
     );
-    assert!(wide.iter().all(|p| p.ts_ms % 3_600_000 == 0));
+    assert!(
+        wide.iter()
+            .all(|p| (p.ts_ms - wide_start * 1000) % 3_600_000 == 0),
+        "buckets start at the window's start"
+    );
+    // A window in the past: ends with bucket 0, so bucket 1 is outside it. Its start is not a
+    // multiple of the step, and the bucket starts follow it.
+    let past_end = b0 / 1000 + step;
+    let past = store
+        .metric_buckets(Some("tayga-writer"), m, &[], (past_end - 90, past_end), 60)
+        .await
+        .unwrap();
+    let mut got = past.clone();
+    got.sort_by(|a, b| (a.ts_ms, &a.labels).cmp(&(b.ts_ms, &b.labels)));
+    assert_eq!(
+        got,
+        vec![
+            pt(b0 - 30_000, &logs, 100.0),
+            pt(b0 - 30_000, &spans, 10.0),
+            pt(b0 + 30_000, &spans, 15.0),
+        ],
+        "only samples up to the window's end, bucketed from its start"
+    );
 
     drop_db(&s, &store).await;
 }

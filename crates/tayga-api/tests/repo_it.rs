@@ -3,7 +3,7 @@
 //! the database. Runs on the empty `make it` ClickHouse and against the live stack alike.
 
 use tayga_api::params::{
-    AlertFilter, GroupFilter, SeriesKind, SeriesQuery, TemplateFilter, TraceFilter,
+    AlertFilter, GroupFilter, SeriesKind, SeriesQuery, TemplateFilter, TraceFilter, Window,
 };
 use tayga_api::repo::{ChRepo, Repo};
 use tayga_store::ClickHouseSettings;
@@ -27,7 +27,24 @@ fn hex32() -> String {
     format!("{:032x}", rand::random::<u128>())
 }
 
-/// Rows must be recent: the tables carry TTLs and every read filters on a `since` window.
+/// The window of the last `secs` seconds, ending just after now (as a request without `until`).
+fn last(secs: i64) -> Window {
+    let end = now_ns() / 1_000_000_000 + 1;
+    Window {
+        start: end - secs,
+        end,
+    }
+}
+
+/// Whether every bucket start lies on the window's grid: `step` apart, starting at its start.
+fn on_grid(w: Window, step: u32, buckets: impl IntoIterator<Item = u32>) -> bool {
+    buckets.into_iter().all(|b| {
+        let off = i64::from(b) - w.start;
+        off >= 0 && off % i64::from(step) == 0 && i64::from(b) < w.end
+    })
+}
+
+/// Rows must be recent: the tables carry TTLs and every read filters on a window.
 fn now_ns() -> i64 {
     let d = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -149,9 +166,10 @@ async fn reads_seeded_groups_story_trace_and_map() {
         .unwrap();
 
     let r = ChRepo::new(&s);
+    let week = last(7 * 86_400);
     let groups = r
         .story_groups(&GroupFilter {
-            since_secs: 7 * 86_400,
+            window: week,
             kind: None,
             service: None,
         })
@@ -164,11 +182,11 @@ async fn reads_seeded_groups_story_trace_and_map() {
     assert_eq!(g.group.sample_story_id, story_ids[0]);
     assert_eq!(g.bucket_secs, 5040);
     assert_eq!(g.buckets.iter().map(|b| b.1).sum::<u64>(), 2);
-    assert!(g.buckets.iter().all(|b| b.0 % 5040 == 0));
+    assert!(on_grid(week, 5040, g.buckets.iter().map(|b| b.0)));
 
     let filtered = r
         .story_groups(&GroupFilter {
-            since_secs: 3600,
+            window: last(3600),
             kind: Some("slow".into()),
             service: None,
         })
@@ -177,12 +195,12 @@ async fn reads_seeded_groups_story_trace_and_map() {
     assert!(filtered.is_empty(), "kind filter applies");
 
     let detail = r
-        .story_group(&g.group.fingerprint, 3600)
+        .story_group(&g.group.fingerprint, last(3600))
         .await
         .unwrap()
         .expect("group exists");
     assert_eq!(detail.examples.len(), 2);
-    assert!(r.story_group("1", 3600).await.unwrap().is_none());
+    assert!(r.story_group("1", last(3600)).await.unwrap().is_none());
 
     let story = r.story(&story_ids[0]).await.unwrap().expect("story exists");
     assert_eq!(story.fingerprint, g.group.fingerprint);
@@ -194,7 +212,7 @@ async fn reads_seeded_groups_story_trace_and_map() {
     assert_eq!(trace.logs.len(), 1);
     assert_eq!(trace.logs[0].log_id, log_id.to_string());
 
-    let edges = r.service_map(3600).await.unwrap();
+    let edges = r.service_map(last(3600)).await.unwrap();
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0].calls, 3);
 
@@ -342,8 +360,8 @@ async fn reads_seeded_log_templates_alerts_and_trace_links() {
         .unwrap();
 
     let r = ChRepo::new(&s);
-    let af = |since_secs, kind: Option<&str>, service: Option<&str>| AlertFilter {
-        since_secs,
+    let af = |secs, kind: Option<&str>, service: Option<&str>| AlertFilter {
+        window: last(secs),
         kind: kind.map(Into::into),
         service: service.map(Into::into),
     };
@@ -387,12 +405,21 @@ async fn reads_seeded_log_templates_alerts_and_trace_links() {
     );
 
     // Templates: window count is distinct logs; service and q filter; alerting is the 10 min rule.
-    let tf = |since_secs, service: Option<&str>, q: Option<&str>| TemplateFilter {
-        since_secs,
+    let tf = |secs, service: Option<&str>, q: Option<&str>| TemplateFilter {
+        window: last(secs),
         service: service.map(Into::into),
         q: q.map(Into::into),
     };
-    let ts = r.log_templates(&tf(3600, None, None)).await.unwrap();
+    // One window for the list and the detail, so their buckets are comparable.
+    let hour = last(3600);
+    let ts = r
+        .log_templates(&TemplateFilter {
+            window: hour,
+            service: None,
+            q: None,
+        })
+        .await
+        .unwrap();
     assert_eq!(ts.len(), 2);
     assert_eq!(ts[0].template.template_id, tmpl_a.to_string());
     assert_eq!(ts[0].template.template, "Payment request failed <*>");
@@ -409,10 +436,10 @@ async fn reads_seeded_log_templates_alerts_and_trace_links() {
     for t in &ts {
         assert_eq!(t.buckets.iter().map(|b| b.1).sum::<u64>(), t.template.count);
         assert!(t.buckets.windows(2).all(|w| w[0].0 < w[1].0));
-        assert!(t.buckets.iter().all(|b| b.0 % 60 == 0));
+        assert!(on_grid(hour, 60, t.buckets.iter().map(|b| b.0)));
     }
     let detail_a = r
-        .log_template(&tmpl_a.to_string(), 3600)
+        .log_template(&tmpl_a.to_string(), hour)
         .await
         .unwrap()
         .unwrap();
@@ -450,8 +477,9 @@ async fn reads_seeded_log_templates_alerts_and_trace_links() {
     );
 
     // Detail.
+    let day = last(86_400);
     let d = r
-        .log_template(&tmpl_a.to_string(), 86_400)
+        .log_template(&tmpl_a.to_string(), day)
         .await
         .unwrap()
         .expect("exists");
@@ -461,8 +489,12 @@ async fn reads_seeded_log_templates_alerts_and_trace_links() {
     assert!(d.template.alerting);
     assert_eq!(d.bucket_secs, 720);
     assert_eq!(d.buckets.iter().map(|b| b.1).sum::<u64>(), 2);
-    assert!(d.buckets.iter().all(|b| b.0 % 720 == 0));
-    assert_eq!(d.recent.len(), 3, "recent ignores the window, one per log");
+    assert!(on_grid(day, 720, d.buckets.iter().map(|b| b.0)));
+    assert_eq!(
+        d.recent.len(),
+        3,
+        "recent ignores the window's start, one per log"
+    );
     assert!(d.recent.windows(2).all(|w| w[0].ts_ns >= w[1].ts_ns));
     assert_eq!(d.recent[0].trace_id, trace_plain);
     assert!(
@@ -473,7 +505,7 @@ async fn reads_seeded_log_templates_alerts_and_trace_links() {
     );
     assert_eq!(d.alerts.len(), 2);
     assert_eq!(d.alerts[0].alert_id, ids[0]);
-    assert!(r.log_template("1", 3600).await.unwrap().is_none());
+    assert!(r.log_template("1", last(3600)).await.unwrap().is_none());
 
     // Trace links: the story trace sits inside the spike (and the ended `new` alert's lead time).
     let t = r.trace_log_templates(&trace_story).await.unwrap();
@@ -690,7 +722,8 @@ async fn reads_seeded_overview_traces_services_and_search() {
     let r = ChRepo::new(&s);
 
     // Overview.
-    let o = r.overview(3600).await.unwrap();
+    let hour = last(3600);
+    let o = r.overview(hour).await.unwrap();
     assert_eq!(o.bucket_secs, 60);
     assert_eq!(
         (o.error_stories, o.slow_stories, o.active_alerts),
@@ -703,11 +736,12 @@ async fn reads_seeded_overview_traces_services_and_search() {
         "{spans_sum} vs {spans_in_hour}"
     );
     assert!((o.spans_per_sec - spans_in_hour as f64 / 3600.0).abs() < 1e-9);
-    assert!(o.stories.error.iter().all(|b| b.0 % 60 == 0));
+    assert!(on_grid(hour, 60, o.stories.error.iter().map(|b| b.0)));
+    assert!(on_grid(hour, 60, o.spans.iter().map(|b| b.0)));
 
     // Stories series with kind and service filters.
     let gf = |kind: Option<&str>, service: Option<&str>| GroupFilter {
-        since_secs: 3600,
+        window: last(3600),
         kind: kind.map(Into::into),
         service: service.map(Into::into),
     };
@@ -720,7 +754,7 @@ async fn reads_seeded_overview_traces_services_and_search() {
 
     // Trace search.
     let tf = TraceFilter {
-        since_secs: 3600,
+        window: last(3600),
         service: None,
         touched: false,
         endpoint: None,
@@ -791,7 +825,7 @@ async fn reads_seeded_overview_traces_services_and_search() {
     );
     assert_eq!(
         r.traces_search(&TraceFilter {
-            since_secs: 3 * 3600,
+            window: last(3 * 3600),
             ..tf.clone()
         })
         .await
@@ -887,7 +921,11 @@ async fn reads_seeded_overview_traces_services_and_search() {
             "errsvc", "frontend", "loadgen", "oksvc", "payment", "slowsvc"
         ]
     );
-    let err = r.service("errsvc", 3600).await.unwrap().expect("exists");
+    let err = r
+        .service("errsvc", last(3600))
+        .await
+        .unwrap()
+        .expect("exists");
     assert_eq!((err.calls, err.errors, err.bucket_secs), (10, 1, 60));
     assert_eq!(
         err.buckets
@@ -901,19 +939,24 @@ async fn reads_seeded_overview_traces_services_and_search() {
             .iter()
             .all(|b| b.p99_ns > 0.0 && b.p50_ns <= b.p99_ns)
     );
-    let ok = r.service("oksvc", 3600).await.unwrap().unwrap();
+    let ok = r.service("oksvc", last(3600)).await.unwrap().unwrap();
     assert_eq!(ok.calls, 5, "consumer spans count");
     let lg = r
-        .service("loadgen", 3600)
+        .service("loadgen", last(3600))
         .await
         .unwrap()
         .expect("client-only still exists");
     assert!(lg.buckets.is_empty() && lg.calls == 0);
-    assert!(r.service("nosuch", 3600).await.unwrap().is_none());
-    assert!(r.service("' OR 1=1 --", 3600).await.unwrap().is_none());
+    assert!(r.service("nosuch", last(3600)).await.unwrap().is_none());
+    assert!(
+        r.service("' OR 1=1 --", last(3600))
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // Service map nodes and health.
-    let g = r.service_graph(3600).await.unwrap();
+    let g = r.service_graph(last(3600)).await.unwrap();
     let node = |name: &str| g.nodes.iter().find(|n| n.service == name).cloned();
     assert_eq!(node("errsvc").unwrap().health, "error");
     let slow = node("slowsvc").unwrap();
@@ -941,20 +984,331 @@ async fn reads_seeded_overview_traces_services_and_search() {
 
     // Pipeline series points: the last value per series and step.
     let pts = r
-        .metric_buckets(
-            &SeriesQuery {
-                since_secs: 3600,
-                metric: "tayga_logminer_data_lag_seconds".into(),
-                job: Some("tayga-logminer".into()),
-                kind: SeriesKind::Gauge,
-                labels: vec![],
-            },
-            3600,
-        )
+        .metric_buckets(&SeriesQuery {
+            window: last(3600),
+            metric: "tayga_logminer_data_lag_seconds".into(),
+            job: Some("tayga-logminer".into()),
+            kind: SeriesKind::Gauge,
+            labels: vec![],
+        })
         .await
         .unwrap();
     assert!(!pts.is_empty() && pts.len() <= 2, "{pts:?}");
     assert_eq!(pts.last().unwrap().value, 1.5);
+
+    Store::new(&s)
+        .client()
+        .query(&format!("DROP DATABASE `{}`", s.database))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// A window in the past (`until` set) returns only the rows inside it: every windowed read is
+/// seeded with one row before the window, rows inside it and one after it.
+#[tokio::test]
+#[ignore = "requires ClickHouse: make it, or TAYGA_IT_CLICKHOUSE against the live stack"]
+async fn a_past_window_returns_only_the_rows_inside_it() {
+    let s = settings();
+    migrate(&s).await.unwrap();
+    let store = Store::new(&s);
+    let sec = 1_000_000_000_i64;
+    let now_s = now_ns() / sec;
+    // Two hours ending six hours ago, starting 7 s past a minute so the grid is not the epoch's.
+    let end = (now_s - 6 * 3600) / 60 * 60 + 7;
+    let w = Window {
+        start: end - 7200,
+        end,
+    };
+    let (before, inside, late, after) = (
+        (w.start - 600) * sec,
+        (w.start + 1800) * sec,
+        (w.end - 30) * sec,
+        (w.end + 600) * sec,
+    );
+    let times = [before, inside, late, after];
+
+    // Spans of one service, one trace summary and one error story per moment.
+    let ids: Vec<String> = times.iter().map(|_| hex32()).collect();
+    let spans: Vec<SpanRow> = times
+        .iter()
+        .zip(&ids)
+        .map(|(t, id)| {
+            let mut sp = rspan("pastsvc", 2, *t, 5, *t == late);
+            sp.trace_id = id.clone();
+            sp
+        })
+        .collect();
+    store.insert_rows("spans", &spans).await.unwrap();
+    let summaries: Vec<TraceSummaryRow> = times
+        .iter()
+        .zip(&ids)
+        .map(|(t, id)| summary(id, *t, "pastsvc", "GET /past", 5, *t == late))
+        .collect();
+    store
+        .insert_rows("trace_summaries", &summaries)
+        .await
+        .unwrap();
+    let fingerprint: u64 = rand::random();
+    let stories: Vec<StoryRow> = times
+        .iter()
+        .zip(&ids)
+        .map(|(t, id)| {
+            let mut st = story_row(id, 1, *t, "pastsvc", "pastsvc Charge failed: boom");
+            st.fingerprint = fingerprint;
+            st
+        })
+        .collect();
+    store.insert_rows("error_stories", &stories).await.unwrap();
+    let edges: Vec<ServiceEdgeRow> = times
+        .iter()
+        .enumerate()
+        .map(|(i, t)| ServiceEdgeRow {
+            minute: u32::try_from(t / sec / 60 * 60).unwrap(),
+            parent_service: "frontend".into(),
+            child_service: "pastsvc".into(),
+            calls: 10_u64.pow(u32::try_from(i).unwrap()),
+            errors: 0,
+            duration_ns_sum: 1,
+        })
+        .collect();
+    store.insert_rows("service_edges", &edges).await.unwrap();
+
+    // A template with one hit per moment, and alerts around the window.
+    let tmpl: u64 = rand::random();
+    store
+        .upsert_templates(&[LogTemplateRow {
+            template_id: tmpl,
+            service: "pastsvc".into(),
+            template: "Past failed <*>".into(),
+            first_seen: before,
+            last_seen: after,
+            count: 4,
+            max_severity: 17,
+            sample: "Past failed 1".into(),
+            version: 1,
+        }])
+        .await
+        .unwrap();
+    let hits: Vec<LogHitRow> = times
+        .iter()
+        .zip(&ids)
+        .enumerate()
+        .map(|(i, (t, id))| LogHitRow {
+            log_id: u64::from(rand::random::<u32>()) * 8 + i as u64,
+            template_id: tmpl,
+            service: "pastsvc".into(),
+            ts: *t,
+            severity_number: 17,
+            trace_id: id.clone(),
+            span_id: "0000000000000002".into(),
+        })
+        .collect();
+    store.insert_log_hits(&hits).await.unwrap();
+    let alert = |started_at: i64, last_at: i64| LogAlertRow {
+        alert_id: hex32(),
+        kind: 2,
+        template_id: tmpl,
+        service: "pastsvc".into(),
+        template: "Past failed <*>".into(),
+        started_at,
+        last_at,
+        window_count: 1,
+        peak_count: 1,
+        baseline_per_window: 0.0,
+        example_trace_ids: vec![],
+        version: 1,
+    };
+    let (ended_before, overlapping, firing_at_end, started_after) = (
+        alert(before - 60 * sec, before),
+        alert(before, inside),
+        alert(late - 60 * sec, after),
+        alert(after, after + 60 * sec),
+    );
+    let alert_ids = |a: &[&LogAlertRow]| -> Vec<String> {
+        let mut ids: Vec<String> = a.iter().map(|a| a.alert_id.clone()).collect();
+        ids.sort();
+        ids
+    };
+    let in_window = alert_ids(&[&overlapping, &firing_at_end]);
+    let firing = firing_at_end.alert_id.clone();
+    store
+        .insert_alerts(&[ended_before, overlapping, firing_at_end, started_after])
+        .await
+        .unwrap();
+    let sample = |t: i64, value: f64| MetricSampleRow {
+        ts: t / 1_000_000,
+        job: "tayga-logminer".into(),
+        metric: "tayga_logminer_data_lag_seconds".into(),
+        labels: vec![],
+        value,
+    };
+    store
+        .insert_metric_samples(&[
+            sample(before, 1.0),
+            sample(inside, 2.0),
+            sample(late, 3.0),
+            sample(after, 4.0),
+        ])
+        .await
+        .unwrap();
+
+    let r = ChRepo::new(&s);
+    let step = w.step();
+    assert_eq!(step, 60);
+    let gf = GroupFilter {
+        window: w,
+        kind: None,
+        service: None,
+    };
+
+    // Story groups and their detail: two stories, bucketed from the window's start.
+    let groups = r.story_groups(&gf).await.unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].group.stories, 2);
+    assert_eq!(groups[0].group.first_seen_ns, inside);
+    assert_eq!(groups[0].group.last_seen_ns, late);
+    let starts = |b: &[(u32, u64)]| b.iter().map(|b| i64::from(b.0)).collect::<Vec<_>>();
+    assert_eq!(
+        starts(&groups[0].buckets),
+        [w.start + 1800, w.end - 60],
+        "buckets start at the window's start, not on the minute"
+    );
+    let detail = r
+        .story_group(&fingerprint.to_string(), w)
+        .await
+        .unwrap()
+        .expect("in the window");
+    assert_eq!(detail.group.group.stories, 2);
+    let series = r.stories_series(&gf).await.unwrap();
+    assert_eq!(series.error.iter().map(|b| b.1).sum::<u64>(), 2);
+    assert!(on_grid(w, step, series.error.iter().map(|b| b.0)));
+    // A window that ends before any of it is empty.
+    let earlier = Window {
+        start: w.start - 7200,
+        end: w.start - 700,
+    };
+    assert!(
+        r.story_groups(&GroupFilter {
+            window: earlier,
+            ..gf.clone()
+        })
+        .await
+        .unwrap()
+        .is_empty()
+    );
+
+    // Overview: stories, spans and the lag as of the window's end.
+    let o = r.overview(w).await.unwrap();
+    assert_eq!((o.error_stories, o.slow_stories), (2, 0));
+    assert_eq!(o.active_alerts, 1, "only the alert firing at the end");
+    assert_eq!(o.data_lag_secs, Some(3.0), "the last sample before the end");
+    let spans_sum: f64 = o.spans.iter().map(|b| b.1 * f64::from(step)).sum();
+    assert!((spans_sum - 2.0).abs() < 1e-6, "{spans_sum}");
+    assert!((o.spans_per_sec - 2.0 / 7200.0).abs() < 1e-12);
+    assert!(on_grid(w, step, o.spans.iter().map(|b| b.0)));
+
+    // Trace search, by endpoint service and by touched service.
+    let tf = TraceFilter {
+        window: w,
+        service: Some("pastsvc".into()),
+        touched: false,
+        endpoint: None,
+        min_ns: 0,
+        max_ns: u64::MAX,
+        errors_only: false,
+        limit: 500,
+    };
+    for touched in [false, true] {
+        let hits = r
+            .traces_search(&TraceFilter {
+                touched,
+                ..tf.clone()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.trace_id.as_str()).collect::<Vec<_>>(),
+            [ids[2].as_str(), ids[1].as_str()],
+            "touched={touched}: newest first, only inside the window"
+        );
+    }
+
+    // Service RED and the map.
+    let svc = r.service("pastsvc", w).await.unwrap().expect("has spans");
+    assert_eq!((svc.calls, svc.errors), (2, 1));
+    assert!(on_grid(w, step, svc.buckets.iter().map(|b| b.bucket)));
+    assert!(r.service("pastsvc", earlier).await.unwrap().is_none());
+    let g = r.service_graph(w).await.unwrap();
+    let node = g.nodes.iter().find(|n| n.service == "pastsvc").unwrap();
+    assert_eq!((node.calls, node.error_ratio), (2, 0.5));
+    assert_eq!(g.edges.len(), 1);
+    assert_eq!(g.edges[0].calls, 110, "the two minutes inside the window");
+
+    // Log alerts overlap the window; `active` is as of its end.
+    let alerts = r
+        .log_alerts(&AlertFilter {
+            window: w,
+            kind: None,
+            service: Some("pastsvc".into()),
+        })
+        .await
+        .unwrap();
+    let mut got: Vec<String> = alerts.iter().map(|a| a.alert_id.clone()).collect();
+    got.sort();
+    assert_eq!(got, in_window);
+    for a in &alerts {
+        assert_eq!(a.active, a.alert_id == firing, "{a:?}");
+    }
+
+    // Templates: the window's hits, on its grid, in the list and the detail.
+    let ts = r
+        .log_templates(&TemplateFilter {
+            window: w,
+            service: Some("pastsvc".into()),
+            q: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(ts.len(), 1);
+    assert_eq!(ts[0].template.count, 2);
+    assert!(ts[0].template.alerting, "an alert was firing at the end");
+    assert_eq!(starts(&ts[0].buckets), [w.start + 1800, w.end - 60]);
+    let d = r.log_template(&tmpl.to_string(), w).await.unwrap().unwrap();
+    assert_eq!(d.template.count, 2);
+    assert_eq!(d.buckets, ts[0].buckets);
+    assert_eq!(
+        d.recent.iter().map(|h| h.ts_ns).collect::<Vec<_>>(),
+        [late, inside, before],
+        "recent hits up to the window's end"
+    );
+    assert_eq!(d.alerts.len(), 3, "every alert started by the window's end");
+    assert!(
+        r.log_templates(&TemplateFilter {
+            window: earlier,
+            service: Some("pastsvc".into()),
+            q: None,
+        })
+        .await
+        .unwrap()
+        .is_empty()
+    );
+
+    // Pipeline series: the samples inside, bucketed from the window's start.
+    let pts = r
+        .metric_buckets(&SeriesQuery {
+            window: w,
+            metric: "tayga_logminer_data_lag_seconds".into(),
+            job: None,
+            kind: SeriesKind::Gauge,
+            labels: vec![],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        pts.iter().map(|p| (p.ts_ms, p.value)).collect::<Vec<_>>(),
+        [((w.start + 1800) * 1000, 2.0), ((w.end - 60) * 1000, 3.0)]
+    );
 
     Store::new(&s)
         .client()

@@ -76,9 +76,10 @@ The app is a single-page React app in `ui/`, built into `ui/dist` and embedded i
 
 Header and shortcuts:
 
-- Time range: 15m, 1h, 24h or 7d (default 1h). A live toggle refreshes every 10 s and pauses while the browser tab is hidden.
+- Time range: 15m, 1h, 24h or 7d (default 1h), each ending now, or "Custom…": a past window picked with "from" and "to" fields in local time, up to 7 days long and starting within the last 7 days. The custom range is kept in the URL as `since` and `until` (UTC) and shows in the header as, for example, "Oct 4 12:00 – 14:00"; links between pages keep it, and choosing a preset clears it.
+- Live: refreshes every 10 s and pauses while the browser tab is hidden. It is off, and cannot be turned on, while a custom range is set.
 - Theme: a switch that cycles light, dark and system (the default). The choice is stored in the browser.
-- `Cmd+K` or `Ctrl+K` opens the command palette: jump to a page, a service, a trace id (32 hex characters), a story group or a template, or switch the theme and the time range.
+- `Cmd+K` or `Ctrl+K` opens the command palette: jump to a page, a service, a trace id (32 hex characters), a story group or a template, or switch the theme and the time range (including "Custom range…", which opens the custom range fields).
 - `g` then `s`, `t`, `m`, `l` or `p` goes to Stories, Traces, Service map, Log alerts or Pipeline. `?` lists the shortcuts. They are ignored while you type in a field or a dialog is open.
 - "Open in Jaeger" (span drawer, trace page) links to the demo's Jaeger (`TAYGA__JAEGER_URL`, set in `deploy/compose.tayga.yaml`). "Open in Grafana" on the map appears only when `TAYGA__GRAFANA_URL` is set, which `make up-extras` does. Both are empty when unset.
 
@@ -168,28 +169,28 @@ Tayga's own published ports (8090, 3001, 19090, 19092, 18123, 14318) are bound t
 
 ## HTTP routes (tayga-api, port 8090)
 
-`since` takes `<n>[smhd]`, from `1s` to `7d` on the API routes; the app's time range offers 15m, 1h, 24h and 7d. Invalid values return 400. Fingerprints are decimal u64 strings; story and trace ids are 32 hex characters.
+`since` takes `<n>[smhd]`, from `1s` to `7d` on the API routes; the app's time range offers 15m, 1h, 24h and 7d, plus a custom range. Every route that takes `since` also takes an optional `until`: RFC 3339 (`2026-10-04T12:00:00Z`, any offset) or unix seconds, default now. The window is then `[until - since, until]`. `until` may be at most 60 s in the future, and the window must start within the last 7 days, the longest TTL of the tables these routes read (`error_stories`, `service_edges`, `log_alerts` and `metric_samples`; `spans`, `logs` and `log_template_hits` keep 3 days and `trace_summaries` 2 days, so older windows there are simply empty). Bucketed series start their buckets at the window's start. Alert `active` flags, template `alerting` and the overview's active alerts and data lag are as of the window's end. `pipeline/lag` is live only and ignores `until`. Invalid values return 400. Fingerprints are decimal u64 strings; story and trace ids are 32 hex characters.
 
 JSON API:
 
 | Route | Query | Returns |
 |---|---|---|
-| `GET /api/v1/story-groups` | `since` (default `1h`), `kind` (`error` or `slow`), `service` | Top 100 story groups, each with `buckets` (`[bucket_start_unix_s, stories]`, about 120 per window) and `bucket_secs` |
-| `GET /api/v1/story-groups/{fingerprint}` | `since` (default `24h`) | One group with example stories; 404 if absent |
+| `GET /api/v1/story-groups` | `since` (default `1h`), `until`, `kind` (`error` or `slow`), `service` | Top 100 story groups, each with `buckets` (`[bucket_start_unix_s, stories]`, about 120 per window) and `bucket_secs` |
+| `GET /api/v1/story-groups/{fingerprint}` | `since` (default `24h`), `until` | One group with example stories; 404 if absent |
 | `GET /api/v1/stories/{story_id}` | none | Full story; 404 if absent |
 | `GET /api/v1/traces/{trace_id}` | none | Spans and logs from the raw tables; 404 if neither exists |
-| `GET /api/v1/service-map` | `since` (default `1h`) | `{edges, nodes}`: `edges` are service-to-service calls (`parent`, `child`, `calls`, `errors`, `error_rate`, `avg_duration_ns`); `nodes` are per-service RED summaries (`service`, `calls`, `rate`, `error_ratio`, `p99_ns`, `baseline_p99_ns`, `health`: `ok`, `slow` or `error`). Before plan 5 the body was a plain array of edges |
-| `GET /api/v1/log-alerts` | `since` (default `24h`), `kind` (`new` or `spike`), `service` | Up to 200 alerts, newest `last_at` first; each has `active` and `example_traces` (`[{trace_id, story_id \| null}]`) |
-| `GET /api/v1/log-templates` | `since` (default `1h`), `service`, `q` (substring, at most 200 chars) | Top 200 templates with hits in the window, by count; each has `alerting`, plus `bucket_secs` (the window / 120, rounded up to whole minutes) and `buckets` (`[bucket_start_unix_s, hits]`, oldest first; buckets without hits are left out) |
-| `GET /api/v1/log-templates/{id}` | `since` (default `24h`) | One template with `buckets`, the 20 most recent hits and its alerts |
+| `GET /api/v1/service-map` | `since` (default `1h`), `until` | `{edges, nodes}`: `edges` are service-to-service calls (`parent`, `child`, `calls`, `errors`, `error_rate`, `avg_duration_ns`); `nodes` are per-service RED summaries (`service`, `calls`, `rate`, `error_ratio`, `p99_ns`, `baseline_p99_ns`, `health`: `ok`, `slow` or `error`). Before plan 5 the body was a plain array of edges |
+| `GET /api/v1/log-alerts` | `since` (default `24h`), `until`, `kind` (`new` or `spike`), `service` | Up to 200 alerts that overlap the window (seen after its start, started by its end), newest `last_at` first; each has `active` and `example_traces` (`[{trace_id, story_id \| null}]`) |
+| `GET /api/v1/log-templates` | `since` (default `1h`), `until`, `service`, `q` (substring, at most 200 chars) | Top 200 templates with hits in the window, by count; each has `alerting`, plus `bucket_secs` (the window / 120, rounded up to whole minutes) and `buckets` (`[bucket_start_unix_s, hits]`, oldest first; buckets without hits are left out) |
+| `GET /api/v1/log-templates/{id}` | `since` (default `24h`), `until` | One template with `buckets`, the 20 most recent hits up to the window's end and its alerts of the 7 days before that end |
 | `GET /api/v1/traces/{trace_id}/log-templates` | none | `[{log_id, template_id, template, alert}]` for the trace's logs |
-| `GET /api/v1/overview` | `since` | KPI values and bucket series for the Stories page |
-| `GET /api/v1/stories/series` | `since`, `kind`, `service` | Stories per bucket, for charts |
-| `GET /api/v1/traces/search` | `since`, `service`, `touched` (0 or 1), `endpoint`, `min_ms`, `max_ms`, `errors` (0 or 1), `limit` (1 to 500, default 100) | Trace rows for the explorer, newest first, each with `story_id` and `story_kind` when a story exists |
+| `GET /api/v1/overview` | `since`, `until` | KPI values and bucket series for the Stories page |
+| `GET /api/v1/stories/series` | `since`, `until`, `kind`, `service` | Stories per bucket, for charts |
+| `GET /api/v1/traces/search` | `since`, `until`, `service`, `touched` (0 or 1), `endpoint`, `min_ms`, `max_ms`, `errors` (0 or 1), `limit` (1 to 500, default 100) | Trace rows for the explorer, newest first, each with `story_id` and `story_kind` when a story exists |
 | `GET /api/v1/services` | none | Service names |
-| `GET /api/v1/services/{name}` | `since` | RED series (rate, error ratio, p50/p95/p99) for one service |
+| `GET /api/v1/services/{name}` | `since`, `until` | RED series (rate, error ratio, p50/p95/p99) for one service |
 | `GET /api/v1/search` | `q` | Command palette: matching services, templates and story groups; a trace id when `q` is 32 hex characters |
-| `GET /api/v1/pipeline/series` | `metric`, `kind` (required), `job`, `labels` (`k=v`), `since` | A rate, gauge or quantile series from the recorded metrics |
+| `GET /api/v1/pipeline/series` | `metric`, `kind` (required), `job`, `labels` (`k=v`), `since`, `until` | A rate, gauge or quantile series from the recorded metrics |
 | `GET /api/v1/pipeline/lag` | none | Consumer lag per group (committed, end offset, lag) |
 | `GET /api/v1/config` | none | `{jaeger_url, grafana_url}` (null when unset) |
 | `GET /healthz` | none | `ok` |
@@ -201,12 +202,12 @@ App routes (client-side; every path below serves `index.html`, and the app rende
 
 | Route | Query | Page |
 |---|---|---|
-| `/` | `since`, `kind`, `service`, `group` | Stories |
-| `/stories/{story_id}` | `since` | Story |
-| `/traces`, `/traces/{trace_id}` | `since`, filters | Trace explorer, trace |
-| `/map` | `since` | Service map |
-| `/logs/alerts`, `/logs/templates`, `/logs/templates/{id}` | `since`, filters | Logs |
-| `/pipeline` | `since` | Pipeline health |
+| `/` | `since`, `until`, `kind`, `service`, `group` | Stories |
+| `/stories/{story_id}` | `since`, `until` | Story |
+| `/traces`, `/traces/{trace_id}` | `since`, `until`, filters | Trace explorer, trace |
+| `/map` | `since`, `until` | Service map |
+| `/logs/alerts`, `/logs/templates`, `/logs/templates/{id}` | `since`, `until`, filters | Logs |
+| `/pipeline` | `since`, `until` | Pipeline health |
 
 Redirects from the removed server-rendered pages (HTTP 308, query string kept):
 

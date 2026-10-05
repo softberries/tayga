@@ -6,9 +6,9 @@ import { useCallback, useMemo } from 'react'
 import { isApiError } from '../../api/client'
 import { api } from '../../api/queries'
 import type { StoryView, TraceView } from '../../api/types'
-import { sinceSearch } from '../../app/search'
+import { rangeSearch } from '../../app/range'
 import type { TraceSearch } from '../../app/search'
-import { useSince } from '../../components/shell/TimeRange'
+import { useRange } from '../../app/useRange'
 import { computeCriticalPath } from '../../components/trace/layout'
 import { TraceDetail } from '../../components/trace/TraceDetail'
 import { JaegerLink, NotFoundCard } from '../../components/trace/TraceLinks'
@@ -61,7 +61,7 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: 'er
 }
 
 function StoryBanner({ storyId, story }: { storyId: string; story: StoryView | undefined }) {
-  const since = useSince()
+  const range = useRange()
   return (
     <Card
       variant="inner"
@@ -80,7 +80,7 @@ function StoryBanner({ storyId, story }: { storyId: string; story: StoryView | u
         {story ? story.summary : 'Tayga built a story for this trace.'}
       </span>
       <Button asChild size="sm" variant="primary">
-        <Link to="/stories/$storyId" params={{ storyId }} search={sinceSearch(since)}>
+        <Link to="/stories/$storyId" params={{ storyId }} search={rangeSearch(range)}>
           Open story <ArrowRight aria-hidden size={14} />
         </Link>
       </Button>

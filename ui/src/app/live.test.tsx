@@ -29,6 +29,12 @@ describe('live mode', () => {
     expect(result.current).toBe(LIVE_INTERVAL_MS)
   })
 
+  it('stays off for a past range whatever the choice', () => {
+    const { result } = renderHook(() => ({ interval: useLiveInterval(true), live: useLive() }), { wrapper })
+    expect(result.current.live.live).toBe(true)
+    expect(result.current.interval).toBe(false)
+  })
+
   it('restores off from storage', () => {
     window.localStorage.setItem('tayga-live', 'off')
     const { result } = renderHook(() => useLiveInterval(), { wrapper })

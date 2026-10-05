@@ -53,9 +53,13 @@ export function useDocumentVisible(): boolean {
   )
 }
 
-/** `refetchInterval` for live queries: 10 s while live and the tab is visible, else off. */
-export function useLiveInterval(): number | false {
+/**
+ * `refetchInterval` for live queries: 10 s while live and the tab is visible, else off. `past`
+ * (a custom range with a fixed end) turns it off whatever the Live choice; pages read it
+ * through `useAutoRefresh`.
+ */
+export function useLiveInterval(past = false): number | false {
   const { live } = useLive()
   const visible = useDocumentVisible()
-  return live && visible ? LIVE_INTERVAL_MS : false
+  return live && visible && !past ? LIVE_INTERVAL_MS : false
 }

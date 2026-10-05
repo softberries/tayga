@@ -1,3 +1,4 @@
+import { presetRange } from '../../app/range'
 /**
  * Logs section against captured fixtures: the alerts timeline and table, the template list
  * with its debounced search, the template page, and the empty, error and loading states.
@@ -67,7 +68,7 @@ describe('model', () => {
     const now = Date.UTC(2026, 9, 4, 12, 30)
     const at = (min: number) => (now - min * 60_000) * 1e6
     const a = (kind: 'new' | 'spike', min: number) => ({ kind, started_at_ns: at(min) }) as LogAlertView
-    const bars = timeline([a('new', 5), a('spike', 5), a('spike', 6), a('spike', 24 * 60 * 2)], '24h', now)
+    const bars = timeline([a('new', 5), a('spike', 5), a('spike', 6), a('spike', 24 * 60 * 2)], presetRange('24h'), now)
     expect(bars).toHaveLength(25)
     expect(bars.reduce((n, b) => n + b.new, 0)).toBe(1)
     expect(bars.reduce((n, b) => n + b.spike, 0)).toBe(2) // the 2-day-old alert is outside
@@ -391,7 +392,8 @@ describe('log template page', () => {
     await waitFor(() => expect(chart).toBeDefined())
     const series = chart!.option.series as Array<{ type: string; data: unknown[] }>
     expect(series[0]!.type).toBe('bar')
-    expect(series[0]!.data.length).toBeGreaterThanOrEqual(detail.buckets.length)
+    // One bar per bucket of the 1h window, starting at its start (as the API buckets it).
+    expect(series[0]!.data).toHaveLength(Math.ceil(3600 / detail.bucket_secs))
     const hits = within(screen.getByRole('table', { name: 'Recent hits' })).getAllByRole('row').slice(1)
     expect(hits).toHaveLength(detail.recent.length)
     const first = detail.recent[0]!

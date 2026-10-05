@@ -10,6 +10,7 @@ import services from '../../api/__fixtures__/services.json'
 import fixture from '../../api/__fixtures__/traces-search.json'
 import type { TraceHit } from '../../api/types'
 import { clearOutage } from '../../app/apiStatus'
+import { formatUntil } from '../../app/search'
 import type { EChartProps } from '../../components/charts/EChart'
 import { renderApp, stubApi } from '../../test/renderApp'
 import type { Routes } from '../../test/renderApp'
@@ -69,6 +70,29 @@ describe('traces explorer', () => {
     expect(screen.getByText(`${rows.length} traces`)).toBeInTheDocument()
     // The chart's text summary.
     expect(screen.getByText(new RegExp(`^Duration over time of ${rows.length} traces in the last 1h: 1 with errors or error stories, 0 with slow stories`))).toBeInTheDocument()
+  })
+
+  it('a custom range sends until, keys the query by it, spans the x-axis over it and links carry it', async () => {
+    const end = Math.floor(Date.now() / 60_000) * 60_000 - 3_600_000
+    const until = formatUntil(end)
+    const fetch = stubApi(routes())
+    const { queryClient } = renderApp(`/traces?since=2h&until=${until}&errors=1`)
+    expect(await bodyRows()).toHaveLength(rows.length)
+    expect(searchCalls(fetch)[0]).toBe(`/api/v1/traces/search?since=2h&until=${encodeURIComponent(until)}&errors=true&limit=500`)
+    const keys = queryClient
+      .getQueryCache()
+      .findAll({ queryKey: ['trace-search'] })
+      .map((q) => q.queryKey[2] as Record<string, unknown>)
+    expect(keys).toEqual([expect.objectContaining({ since: '2h', until })])
+    // The scatter spans the custom window, not the last 2h.
+    await waitFor(() => expect(chart).toBeDefined())
+    const x = (chart!.option as { xAxis: { min: number; max: number } }).xAxis
+    expect([x.min, x.max]).toEqual([end - 7_200_000, end])
+    // A row's trace link keeps the range.
+    const link = within((await bodyRows())[0]!).getAllByRole('link')[0]!
+    expect(link.getAttribute('href')).toContain(`until=${encodeURIComponent(until)}`)
+    // No refetch timer for a past range.
+    expect(queryClient.getQueryCache().findAll({ queryKey: ['trace-search'] })[0]!.observers[0]!.options.refetchInterval).toBe(false)
   })
 
   it('filters build the URL and the API query string', async () => {

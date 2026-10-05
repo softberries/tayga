@@ -6,8 +6,10 @@ import { useNavigate } from '@tanstack/react-router'
 import { ArrowRight, TriangleAlert } from 'lucide-react'
 import { useId, useState } from 'react'
 import type { ClipboardEvent, FormEvent, KeyboardEvent } from 'react'
-import { HEX32, sinceSearch } from '../../app/search'
-import type { Since, TracesSearch } from '../../app/search'
+import { HEX32 } from '../../app/search'
+import { rangeSearch } from '../../app/range'
+import type { TracesSearch } from '../../app/search'
+import type { Range } from '../../app/range'
 import { Button } from '../../components/ui/Button'
 import { Combobox } from '../../components/ui/Combobox'
 import { ToggleGroup } from '../../components/ui/ToggleGroup'
@@ -23,12 +25,12 @@ export function parseTraceId(raw: string): string | null {
 }
 
 /** Jumps to `/traces/:id` on submit or on pasting a valid id; anything else gets an inline error. */
-export function TraceJump({ since }: { since: Since }) {
+export function TraceJump({ range }: { range: Range }) {
   const navigate = useNavigate()
   const [text, setText] = useState('')
   const [error, setError] = useState(false)
   const errId = useId()
-  const go = (id: string) => void navigate({ to: '/traces/$traceId', params: { traceId: id }, search: sinceSearch(since) })
+  const go = (id: string) => void navigate({ to: '/traces/$traceId', params: { traceId: id }, search: rangeSearch(range) })
   const onSubmit = (e: FormEvent) => {
     e.preventDefault()
     const id = parseTraceId(text)
@@ -150,14 +152,14 @@ function DurationBounds({ min, max, onChange }: { min?: number; max?: number; on
 
 export interface TraceFiltersProps {
   search: TracesSearch
-  since: Since
+  range: Range
   services: readonly string[]
   /** Endpoint names seen in the current results, with their row counts. */
   endpoints: ReadonlyMap<string, number>
   onSearch: (patch: Partial<TracesSearch>) => void
 }
 
-export function TraceFilters({ search, since, services, endpoints, onSearch }: TraceFiltersProps) {
+export function TraceFilters({ search, range, services, endpoints, onSearch }: TraceFiltersProps) {
   const endpointNames = [...endpoints.keys()].sort((a, b) => (endpoints.get(b) ?? 0) - (endpoints.get(a) ?? 0) || a.localeCompare(b))
   const filtered = Boolean(search.service || search.endpoint || search.min_ms !== undefined || search.max_ms !== undefined || search.errors)
   return (
@@ -213,7 +215,7 @@ export function TraceFilters({ search, since, services, endpoints, onSearch }: T
         ) : null}
       </div>
       <div className="w-full min-w-0 sm:ml-auto sm:w-auto">
-        <TraceJump since={since} />
+        <TraceJump range={range} />
       </div>
     </div>
   )

@@ -1,11 +1,11 @@
 import { Link, useLocation } from '@tanstack/react-router'
 import { Activity, ChartGantt, ScrollText, TextAlignStart, Waypoints } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import { sinceSearch } from '../../app/search'
+import { rangeSearch } from '../../app/range'
 import { cx } from '../../lib/cx'
 import { NARROW_QUERY, useMediaQuery } from '../../lib/useMediaQuery'
 import { Tooltip } from '../ui/Tooltip'
-import { useSince } from './TimeRange'
+import { useRange } from '../../app/useRange'
 
 interface Section {
   to: '/' | '/traces' | '/map' | '/logs' | '/pipeline'
@@ -25,7 +25,7 @@ export const SECTIONS: readonly Section[] = [
 
 export function Rail() {
   const path = useLocation({ select: (l) => l.pathname })
-  const search = sinceSearch(useSince())
+  const search = rangeSearch(useRange())
   // On the phone bottom bar a tooltip to the right would run off the screen; open it upward.
   const side = useMediaQuery(NARROW_QUERY) ? 'top' : 'right'
   // The wrapper stretches to the page height and carries the rail's background and border;

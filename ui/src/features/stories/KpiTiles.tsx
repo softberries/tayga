@@ -1,8 +1,8 @@
 /** KPI tiles from /overview: count-up numbers, area sparklines and a delta to the previous window. */
-import { SINCE_SECS } from '../../app/search'
 import type { UseQueryResult } from '@tanstack/react-query'
 import type { LogAlertView, OverviewView } from '../../api/types'
-import type { Since } from '../../app/search'
+import { doubledRange, rangeEnd } from '../../app/range'
+import type { Range } from '../../app/range'
 import { Spark } from '../../components/charts/Spark'
 import type { SparkTone } from '../../components/charts/Spark'
 import { Card } from '../../components/ui/Card'
@@ -41,44 +41,48 @@ export function buildTiles(
   o: OverviewView,
   doubled: OverviewView | undefined,
   alerts: readonly LogAlertView[] | undefined,
-  since: Since,
+  range: Range,
   nowMs: number,
   /** The previous-window query failed: show "—" instead of waiting forever. */
   doubledFailed = false,
 ): Tile[] {
-  const win = SINCE_SECS[since]
+  const win = range.secs
+  const end = rangeEnd(range, nowMs)
+  const label = range.label
   const per = bucketWord(o.bucket_secs)
-  const err = denseSeries(o.stories.error, o.stories.bucket_secs, win, nowMs)
-  const slow = denseSeries(o.stories.slow, o.stories.bucket_secs, win, nowMs)
-  const spans = denseSeries(o.spans, o.bucket_secs, win, nowMs)
-  const alertSeries = alerts ? alertActivity(alerts, o.bucket_secs, win, nowMs) : []
+  const err = denseSeries(o.stories.error, o.stories.bucket_secs, win, end)
+  const slow = denseSeries(o.stories.slow, o.stories.bucket_secs, win, end)
+  const spans = denseSeries(o.spans, o.bucket_secs, win, end)
+  const alertSeries = alerts ? alertActivity(alerts, o.bucket_secs, win, end) : []
+  // No previous window past the API's 7 days or its retention.
+  const noEarlier = doubledRange(range, nowMs) === null
   const delta = (cur: number, pick: (v: OverviewView) => number) =>
     doubled
       ? deltaText(cur, previousCount(cur, pick(doubled)))
-      : since === '7d'
+      : noEarlier
         ? 'no earlier window'
         : doubledFailed
           ? '—'
           : '…'
-  const deltaHint = !doubled && doubledFailed && since !== '7d' ? 'The previous window could not be loaded.' : undefined
+  const deltaHint = !doubled && doubledFailed && !noEarlier ? 'The previous window could not be loaded.' : undefined
   return [
     {
-      label: `Error stories · ${since}`,
+      label: `Error stories · ${label}`,
       value: o.error_stories,
       delta: delta(o.error_stories, (v) => v.error_stories),
       deltaHint,
       tone: 'err',
       values: err,
-      summary: `Error stories per ${per} over ${since}, at most ${peak(err)} in one ${per}`,
+      summary: `Error stories per ${per} over ${label}, at most ${peak(err)} in one ${per}`,
     },
     {
-      label: `Slow stories · ${since}`,
+      label: `Slow stories · ${label}`,
       value: o.slow_stories,
       delta: delta(o.slow_stories, (v) => v.slow_stories),
       deltaHint,
       tone: 'slow',
       values: slow,
-      summary: `Slow stories per ${per} over ${since}, at most ${peak(slow)} in one ${per}`,
+      summary: `Slow stories per ${per} over ${label}, at most ${peak(slow)} in one ${per}`,
     },
     {
       label: 'Active log alerts',
@@ -86,7 +90,7 @@ export function buildTiles(
       delta: alerts ? activeAlertsText(alerts) : '…',
       tone: 'accent',
       values: alertSeries,
-      summary: `Open log alerts per ${per} over ${since}, at most ${peak(alertSeries)} at once`,
+      summary: `Open log alerts per ${per} over ${label}, at most ${peak(alertSeries)} at once`,
     },
     {
       label: 'Spans / s',
@@ -95,7 +99,7 @@ export function buildTiles(
       delta: lagText(o.data_lag_secs),
       tone: 'ok',
       values: spans,
-      summary: `Spans per second over ${since}, peak ${compact(peak(spans))}`,
+      summary: `Spans per second over ${label}, peak ${compact(peak(spans))}`,
     },
   ]
 }
@@ -118,17 +122,17 @@ export function KpiTiles({
   overview,
   doubled,
   alerts,
-  since,
+  range,
   nowMs,
 }: {
   overview: OverviewView
   doubled: UseQueryResult<OverviewView>
   alerts: readonly LogAlertView[] | undefined
-  since: Since
+  range: Range
   /** End of the window: when the overview was fetched. */
   nowMs: number
 }) {
-  const tiles = buildTiles(overview, doubled.data, alerts, since, nowMs, doubled.isError)
+  const tiles = buildTiles(overview, doubled.data, alerts, range, nowMs, doubled.isError)
   return (
     <StaggerList role="list" aria-label="Summary" className="grid grid-cols-2 gap-3.5 lg:grid-cols-4">
       {tiles.map((t) => (

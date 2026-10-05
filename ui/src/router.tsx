@@ -30,7 +30,7 @@ declare module '@tanstack/react-router' {
 
 const rootRoute = createRootRouteWithContext<RouterContext>()({
   validateSearch: (s: Record<string, unknown>): RootSearch => validateRootSearch(s),
-  search: { middlewares: [retainSearchParams<RootSearch>(['since'])] },
+  search: { middlewares: [retainSearchParams<RootSearch>(['since', 'until'])] },
   component: AppShell,
   notFoundComponent: NotFound,
   errorComponent: RouteError,

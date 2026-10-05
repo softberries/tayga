@@ -17,15 +17,18 @@ export interface DialogContentProps {
   hideTitle?: boolean
   /** No padding and a floating close button, for content that brings its own layout (palette). */
   bare?: boolean
+  /** Radix's hook as focus returns to the opener on close; `preventDefault` keeps it away. */
+  onCloseAutoFocus?: (e: Event) => void
 }
 
 /** Centered modal: scrim, panel, close button, enter animation (off under reduced motion). */
-export function DialogContent({ title, description, children, className, hideTitle, bare }: DialogContentProps) {
+export function DialogContent({ title, description, children, className, hideTitle, bare, onCloseAutoFocus }: DialogContentProps) {
   return (
     <D.Portal>
       <D.Overlay className="fixed inset-0 z-40 bg-scrim backdrop-blur-[2px] motion-safe:data-[state=open]:animate-[tg-fade_.15s_ease]" />
       <D.Content
         {...(description ? {} : { 'aria-describedby': undefined })}
+        onCloseAutoFocus={onCloseAutoFocus}
         className={cx(
           'fixed left-1/2 top-[12vh] z-50 w-[min(640px,calc(100vw-32px))] -translate-x-1/2',
           'rounded-panel border border-panel-line bg-panel text-ink shadow-panel-lg',

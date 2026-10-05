@@ -7,8 +7,8 @@ import { Link } from '@tanstack/react-router'
 import { ArrowRight } from 'lucide-react'
 import { useId, useMemo } from 'react'
 import type { ServiceMapView } from '../../api/types'
-import { sinceSearch } from '../../app/search'
-import type { Since } from '../../app/search'
+import { rangeSearch } from '../../app/range'
+import type { Range } from '../../app/range'
 import { cx } from '../../lib/cx'
 import { NARROW_QUERY, useMediaQuery } from '../../lib/useMediaQuery'
 import { MINI, isFailingEdge, layoutMiniMap, servicesOf } from './mapLayout'
@@ -39,7 +39,7 @@ export function describeMap(map: ServiceMapView): string {
   return `Service map: ${parts.join('; ')}.`
 }
 
-export function MiniMap({ map, since }: { map: ServiceMapView; since: Since }) {
+export function MiniMap({ map, range }: { map: ServiceMapView; range: Range }) {
   const layout = useMemo(() => layoutMiniMap(map), [map])
   const narrow = useMediaQuery(NARROW_QUERY)
   const glowId = `${useId()}-glow`
@@ -48,7 +48,7 @@ export function MiniMap({ map, since }: { map: ServiceMapView; since: Since }) {
   return (
     <Link
       to="/map"
-      search={sinceSearch(since)}
+      search={rangeSearch(range)}
       className="group -mx-1 block overflow-x-auto rounded-field px-1 focus-visible:outline-offset-0"
       aria-label={`${describeMap(map)} Open the service map.`}
     >

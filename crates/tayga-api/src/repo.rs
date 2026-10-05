@@ -3,7 +3,7 @@
 use crate::model::*;
 use crate::params::{
     AlertFilter, GroupFilter, HEALTH_BASELINE_SECS, SeriesQuery, TemplateFilter, TraceFilter,
-    bucket_secs,
+    Window,
 };
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -19,7 +19,7 @@ pub trait Repo: Send + Sync + 'static {
     fn story_group(
         &self,
         fingerprint: &str,
-        since_secs: u32,
+        window: Window,
     ) -> impl Future<Output = anyhow::Result<Option<GroupDetail>>> + Send;
     fn story(
         &self,
@@ -28,7 +28,7 @@ pub trait Repo: Send + Sync + 'static {
     fn trace(&self, trace_id: &str) -> impl Future<Output = anyhow::Result<TraceView>> + Send;
     fn service_map(
         &self,
-        since_secs: u32,
+        window: Window,
     ) -> impl Future<Output = anyhow::Result<Vec<EdgeView>>> + Send;
     fn log_alerts(
         &self,
@@ -41,16 +41,14 @@ pub trait Repo: Send + Sync + 'static {
     fn log_template(
         &self,
         template_id: &str,
-        since_secs: u32,
+        window: Window,
     ) -> impl Future<Output = anyhow::Result<Option<LogTemplateDetail>>> + Send;
     fn trace_log_templates(
         &self,
         trace_id: &str,
     ) -> impl Future<Output = anyhow::Result<Vec<TraceLogTemplate>>> + Send;
-    fn overview(
-        &self,
-        since_secs: u32,
-    ) -> impl Future<Output = anyhow::Result<OverviewView>> + Send;
+    fn overview(&self, window: Window)
+    -> impl Future<Output = anyhow::Result<OverviewView>> + Send;
     fn stories_series(
         &self,
         f: &GroupFilter,
@@ -63,27 +61,27 @@ pub trait Repo: Send + Sync + 'static {
     fn service(
         &self,
         name: &str,
-        since_secs: u32,
+        window: Window,
     ) -> impl Future<Output = anyhow::Result<Option<ServiceView>>> + Send;
     /// Edges as `service_map`, plus per-node RED and health.
     fn service_graph(
         &self,
-        since_secs: u32,
+        window: Window,
     ) -> impl Future<Output = anyhow::Result<ServiceMapView>> + Send;
     fn search(&self, q: &str) -> impl Future<Output = anyhow::Result<SearchView>> + Send;
-    /// The last sample per series and `step_secs` bucket (see `Store::metric_buckets`).
+    /// The last sample per series and `q.window.step()` bucket (see `Store::metric_buckets`).
     fn metric_buckets(
         &self,
         q: &SeriesQuery,
-        step_secs: u32,
     ) -> impl Future<Output = anyhow::Result<Vec<MetricPointRow>>> + Send;
 }
 
 /// A template counts as alerting while one of its alerts was last seen this recently.
 const ALERT_ACTIVE_MIN: u32 = 10;
+/// A template's alerts are listed over this many seconds up to the window's end. Alerts are
+/// kept 7 days (TTL), so this shows all of them.
+const MAX_ALERT_AGE_SECS: i64 = 7 * 24 * 3600;
 /// A trace's log matches an alert that started at most this long after the log.
-/// Alerts are kept 7 days (TTL), so this window shows all of them.
-const MAX_ALERT_AGE_SECS: u32 = 7 * 24 * 3600;
 const ALERT_LEAD_MIN: u32 = 5;
 
 /// Picks the alert kind per template id, `spike` over `new` when both match.
@@ -125,8 +123,29 @@ pub fn merge_buckets(
         .collect()
 }
 
-/// Filtered stories as a subquery so outer aliases never shadow filter columns.
-const FILTERED: &str = "SELECT * FROM error_stories FINAL WHERE ts > now64(9) - toIntervalSecond(?) \
+/// Rows in a window `(start, end]`: binds `start`, `end` (unix seconds). `{col}` names the
+/// time column.
+fn in_window(col: &str) -> String {
+    format!("{col} > toDateTime(?) AND {col} <= toDateTime(?)")
+}
+
+/// The window bucket (unix seconds) a time column falls in: buckets are `step` wide and start at
+/// the window's start. Binds `start`, `start`, `step`, `step` (see `bind_bucket`).
+fn bucket_of(col: &str) -> String {
+    format!("toUInt32(toInt64(?) + intDiv(toInt64(toUnixTimestamp({col})) - toInt64(?), ?) * ?)")
+}
+
+fn bind_window(q: clickhouse::query::Query, w: Window) -> clickhouse::query::Query {
+    q.bind(w.start).bind(w.end)
+}
+
+fn bind_bucket(q: clickhouse::query::Query, w: Window, step: u32) -> clickhouse::query::Query {
+    q.bind(w.start).bind(w.start).bind(step).bind(step)
+}
+
+/// Filtered stories as a subquery so outer aliases never shadow filter columns. Binds the
+/// window, then kind, service and fingerprint twice each.
+const FILTERED: &str = "SELECT * FROM error_stories FINAL WHERE ts > toDateTime(?) AND ts <= toDateTime(?) \
      AND (? = '' OR toString(kind) = ?) AND (? = '' OR rc_service = ?) AND (? = '' OR toString(fingerprint) = ?)";
 
 const GROUP_COLUMNS: &str = "toString(fingerprint) AS fingerprint, toString(any(kind)) AS kind, \
@@ -148,17 +167,18 @@ const STORY_SEARCH_SECS: u32 = 7 * 24 * 3600;
 const DATA_LAG_FRESH_SECS: u32 = 300;
 const DATA_LAG_METRIC: &str = "tayga_logminer_data_lag_seconds";
 
-/// Trace search over `trace_summaries`; `{SERVICE}` is the service clause.
+/// Trace search over `trace_summaries` in the window; `{SERVICE}` is the service clause.
 const TRACE_SEARCH: &str = "SELECT trace_id, toUnixTimestamp64Nano(ts) AS ts_ns, endpoint_service, endpoint_name, \
      duration_ns, is_error, span_count FROM trace_summaries FINAL \
-     WHERE ts > now64(9) - toIntervalSecond(?) AND {SERVICE} \
+     WHERE ts > toDateTime(?) AND ts <= toDateTime(?) AND {SERVICE} \
      AND (? = '' OR endpoint_name = ?) AND duration_ns >= ? AND duration_ns <= ? \
      AND (? = 0 OR is_error = 1) ORDER BY ts DESC LIMIT ?";
 /// The trace's endpoint service matches.
 const SERVICE_IS_ENDPOINT: &str = "(? = '' OR endpoint_service = ?)";
-/// The trace has a span of the service in the window.
+/// The trace has a span of the service since the window's start. No upper bound: a trace that
+/// starts inside the window may reach the service after its end.
 const SERVICE_TOUCHED: &str = "trace_id IN (SELECT trace_id FROM spans \
-     WHERE service_name = ? AND start_ts > now64(9) - toIntervalSecond(?))";
+     WHERE service_name = ? AND start_ts > toDateTime(?))";
 
 impl ChRepo {
     pub fn new(s: &ClickHouseSettings) -> Self {
@@ -171,17 +191,16 @@ impl ChRepo {
     }
 
     /// Stories per bucket and kind under a group filter.
-    async fn kind_buckets(&self, f: &GroupFilter, step: u32) -> anyhow::Result<StoriesSeries> {
+    async fn kind_buckets(&self, f: &GroupFilter) -> anyhow::Result<StoriesSeries> {
         let kind = f.kind.as_deref().unwrap_or_default();
         let service = f.service.as_deref().unwrap_or_default();
-        let rows: Vec<KindBucketRow> = self
-            .client
-            .query(&format!(
-                "SELECT toUInt32(toStartOfInterval(ts, toIntervalSecond(?))) AS bucket, \
-                 toString(kind) AS kind, count() AS n FROM ({FILTERED}) GROUP BY bucket, kind ORDER BY bucket"
-            ))
-            .bind(step)
-            .bind(f.since_secs)
+        let step = f.window.step();
+        let q = self.client.query(&format!(
+            "SELECT {} AS bucket, toString(kind) AS kind, count() AS n FROM ({FILTERED}) \
+             GROUP BY bucket, kind ORDER BY bucket",
+            bucket_of("ts")
+        ));
+        let rows: Vec<KindBucketRow> = bind_window(bind_bucket(q, f.window, step), f.window)
             .bind(kind)
             .bind(kind)
             .bind(service)
@@ -197,7 +216,7 @@ impl ChRepo {
         let kind = f.kind.clone().unwrap_or_default();
         let service = f.service.clone().unwrap_or_default();
         let bind = |q: clickhouse::query::Query| {
-            q.bind(f.since_secs)
+            bind_window(q, f.window)
                 .bind(kind.as_str())
                 .bind(kind.as_str())
                 .bind(service.as_str())
@@ -214,17 +233,15 @@ impl ChRepo {
             return Ok(Vec::new());
         }
         // Only the groups kept above, bucketed to about 120 points per group.
-        let step = bucket_secs(f.since_secs);
+        let step = f.window.step();
         let top: Vec<&str> = groups.iter().map(|g| g.fingerprint.as_str()).collect();
-        // Placeholder order: bucket width, the FILTERED binds, then the fingerprint list.
-        let query = self
-            .client
-            .query(&format!(
-                "SELECT toString(fingerprint) AS fingerprint, \
-                 toUInt32(toStartOfInterval(ts, toIntervalSecond(?))) AS bucket, count() AS stories \
-                 FROM ({FILTERED} AND has(?, toString(fingerprint))) GROUP BY fingerprint, bucket ORDER BY bucket"
-            ))
-            .bind(step);
+        // Placeholder order: the bucket, the FILTERED binds, then the fingerprint list.
+        let query = self.client.query(&format!(
+            "SELECT toString(fingerprint) AS fingerprint, {} AS bucket, count() AS stories \
+             FROM ({FILTERED} AND has(?, toString(fingerprint))) GROUP BY fingerprint, bucket ORDER BY bucket",
+            bucket_of("ts")
+        ));
+        let query = bind_bucket(query, f.window, step);
         let rows: Vec<GroupBucketRow> = bind(query).bind(&top).fetch_all().await?;
         Ok(merge_buckets(groups, rows, step))
     }
@@ -275,10 +292,11 @@ impl ChRepo {
             .collect())
     }
 
-    /// Alerts newest first, resolving which example traces have an error story.
+    /// Alerts that overlap the window (seen after its start, started by its end), newest first,
+    /// resolving which example traces have an error story. `active` is as of the window's end.
     async fn alerts(
         &self,
-        since_secs: u32,
+        w: Window,
         kind: &str,
         service: &str,
         template_id: &str,
@@ -290,12 +308,14 @@ impl ChRepo {
                 "SELECT alert_id, toString(kind) AS kind, toString(template_id) AS template_id, service, template, \
                  toUnixTimestamp64Nano(started_at) AS started_at_ns, toUnixTimestamp64Nano(last_at) AS last_at_ns, \
                  window_count, peak_count, baseline_per_window, \
-                 toUInt8(last_at > now64(9) - toIntervalMinute({ALERT_ACTIVE_MIN})) AS active, example_trace_ids \
-                 FROM (SELECT * FROM log_alerts FINAL WHERE last_at > now64(9) - toIntervalSecond(?) \
+                 toUInt8(last_at > toDateTime(?) - toIntervalMinute({ALERT_ACTIVE_MIN})) AS active, example_trace_ids \
+                 FROM (SELECT * FROM log_alerts FINAL WHERE last_at > toDateTime(?) AND started_at <= toDateTime(?) \
                  AND (? = '' OR toString(kind) = ?) AND (? = '' OR service = ?) AND (? = '' OR toString(template_id) = ?)) \
                  ORDER BY last_at DESC LIMIT {limit}"
             ))
-            .bind(since_secs)
+            .bind(w.end)
+            .bind(w.start)
+            .bind(w.end)
             .bind(kind)
             .bind(kind)
             .bind(service)
@@ -317,15 +337,18 @@ impl ChRepo {
     }
 }
 
+/// Template ids with an alert active at a moment: binds that moment (the window's end) twice.
+const ALERTING_AT: &str = "SELECT template_id FROM log_alerts FINAL \
+     WHERE last_at > toDateTime(?) - toIntervalMinute({ACTIVE}) AND started_at <= toDateTime(?)";
+
 /// Templates with at least one hit in the window, as a subquery so the outer aliases never
-/// shadow the filter columns.
+/// shadow the filter columns. `alerting` is as of the window's end.
 const TEMPLATES_IN_WINDOW: &str = "SELECT toString(t.template_id) AS template_id, t.service AS service, \
      t.template AS template, h.hits AS count, toUnixTimestamp64Nano(t.first_seen) AS first_seen_ns, \
      toUnixTimestamp64Nano(t.last_seen) AS last_seen_ns, t.max_severity AS max_severity, \
-     toUInt8(t.template_id IN (SELECT template_id FROM log_alerts FINAL \
-       WHERE last_at > now64(9) - toIntervalMinute({ACTIVE}))) AS alerting \
+     toUInt8(t.template_id IN ({ALERTING_AT})) AS alerting \
      FROM (SELECT template_id, uniqExact(log_id) AS hits FROM log_template_hits \
-       WHERE ts > now64(9) - toIntervalSecond(?) AND (? = '' OR service = ?) GROUP BY template_id) AS h \
+       WHERE ts > toDateTime(?) AND ts <= toDateTime(?) AND (? = '' OR service = ?) GROUP BY template_id) AS h \
      INNER JOIN (SELECT * FROM log_templates FINAL WHERE (? = '' OR service = ?) \
        AND (? = '' OR positionCaseInsensitive(template, ?) > 0)) AS t ON t.template_id = h.template_id \
      ORDER BY count DESC LIMIT 200";
@@ -338,10 +361,10 @@ impl Repo for ChRepo {
     async fn story_group(
         &self,
         fingerprint: &str,
-        since_secs: u32,
+        window: Window,
     ) -> anyhow::Result<Option<GroupDetail>> {
         let f = GroupFilter {
-            since_secs,
+            window,
             kind: None,
             service: None,
         };
@@ -416,7 +439,7 @@ impl Repo for ChRepo {
 
     async fn log_alerts(&self, f: &AlertFilter) -> anyhow::Result<Vec<LogAlertView>> {
         self.alerts(
-            f.since_secs,
+            f.window,
             f.kind.as_deref().unwrap_or_default(),
             f.service.as_deref().unwrap_or_default(),
             "",
@@ -428,10 +451,16 @@ impl Repo for ChRepo {
     async fn log_templates(&self, f: &TemplateFilter) -> anyhow::Result<Vec<LogTemplateListItem>> {
         let service = f.service.as_deref().unwrap_or_default();
         let q = f.q.as_deref().unwrap_or_default();
+        let sql = TEMPLATES_IN_WINDOW
+            .replace("{ALERTING_AT}", ALERTING_AT)
+            .replace("{ACTIVE}", &ALERT_ACTIVE_MIN.to_string());
         let rows: Vec<LogTemplateRow> = self
             .client
-            .query(&TEMPLATES_IN_WINDOW.replace("{ACTIVE}", &ALERT_ACTIVE_MIN.to_string()))
-            .bind(f.since_secs)
+            .query(&sql)
+            .bind(f.window.end)
+            .bind(f.window.end)
+            .bind(f.window.start)
+            .bind(f.window.end)
             .bind(service)
             .bind(service)
             .bind(service)
@@ -440,25 +469,21 @@ impl Repo for ChRepo {
             .bind(q)
             .fetch_all()
             .await?;
-        let step = bucket_secs(f.since_secs);
+        let step = f.window.step();
         // One grouped query for every listed template (at most 200), not one per row.
         let mut by_template: HashMap<String, Vec<(u32, u64)>> = HashMap::new();
         if !rows.is_empty() {
             let ids: Vec<String> = rows.iter().map(|r| r.template_id.clone()).collect();
-            let hits: Vec<TemplateListBucketRow> = self
-                .client
-                .query(
-                    "SELECT toString(template_id) AS template_id, \
-                     toUInt32(toStartOfInterval(ts, toIntervalSecond(?))) AS bucket, uniqExact(log_id) AS hits \
-                     FROM log_template_hits \
-                     WHERE template_id IN (SELECT toUInt64(arrayJoin(?))) AND ts > now64(9) - toIntervalSecond(?) \
-                     GROUP BY template_id, bucket ORDER BY template_id, bucket",
-                )
-                .bind(step)
-                .bind(ids)
-                .bind(f.since_secs)
-                .fetch_all()
-                .await?;
+            let q = self.client.query(&format!(
+                "SELECT toString(template_id) AS template_id, {} AS bucket, uniqExact(log_id) AS hits \
+                 FROM log_template_hits \
+                 WHERE template_id IN (SELECT toUInt64(arrayJoin(?))) AND {} \
+                 GROUP BY template_id, bucket ORDER BY template_id, bucket",
+                bucket_of("ts"),
+                in_window("ts")
+            ));
+            let q = bind_bucket(q, f.window, step).bind(ids);
+            let hits: Vec<TemplateListBucketRow> = bind_window(q, f.window).fetch_all().await?;
             for h in hits {
                 by_template
                     .entry(h.template_id)
@@ -482,19 +507,21 @@ impl Repo for ChRepo {
     async fn log_template(
         &self,
         template_id: &str,
-        since_secs: u32,
+        window: Window,
     ) -> anyhow::Result<Option<LogTemplateDetail>> {
-        let step = bucket_secs(since_secs);
+        let step = window.step();
+        let alerting = ALERTING_AT.replace("{ACTIVE}", &ALERT_ACTIVE_MIN.to_string());
         let rows: Vec<TemplateDetailRow> = self
             .client
             .query(&format!(
                 "SELECT toString(t.template_id) AS template_id, t.service AS service, t.template AS template, \
                  t.count AS count, toUnixTimestamp64Nano(t.first_seen) AS first_seen_ns, \
                  toUnixTimestamp64Nano(t.last_seen) AS last_seen_ns, t.max_severity AS max_severity, \
-                 toUInt8(t.template_id IN (SELECT template_id FROM log_alerts FINAL \
-                   WHERE last_at > now64(9) - toIntervalMinute({ALERT_ACTIVE_MIN}))) AS alerting, t.sample AS sample \
+                 toUInt8(t.template_id IN ({alerting})) AS alerting, t.sample AS sample \
                  FROM (SELECT * FROM log_templates FINAL WHERE template_id = toUInt64(?) LIMIT 1) AS t"
             ))
+            .bind(window.end)
+            .bind(window.end)
             .bind(template_id)
             .fetch_all()
             .await?;
@@ -512,26 +539,25 @@ impl Repo for ChRepo {
             max_severity: found.max_severity,
             alerting: found.alerting,
         };
-        let buckets: Vec<TemplateBucketRow> = self
-            .client
-            .query(
-                "SELECT toUInt32(toStartOfInterval(ts, toIntervalSecond(?))) AS bucket, uniqExact(log_id) AS hits \
-                 FROM log_template_hits WHERE template_id = toUInt64(?) AND ts > now64(9) - toIntervalSecond(?) \
-                 GROUP BY bucket ORDER BY bucket",
-            )
-            .bind(step)
-            .bind(template_id)
-            .bind(since_secs)
-            .fetch_all()
-            .await?;
+        let q = self.client.query(&format!(
+            "SELECT {} AS bucket, uniqExact(log_id) AS hits \
+             FROM log_template_hits WHERE template_id = toUInt64(?) AND {} \
+             GROUP BY bucket ORDER BY bucket",
+            bucket_of("ts"),
+            in_window("ts")
+        ));
+        let q = bind_bucket(q, window, step).bind(template_id);
+        let buckets: Vec<TemplateBucketRow> = bind_window(q, window).fetch_all().await?;
+        // The latest hits as of the window's end, inside the window or before it.
         let hits: Vec<TemplateHitRow> = self
             .client
             .query(
                 "SELECT toUnixTimestamp64Nano(ts) AS ts_ns, trace_id, span_id, severity_number \
-                 FROM log_template_hits WHERE template_id = toUInt64(?) \
+                 FROM log_template_hits WHERE template_id = toUInt64(?) AND ts <= toDateTime(?) \
                  ORDER BY ts DESC LIMIT 1 BY log_id LIMIT 20",
             )
             .bind(template_id)
+            .bind(window.end)
             .fetch_all()
             .await?;
         let stories = self
@@ -541,9 +567,11 @@ impl Repo for ChRepo {
             .into_iter()
             .map(|h| TemplateHitView::from_row(h, &stories))
             .collect();
-        let alerts = self
-            .alerts(MAX_ALERT_AGE_SECS, "", "", template_id, 20)
-            .await?;
+        let alerts_window = Window {
+            start: window.end - MAX_ALERT_AGE_SECS,
+            end: window.end,
+        };
+        let alerts = self.alerts(alerts_window, "", "", template_id, 20).await?;
         let mut template = LogTemplateView::from_row(row);
         // The window's distinct hits, not the lifetime counter kept on the template row.
         template.count = buckets.iter().map(|b| b.hits).sum();
@@ -602,58 +630,57 @@ impl Repo for ChRepo {
             .collect())
     }
 
-    async fn service_map(&self, since_secs: u32) -> anyhow::Result<Vec<EdgeView>> {
-        let rows: Vec<EdgeRow> = self
-            .client
-            .query(
-                "SELECT parent_service, child_service, sum(calls) AS calls, sum(errors) AS errors, \
-                 sum(duration_ns_sum) AS duration_ns_sum FROM service_edges \
-                 WHERE minute > now() - toIntervalSecond(?) GROUP BY parent_service, child_service \
-                 ORDER BY calls DESC LIMIT 500",
-            )
-            .bind(since_secs)
-            .fetch_all()
-            .await?;
+    async fn service_map(&self, window: Window) -> anyhow::Result<Vec<EdgeView>> {
+        let q = self.client.query(&format!(
+            "SELECT parent_service, child_service, sum(calls) AS calls, sum(errors) AS errors, \
+             sum(duration_ns_sum) AS duration_ns_sum FROM service_edges \
+             WHERE {} GROUP BY parent_service, child_service \
+             ORDER BY calls DESC LIMIT 500",
+            in_window("minute")
+        ));
+        let rows: Vec<EdgeRow> = bind_window(q, window).fetch_all().await?;
         Ok(rows.into_iter().map(EdgeView::from_row).collect())
     }
 
-    async fn overview(&self, since_secs: u32) -> anyhow::Result<OverviewView> {
-        let step = bucket_secs(since_secs);
+    async fn overview(&self, window: Window) -> anyhow::Result<OverviewView> {
+        let step = window.step();
         let stories = self
-            .kind_buckets(
-                &GroupFilter {
-                    since_secs,
-                    kind: None,
-                    service: None,
-                },
-                step,
-            )
+            .kind_buckets(&GroupFilter {
+                window,
+                kind: None,
+                service: None,
+            })
             .await?;
+        // Alerts active at the window's end.
         let active_alerts: u64 = self
             .client
             .query(&format!(
-                "SELECT count() FROM log_alerts FINAL WHERE last_at > now64(9) - toIntervalMinute({ALERT_ACTIVE_MIN})"
+                "SELECT count() FROM log_alerts FINAL \
+                 WHERE last_at > toDateTime(?) - toIntervalMinute({ALERT_ACTIVE_MIN}) AND started_at <= toDateTime(?)"
             ))
+            .bind(window.end)
+            .bind(window.end)
             .fetch_one()
             .await?;
-        let spans: Vec<CountBucketRow> = self
-            .client
-            .query(
-                "SELECT toUInt32(toStartOfInterval(start_ts, toIntervalSecond(?))) AS bucket, count() AS n \
-                 FROM spans WHERE start_ts > now64(9) - toIntervalSecond(?) GROUP BY bucket ORDER BY bucket",
-            )
-            .bind(step)
-            .bind(since_secs)
+        let q = self.client.query(&format!(
+            "SELECT {} AS bucket, count() AS n FROM spans WHERE {} GROUP BY bucket ORDER BY bucket",
+            bucket_of("start_ts"),
+            in_window("start_ts")
+        ));
+        let spans: Vec<CountBucketRow> = bind_window(bind_bucket(q, window, step), window)
             .fetch_all()
             .await?;
+        // The lag recorded last before the window's end, if recent enough then.
         let lag: Vec<f64> = self
             .client
             .query(
                 "SELECT value FROM metric_samples WHERE metric = ? AND isFinite(value) \
-                 AND ts > now64(3) - toIntervalSecond(?) ORDER BY ts DESC LIMIT 1",
+                 AND ts > toDateTime(?) - toIntervalSecond(?) AND ts <= toDateTime(?) ORDER BY ts DESC LIMIT 1",
             )
             .bind(DATA_LAG_METRIC)
+            .bind(window.end)
             .bind(DATA_LAG_FRESH_SECS)
+            .bind(window.end)
             .fetch_all()
             .await?;
         let total_spans: u64 = spans.iter().map(|b| b.n).sum();
@@ -662,7 +689,7 @@ impl Repo for ChRepo {
             error_stories: stories.error.iter().map(|b| b.1).sum(),
             slow_stories: stories.slow.iter().map(|b| b.1).sum(),
             active_alerts,
-            spans_per_sec: total_spans as f64 / f64::from(since_secs.max(1)),
+            spans_per_sec: total_spans as f64 / f64::from(window.secs().max(1)),
             data_lag_secs: lag.into_iter().next(),
             stories,
             spans: spans
@@ -673,7 +700,7 @@ impl Repo for ChRepo {
     }
 
     async fn stories_series(&self, f: &GroupFilter) -> anyhow::Result<StoriesSeries> {
-        self.kind_buckets(f, bucket_secs(f.since_secs)).await
+        self.kind_buckets(f).await
     }
 
     async fn traces_search(&self, f: &TraceFilter) -> anyhow::Result<Vec<TraceHitView>> {
@@ -688,9 +715,9 @@ impl Repo for ChRepo {
                 SERVICE_IS_ENDPOINT
             },
         );
-        let mut q = self.client.query(&sql).bind(f.since_secs);
+        let mut q = bind_window(self.client.query(&sql), f.window);
         q = if touched {
-            q.bind(service).bind(f.since_secs)
+            q.bind(service).bind(f.window.start)
         } else {
             q.bind(service).bind(service)
         };
@@ -723,52 +750,52 @@ impl Repo for ChRepo {
             .await?)
     }
 
-    async fn service(&self, name: &str, since_secs: u32) -> anyhow::Result<Option<ServiceView>> {
-        let step = bucket_secs(since_secs);
-        let rows: Vec<ServiceBucketRow> = self
-            .client
-            .query(
-                "SELECT toUInt32(toStartOfInterval(start_ts, toIntervalSecond(?))) AS bucket, count() AS spans, \
-                 countIf(kind IN ('server', 'consumer')) AS calls, \
-                 countIf(kind IN ('server', 'consumer') AND status_code = 'error') AS errors, \
-                 quantilesIf(0.5, 0.95, 0.99)(duration_ns, kind IN ('server', 'consumer')) AS q \
-                 FROM spans WHERE service_name = ? AND start_ts > now64(9) - toIntervalSecond(?) \
-                 GROUP BY bucket ORDER BY bucket",
-            )
-            .bind(step)
-            .bind(name)
-            .bind(since_secs)
-            .fetch_all()
-            .await?;
+    async fn service(&self, name: &str, window: Window) -> anyhow::Result<Option<ServiceView>> {
+        let step = window.step();
+        let q = self.client.query(&format!(
+            "SELECT {} AS bucket, count() AS spans, \
+             countIf(kind IN ('server', 'consumer')) AS calls, \
+             countIf(kind IN ('server', 'consumer') AND status_code = 'error') AS errors, \
+             quantilesIf(0.5, 0.95, 0.99)(duration_ns, kind IN ('server', 'consumer')) AS q \
+             FROM spans WHERE service_name = ? AND {} \
+             GROUP BY bucket ORDER BY bucket",
+            bucket_of("start_ts"),
+            in_window("start_ts")
+        ));
+        let q = bind_bucket(q, window, step).bind(name);
+        let rows: Vec<ServiceBucketRow> = bind_window(q, window).fetch_all().await?;
         Ok(ServiceView::from_rows(name, step, rows))
     }
 
-    async fn service_graph(&self, since_secs: u32) -> anyhow::Result<ServiceMapView> {
-        let edges = self.service_map(since_secs).await?;
-        // The window and the 24h baseline in one scan over the longer of the two.
+    async fn service_graph(&self, window: Window) -> anyhow::Result<ServiceMapView> {
+        let edges = self.service_map(window).await?;
+        // The window and the 24h baseline before its end in one scan over the longer of the two.
+        let baseline_start = window.end - i64::from(HEALTH_BASELINE_SECS);
         let rows: Vec<NodeRow> = self
             .client
             .query(
                 "SELECT toString(service_name) AS service, \
-                 countIf(start_ts > now64(9) - toIntervalSecond(?)) AS calls, \
-                 countIf(start_ts > now64(9) - toIntervalSecond(?) AND status_code = 'error') AS errors, \
-                 quantileIf(0.99)(duration_ns, start_ts > now64(9) - toIntervalSecond(?)) AS p99_ns, \
-                 quantileIf(0.99)(duration_ns, start_ts > now64(9) - toIntervalSecond(?)) AS baseline_p99_ns \
-                 FROM spans WHERE kind IN ('server', 'consumer') AND start_ts > now64(9) - toIntervalSecond(?) \
+                 countIf(start_ts > toDateTime(?)) AS calls, \
+                 countIf(start_ts > toDateTime(?) AND status_code = 'error') AS errors, \
+                 quantileIf(0.99)(duration_ns, start_ts > toDateTime(?)) AS p99_ns, \
+                 quantileIf(0.99)(duration_ns, start_ts > toDateTime(?)) AS baseline_p99_ns \
+                 FROM spans WHERE kind IN ('server', 'consumer') \
+                 AND start_ts > toDateTime(?) AND start_ts <= toDateTime(?) \
                  GROUP BY service HAVING calls > 0 ORDER BY service LIMIT 500",
             )
-            .bind(since_secs)
-            .bind(since_secs)
-            .bind(since_secs)
-            .bind(HEALTH_BASELINE_SECS)
-            .bind(since_secs.max(HEALTH_BASELINE_SECS))
+            .bind(window.start)
+            .bind(window.start)
+            .bind(window.start)
+            .bind(baseline_start)
+            .bind(window.start.min(baseline_start))
+            .bind(window.end)
             .fetch_all()
             .await?;
         Ok(ServiceMapView {
             edges,
             nodes: rows
                 .into_iter()
-                .map(|r| NodeView::from_row(r, since_secs))
+                .map(|r| NodeView::from_row(r, window.secs()))
                 .collect(),
         })
     }
@@ -813,19 +840,15 @@ impl Repo for ChRepo {
         })
     }
 
-    async fn metric_buckets(
-        &self,
-        q: &SeriesQuery,
-        step_secs: u32,
-    ) -> anyhow::Result<Vec<MetricPointRow>> {
+    async fn metric_buckets(&self, q: &SeriesQuery) -> anyhow::Result<Vec<MetricPointRow>> {
         Ok(self
             .store
             .metric_buckets(
                 q.job.as_deref(),
                 &q.metric,
                 &q.labels,
-                q.since_secs,
-                step_secs,
+                (q.window.start, q.window.end),
+                q.window.step(),
             )
             .await?)
     }

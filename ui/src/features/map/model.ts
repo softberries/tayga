@@ -2,9 +2,8 @@
  * Pure helpers for the /map page: the graph handed to ELK, edge width and tone, search
  * matching and each service's callers and callees.
  */
-import { SINCE_SECS } from '../../app/search'
 import type { EdgeView, Health, NodeView, ServiceMapView } from '../../api/types'
-import type { Since } from '../../app/search'
+import type { Range } from '../../app/range'
 import { compact, percent } from '../../lib/format'
 import { isFailingEdge, servicesOf } from '../stories/mapLayout'
 import type { MapGraph, Pos } from './layout'
@@ -29,8 +28,8 @@ export function topologyKey(g: MapGraph): string {
   return `${g.services.join(',')}|${g.links.map(([a, b]) => `${a}>${b}`).join(',')}`
 }
 
-export function callsPerMin(calls: number, since: Since): number {
-  return calls / (SINCE_SECS[since] / 60)
+export function callsPerMin(calls: number, range: Range): number {
+  return calls / (range.secs / 60)
 }
 
 export const EDGE_MIN_W = 1.25

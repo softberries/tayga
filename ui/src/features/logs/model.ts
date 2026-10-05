@@ -1,10 +1,11 @@
-import { SINCE_SECS } from '../../app/search'
 import type { ExampleTrace, LogAlertView, LogTemplateListItem } from '../../api/types'
-import type { Since } from '../../app/search'
-import { denseSeries } from '../stories/model'
+import type { Range } from '../../app/range'
+import { denseSeries, gridStart } from '../stories/model'
 
-/** Seconds per bar of the alerts timeline: hourly for the long ranges, finer for short ones. */
-export const TIMELINE_STEP: Record<Since, number> = { '15m': 60, '1h': 300, '24h': 3600, '7d': 3600 }
+/** Seconds per bar of the alerts timeline: hourly for long ranges (over 1h), finer for short ones. */
+export function timelineStep(secs: number): number {
+  return secs <= 900 ? 60 : secs <= 3600 ? 300 : 3600
+}
 
 export function stepWord(secs: number): string {
   return secs === 3600 ? 'hour' : secs === 60 ? 'minute' : `${secs / 60} minutes`
@@ -18,13 +19,13 @@ export interface TimelineBar {
 }
 
 /**
- * Alerts started per bucket and kind over the window ending at `nowMs`; every bucket of the
+ * Alerts started per bucket and kind over the window ending at `endMs`; every bucket of the
  * window is present (zeros included) so the bars sit on a regular grid.
  */
-export function timeline(alerts: readonly LogAlertView[], since: Since, nowMs: number): TimelineBar[] {
-  const step = TIMELINE_STEP[since]
-  const last = Math.floor(nowMs / 1000 / step) * step
-  const first = Math.floor((nowMs / 1000 - SINCE_SECS[since]) / step) * step
+export function timeline(alerts: readonly LogAlertView[], range: Range, endMs: number): TimelineBar[] {
+  const step = timelineStep(range.secs)
+  const last = Math.floor(endMs / 1000 / step) * step
+  const first = Math.floor((endMs / 1000 - range.secs) / step) * step
   const bars: TimelineBar[] = []
   for (let t = first; t <= last; t += step) bars.push({ t: t * 1000, new: 0, spike: 0 })
   for (const a of alerts) {
@@ -70,19 +71,18 @@ export function sortTemplates(rows: readonly LogTemplateListItem[], { key, desc 
 
 /**
  * A template's sparse `[bucket start s, hits]` pairs as `[unix ms, hits]` points for every
- * bucket of the window ending at `nowMs`, empty buckets as 0.
+ * bucket of the window ending at `endMs`, empty buckets as 0 (see `denseSeries`).
  */
 export function bucketPoints(
   buckets: ReadonlyArray<readonly [number, number]>,
   bucketSecs: number,
   windowSecs: number,
-  nowMs: number,
+  endMs: number,
 ): Array<readonly [number, number]> {
-  const values = denseSeries(buckets, bucketSecs, windowSecs, nowMs)
+  const values = denseSeries(buckets, bucketSecs, windowSecs, endMs)
   const step = Math.max(1, Math.round(bucketSecs))
-  const last = Math.floor(nowMs / 1000 / step) * step
-  const start = last - (values.length - 1) * step
-  return values.map((v, i) => [(start + i * step) * 1000, v] as const)
+  const first = gridStart(bucketSecs, windowSecs, endMs, values.length)
+  return values.map((v, i) => [(first + i * step) * 1000, v] as const)
 }
 
 /** Active alerts first, then the most recently seen first. */

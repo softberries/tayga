@@ -7,12 +7,12 @@ import { useNavigate, useSearch } from '@tanstack/react-router'
 import { useCallback, useMemo, useState } from 'react'
 import { api } from '../../api/queries'
 import type { TraceHit } from '../../api/types'
-import { useLiveInterval } from '../../app/live'
-import { formatRect, parseRect, sinceSearch, SINCE_SECS } from '../../app/search'
+import { formatRect, parseRect } from '../../app/search'
+import { rangeBounds, rangePhrase, rangeSearch, widerHint } from '../../app/range'
 import type { TracesSearch } from '../../app/search'
 import { Scatter } from '../../components/charts/Scatter'
 import type { ScatterPoint, ScatterTone, XYRect } from '../../components/charts/Scatter'
-import { useSince } from '../../components/shell/TimeRange'
+import { useAutoRefresh, useRange } from '../../app/useRange'
 import { Button } from '../../components/ui/Button'
 import { Card, PanelTitle } from '../../components/ui/Card'
 import { EmptyState } from '../../components/ui/EmptyState'
@@ -65,16 +65,16 @@ function ResultsSkeleton() {
 }
 
 export function TracesExplorer() {
-  const since = useSince()
+  const range = useRange()
   const search = useSearch({ from: '/traces/' })
   const navigate = useNavigate({ from: '/traces/' })
-  const refetchInterval = useLiveInterval()
+  const refetchInterval = useAutoRefresh()
   const narrow = useMediaQuery(NARROW_QUERY)
   const [sort, setSort] = useState<Sort>({ key: 'start', desc: true })
 
   const services = useQuery(api.services())
   const traces = useQuery({
-    ...api.traceSearch(traceQuery(search, since)),
+    ...api.traceSearch(traceQuery(search, range)),
     refetchInterval,
     // Keep the old points while a new filter loads, instead of flashing skeletons.
     placeholderData: keepPreviousData,
@@ -121,8 +121,8 @@ export function TracesExplorer() {
   const now = traces.dataUpdatedAt
   // The whole window, unless the limit cut it short: then the newest traces fill the width.
   const xRange = useMemo<[number, number] | undefined>(
-    () => (capped || !now ? undefined : [now - SINCE_SECS[since] * 1000, now]),
-    [capped, now, since],
+    () => (capped || !now ? undefined : [...rangeBounds(range, now)]),
+    [capped, now, range],
   )
 
   const onSelect = useCallback(
@@ -132,8 +132,8 @@ export function TracesExplorer() {
     [onSearch],
   )
   const onPointClick = useCallback(
-    (id: string) => void navigate({ to: '/traces/$traceId', params: { traceId: id }, search: sinceSearch(since) }),
-    [navigate, since],
+    (id: string) => void navigate({ to: '/traces/$traceId', params: { traceId: id }, search: rangeSearch(range) }),
+    [navigate, range],
   )
   const tooltip = useCallback(
     (id: string) => {
@@ -153,7 +153,7 @@ export function TracesExplorer() {
 
   const logY = Boolean(search.log)
   const summary = useMemo(() => {
-    if (rows.length === 0) return `No traces in the last ${since}.`
+    if (rows.length === 0) return `No traces in ${rangePhrase(range)}.`
     let lo = Infinity
     let hi = 0
     for (const t of rows) {
@@ -161,11 +161,11 @@ export function TracesExplorer() {
       hi = Math.max(hi, t.duration_ns)
     }
     return (
-      `Duration over time of ${rows.length} traces in the last ${since}: ${counts.err} with errors or error stories, ${counts.slow} with slow stories; ` +
+      `Duration over time of ${rows.length} traces in ${rangePhrase(range)}: ${counts.err} with errors or error stories, ${counts.slow} with slow stories; ` +
       `durations from ${duration(lo)} to ${duration(hi)}.` +
       (rect ? ` ${selected.length} selected between ${duration(rect.d0 * 1e6)} and ${duration(rect.d1 * 1e6)}.` : '')
     )
-  }, [rows, since, counts, rect, selected])
+  }, [rows, range, counts, rect, selected])
 
   const filtered = Boolean(search.service || search.endpoint || search.min_ms !== undefined || search.max_ms !== undefined || search.errors)
   const empty = traces.isSuccess && rows.length === 0
@@ -177,7 +177,7 @@ export function TracesExplorer() {
       <Card className="overflow-visible">
         <TraceFilters
           search={search}
-          since={since}
+          range={range}
           services={services.data ?? []}
           endpoints={endpointOptions}
           onSearch={onFilter}
@@ -212,10 +212,10 @@ export function TracesExplorer() {
             title="No traces match"
             description={
               rootOnly
-                ? `No trace in the last ${since} starts at ${search.service} with these filters. It may still take part in others.`
+                ? `No trace in ${rangePhrase(range)} starts at ${search.service} with these filters. It may still take part in others.`
                 : filtered
-                  ? `Nothing in the last ${since} matches these filters.`
-                  : `No traces in the last ${since}. A longer time range may show older ones.`
+                  ? `Nothing in ${rangePhrase(range)} matches these filters.`
+                  : `No traces in ${rangePhrase(range)}.${widerHint(range, 'ones')}`
             }
             action={
               rootOnly ? (
@@ -276,7 +276,7 @@ export function TracesExplorer() {
             />
           ) : (
             <Reveal>
-              <TraceTable rows={selected} extent={rows} logY={logY} since={since} sort={sort} onSort={setSort} />
+              <TraceTable rows={selected} extent={rows} logY={logY} range={range} sort={sort} onSort={setSort} />
             </Reveal>
           )}
         </Card>

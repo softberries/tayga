@@ -3,7 +3,6 @@
  * can be invalidated together. Every queryFn forwards Query's AbortSignal to fetch.
  */
 import { queryOptions } from '@tanstack/react-query'
-import type { Since } from '../app/search'
 import { getJson } from './client'
 import type { Params } from './client'
 import type {
@@ -33,41 +32,41 @@ function q<T>(key: string, path: string, params?: Params) {
   })
 }
 
+/** The API's window params for a range: `since`, and `until` for a custom range. */
+type Win = { since: string; until?: string }
+
 export const api = {
-  /** `since` may be any API window (e.g. "2h" for the previous-window delta). */
-  overview: (since: string) => q<OverviewView>('overview', '/overview', { since }),
-  storyGroups: (p: { since: Since; kind?: string; service?: string }) =>
-    q<StoryGroup[]>('story-groups', '/story-groups', p),
-  storyGroup: (fingerprint: string, since: Since) =>
-    q<GroupDetail>('story-groups', `/story-groups/${encodeURIComponent(fingerprint)}`, { since }),
-  storiesSeries: (p: { since: Since; kind?: string; service?: string }) =>
-    q<StoriesSeries>('stories-series', '/stories/series', p),
+  /** Any API window, e.g. the doubled one for the previous-window delta. */
+  overview: (w: Win) => q<OverviewView>('overview', '/overview', w),
+  storyGroups: (p: Win & { kind?: string; service?: string }) => q<StoryGroup[]>('story-groups', '/story-groups', p),
+  storyGroup: (fingerprint: string, w: Win) =>
+    q<GroupDetail>('story-groups', `/story-groups/${encodeURIComponent(fingerprint)}`, w),
+  storiesSeries: (p: Win & { kind?: string; service?: string }) => q<StoriesSeries>('stories-series', '/stories/series', p),
   story: (id: string) => q<StoryView>('story', `/stories/${encodeURIComponent(id)}`),
   trace: (id: string) => q<TraceView>('trace', `/traces/${encodeURIComponent(id)}`),
   traceLogTemplates: (id: string) =>
     q<TraceLogTemplate[]>('trace', `/traces/${encodeURIComponent(id)}/log-templates`),
-  traceSearch: (p: {
-    since: Since
-    service?: string
-    touched?: 1
-    endpoint?: string
-    min_ms?: number
-    max_ms?: number
-    errors?: boolean
-    limit?: number
-  }) => q<TraceHit[]>('trace-search', '/traces/search', p),
-  serviceMap: (since: Since) => q<ServiceMapView>('service-map', '/service-map', { since }),
+  traceSearch: (
+    p: Win & {
+      service?: string
+      touched?: 1
+      endpoint?: string
+      min_ms?: number
+      max_ms?: number
+      errors?: boolean
+      limit?: number
+    },
+  ) => q<TraceHit[]>('trace-search', '/traces/search', p),
+  serviceMap: (w: Win) => q<ServiceMapView>('service-map', '/service-map', w),
   services: () => q<string[]>('services', '/services'),
-  service: (name: string, since: Since) =>
-    q<ServiceView>('service', `/services/${encodeURIComponent(name)}`, { since }),
-  logAlerts: (p: { since: Since; kind?: string; service?: string }) =>
-    q<LogAlertView[]>('log-alerts', '/log-alerts', p),
-  logTemplates: (p: { since: Since; service?: string; q?: string }) =>
+  service: (name: string, w: Win) => q<ServiceView>('service', `/services/${encodeURIComponent(name)}`, w),
+  logAlerts: (p: Win & { kind?: string; service?: string }) => q<LogAlertView[]>('log-alerts', '/log-alerts', p),
+  logTemplates: (p: Win & { service?: string; q?: string }) =>
     q<LogTemplateListItem[]>('log-templates', '/log-templates', p),
-  logTemplate: (id: string, since: Since) =>
-    q<LogTemplateDetail>('log-templates', `/log-templates/${encodeURIComponent(id)}`, { since }),
+  logTemplate: (id: string, w: Win) =>
+    q<LogTemplateDetail>('log-templates', `/log-templates/${encodeURIComponent(id)}`, w),
   search: (text: string) => q<SearchView>('search', '/search', { q: text }),
-  pipelineSeries: (p: { since: Since; metric: string; kind: string; job?: string; labels?: string }) =>
+  pipelineSeries: (p: Win & { metric: string; kind: string; job?: string; labels?: string }) =>
     q<SeriesView>('pipeline-series', '/pipeline/series', p),
   pipelineLag: () => q<ConsumerLag[]>('pipeline-lag', '/pipeline/lag'),
   /** Read from the API's own config, not ClickHouse: kept out of the storage banner. */

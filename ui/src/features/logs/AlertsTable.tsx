@@ -7,8 +7,8 @@
  */
 import { Link } from '@tanstack/react-router'
 import type { LogAlertView } from '../../api/types'
-import { sinceSearch } from '../../app/search'
-import type { Since } from '../../app/search'
+import { rangeSearch } from '../../app/range'
+import type { Range } from '../../app/range'
 import { Badge } from '../../components/ui/Badge'
 import { TruncationTooltip } from '../../components/ui/Tooltip'
 import { cx } from '../../lib/cx'
@@ -28,7 +28,7 @@ function Moment({ ns, nowMs }: { ns: number; nowMs: number }) {
   )
 }
 
-export function ExampleTraces({ alert, since }: { alert: LogAlertView; since: Since }) {
+export function ExampleTraces({ alert, range }: { alert: LogAlertView; range: Range }) {
   if (alert.example_traces.length === 0) return <span className="text-xs text-faint">none</span>
   return (
     <ul aria-label="Example traces" className="m-0 flex min-w-[250px] list-none flex-wrap gap-x-2 gap-y-1 p-0">
@@ -38,7 +38,7 @@ export function ExampleTraces({ alert, since }: { alert: LogAlertView; since: Si
           <li key={e.trace_id}>
             <Link
               {...target}
-              search={sinceSearch(since)}
+              search={rangeSearch(range)}
               aria-label={`${e.story_id ? 'Story' : 'Trace'} ${e.trace_id}`}
               title={e.story_id ? `Story ${e.story_id}` : `Trace ${e.trace_id}`}
               className={`rounded-badge border px-1.5 py-px font-mono text-[11px] hover:underline ${e.story_id ? 'border-accent/50 text-accent' : 'border-field-line text-muted hover:text-ink'}`}
@@ -63,13 +63,13 @@ function Status({ active }: { active: boolean }) {
   )
 }
 
-function TemplateLink({ a, since, className }: { a: LogAlertView; since: Since; className: string }) {
+function TemplateLink({ a, range, className }: { a: LogAlertView; range: Range; className: string }) {
   return (
     <TruncationTooltip content={<span className="font-mono">{a.template}</span>}>
       <Link
         to="/logs/templates/$templateId"
         params={{ templateId: a.template_id }}
-        search={sinceSearch(since)}
+        search={rangeSearch(range)}
         className={cx('block truncate font-mono text-xs text-ink hover:underline', className)}
       >
         {a.template}
@@ -80,7 +80,7 @@ function TemplateLink({ a, since, className }: { a: LogAlertView; since: Since; 
 
 export interface AlertsTableProps {
   alerts: readonly LogAlertView[]
-  since: Since
+  range: Range
   nowMs: number
   /** Service and template columns; off when every row is the same template. */
   showTemplate?: boolean
@@ -89,12 +89,12 @@ export interface AlertsTableProps {
   height?: number | string
 }
 
-function AlertCards({ alerts, since, nowMs, showTemplate, label }: Required<Omit<AlertsTableProps, 'height'>>) {
+function AlertCards({ alerts, range, nowMs, showTemplate, label }: Required<Omit<AlertsTableProps, 'height'>>) {
   return (
     <ul aria-label={label} className="m-0 list-none p-0">
       {alerts.map((a) => (
         <li key={a.alert_id} className="flex flex-col gap-1.5 border-b border-line-soft px-4 py-3 last:border-b-0">
-          {showTemplate ? <TemplateLink a={a} since={since} className="w-full" /> : null}
+          {showTemplate ? <TemplateLink a={a} range={range} className="w-full" /> : null}
           <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs">
             <Badge kind={a.kind}>{a.kind}</Badge>
             {showTemplate ? (
@@ -109,14 +109,14 @@ function AlertCards({ alerts, since, nowMs, showTemplate, label }: Required<Omit
               <Moment ns={a.last_at_ns} nowMs={nowMs} />
             </span>
           </div>
-          <ExampleTraces alert={a} since={since} />
+          <ExampleTraces alert={a} range={range} />
         </li>
       ))}
     </ul>
   )
 }
 
-export function AlertsTable({ alerts, since, nowMs, showTemplate = true, label = 'Log alerts', height = 'min(70vh, 760px)' }: AlertsTableProps) {
+export function AlertsTable({ alerts, range, nowMs, showTemplate = true, label = 'Log alerts', height = 'min(70vh, 760px)' }: AlertsTableProps) {
   const narrow = useMediaQuery(NARROW_QUERY)
   return (
     <div
@@ -127,7 +127,7 @@ export function AlertsTable({ alerts, since, nowMs, showTemplate = true, label =
       style={{ maxHeight: height }}
     >
       {narrow ? (
-        <AlertCards alerts={alerts} since={since} nowMs={nowMs} showTemplate={showTemplate} label={label} />
+        <AlertCards alerts={alerts} range={range} nowMs={nowMs} showTemplate={showTemplate} label={label} />
       ) : (
         <table aria-label={label} className="w-full border-collapse text-[13px]">
           <thead className="sticky top-0 z-10 bg-panel">
@@ -177,7 +177,7 @@ export function AlertsTable({ alerts, since, nowMs, showTemplate = true, label =
                       </span>
                     </td>
                     <td className={td}>
-                      <TemplateLink a={a} since={since} className="w-[clamp(160px,28vw,420px)]" />
+                      <TemplateLink a={a} range={range} className="w-[clamp(160px,28vw,420px)]" />
                     </td>
                   </>
                 ) : null}
@@ -192,7 +192,7 @@ export function AlertsTable({ alerts, since, nowMs, showTemplate = true, label =
                   <Status active={a.active} />
                 </td>
                 <td className={td}>
-                  <ExampleTraces alert={a} since={since} />
+                  <ExampleTraces alert={a} range={range} />
                 </td>
               </tr>
             ))}

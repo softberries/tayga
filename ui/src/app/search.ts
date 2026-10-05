@@ -4,35 +4,72 @@ export const SINCE_VALUES = ['15m', '1h', '24h', '7d'] as const
 export type Since = (typeof SINCE_VALUES)[number]
 export const DEFAULT_SINCE: Since = '1h'
 
+/** The API's `since` bounds: 1 s to 7 days. */
+export const MAX_SINCE_SECS = 7 * 86_400
+
 export interface RootSearch {
-  /** Time range; absent means DEFAULT_SINCE, so the default keeps URLs clean. */
-  since?: Since
+  /**
+   * Time range length. A preset, absent for DEFAULT_SINCE so the default keeps URLs clean; with
+   * `until`, any API duration (`<n>[smhd]`, 1 s to 7 d).
+   */
+  since?: string
+  /** End of a custom range, RFC 3339 in UTC (`2026-10-04T12:00:00Z`); absent means now. */
+  until?: string
 }
 
 function isSince(v: unknown): v is Since {
   return typeof v === 'string' && (SINCE_VALUES as readonly string[]).includes(v)
 }
 
+const UNIT_SECS: Record<string, number> = { s: 1, m: 60, h: 3600, d: 86_400 }
+
+/** Seconds of an API duration (`<n>[smhd]`, 1 s to 7 d), else undefined. */
+export function sinceSecs(v: unknown): number | undefined {
+  const m = typeof v === 'string' ? /^(\d{1,9})([smhd])$/.exec(v) : null
+  if (!m) return undefined
+  const secs = Number(m[1]) * (UNIT_SECS[m[2] ?? ''] ?? 0)
+  return secs >= 1 && secs <= MAX_SINCE_SECS ? secs : undefined
+}
+
+const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/
+
+/**
+ * Unix ms of an `until` value: RFC 3339, or unix seconds (the router parses `?until=1791115200`
+ * as a number). Whole seconds, as the API reads it.
+ */
+export function untilMs(v: unknown): number | undefined {
+  const ms =
+    typeof v === 'number' && Number.isSafeInteger(v) && v > 0 && v < 1e11
+      ? v * 1000
+      : typeof v === 'string' && RFC3339.test(v)
+        ? Date.parse(v)
+        : NaN
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) * 1000 : undefined
+}
+
+/** `until` as the URL and the API carry it: RFC 3339 in UTC, whole seconds. */
+export function formatUntil(ms: number): string {
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z')
+}
+
 /**
  * Router `validateSearch` for the root route. The router merges the result over the raw
- * search, so an invalid or default value is overridden with an explicit `undefined`.
+ * search, so an invalid or default value is overridden with an explicit `undefined`. A custom
+ * range needs both a valid `until` and a valid `since`; otherwise only a preset `since` stays.
+ * Whether the range is still within retention is the API's call (a 400 the page shows).
  */
 export function validateRootSearch(search: Record<string, unknown>): RootSearch {
-  return { since: isSince(search.since) && search.since !== DEFAULT_SINCE ? search.since : undefined }
+  const end = untilMs(search.until)
+  if (end !== undefined && sinceSecs(search.since ?? DEFAULT_SINCE) !== undefined) {
+    return { since: search.since === DEFAULT_SINCE ? undefined : (search.since as string | undefined), until: formatUntil(end) }
+  }
+  return { since: isSince(search.since) && search.since !== DEFAULT_SINCE ? search.since : undefined, until: undefined }
 }
 
 /** 32 lowercase-or-uppercase hex characters (trace and story ids). */
 export const HEX32 = /^[0-9a-fA-F]{32}$/
 /** A u64 as decimal digits (template ids, fingerprints). */
 export const U64 = /^[0-9]{1,20}$/
-
-/**
- * Search for a cross-section link: only the time range travels, so one page's filters never
- * leak into another section. The default range stays out of the URL.
- */
-export function sinceSearch(since: Since): RootSearch {
-  return { since: since === DEFAULT_SINCE ? undefined : since }
-}
 
 /** 16 hex characters (span ids). */
 export const HEX16 = /^[0-9a-fA-F]{16}$/
@@ -88,13 +125,12 @@ export function validateMapSearch(s: Record<string, unknown>): MapSearch {
 export const SINCE_SECS: Record<Since, number> = { '15m': 900, '1h': 3600, '24h': 86_400, '7d': 604_800 }
 
 /**
- * The smallest range, no smaller than `atLeast`, whose window still contains a moment `tsNs`
- * (unix ns) as seen at `nowMs`; `7d` when even that is too short.
+ * The smallest preset, no shorter than `atLeastSecs`, whose window still contains a moment
+ * `tsNs` (unix ns) as seen at `nowMs`; `7d` when even that is too short.
  */
-export function sinceCovering(tsNs: number, nowMs: number, atLeast: Since = '15m'): Since {
+export function sinceCovering(tsNs: number, nowMs: number, atLeastSecs: number = SINCE_SECS['15m']): Since {
   const ageSecs = (nowMs - tsNs / 1e6) / 1000
-  const floor = SINCE_SECS[atLeast]
-  return SINCE_VALUES.find((s) => SINCE_SECS[s] >= floor && SINCE_SECS[s] >= ageSecs) ?? '7d'
+  return SINCE_VALUES.find((s) => SINCE_SECS[s] >= atLeastSecs && SINCE_SECS[s] >= ageSecs) ?? '7d'
 }
 
 /**

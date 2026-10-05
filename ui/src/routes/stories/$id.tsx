@@ -10,11 +10,11 @@ import { useCallback, useMemo, useState } from 'react'
 import { isApiError } from '../../api/client'
 import { api } from '../../api/queries'
 import type { GroupDetail, LogAlertView, StoryView, TraceLogTemplate, TraceView } from '../../api/types'
-import { sinceCovering, sinceSearch } from '../../app/search'
-import type { Since } from '../../app/search'
+import { rangeBounds, rangeParams, rangePhrase, rangeSearch, trendRange } from '../../app/range'
+import type { Range } from '../../app/range'
 import type { StorySearch } from '../../app/search'
 import { TimeSeries } from '../../components/charts/TimeSeries'
-import { useSince } from '../../components/shell/TimeRange'
+import { useRange } from '../../app/useRange'
 import { LogTable } from '../../components/trace/LogTable'
 import { PathChips } from '../../components/trace/PathChips'
 import { TraceDetail } from '../../components/trace/TraceDetail'
@@ -103,11 +103,15 @@ function StoryHeader({ story, services }: { story: StoryView; services: number |
   )
 }
 
-function GroupTrend({ story, group, since }: { story: StoryView; group: UseQueryResult<GroupDetail>; since: Since }) {
+function GroupTrend({ story, group, range }: { story: StoryView; group: UseQueryResult<GroupDetail>; range: Range }) {
   const points = useMemo(
     () => (group.data?.group.buckets ?? []).map(([t, n]) => [t * 1000, n] as const),
     [group.data],
   )
+  const [start, end] = rangeBounds(range, group.dataUpdatedAt)
+  // Bars sit at their bucket's start: half a bucket on each side keeps the first and last whole.
+  const step = (group.data?.group.bucket_secs ?? 60) * 1000
+  const xRange = useMemo(() => [start - step / 2, end + step / 2] as const, [start, end, step])
   const series = useMemo(
     () => [{ name: 'Stories', points, tone: story.kind === 'slow' ? ('slow' as const) : ('err' as const), type: 'bar' as const }],
     [points, story.kind],
@@ -119,7 +123,7 @@ function GroupTrend({ story, group, since }: { story: StoryView; group: UseQuery
         <PanelTitle>Group trend</PanelTitle>
         {group.data ? (
           <span className="ml-auto text-xs text-muted">
-            {compact(group.data.group.stories)} stories · {since}
+            {compact(group.data.group.stories)} stories · {range.label}
           </span>
         ) : null}
       </div>
@@ -139,7 +143,8 @@ function GroupTrend({ story, group, since }: { story: StoryView; group: UseQuery
           height={180}
           markAt={story.ts_ns / 1e6}
           markLabel="this story"
-          summary={`Stories per ${group.data.group.bucket_secs} seconds in this group over ${since}: ${group.data.group.stories} in total, at most ${peak} in one bucket.`}
+          xRange={xRange}
+          summary={`Stories per ${group.data.group.bucket_secs} seconds in this group over ${rangePhrase(range)}: ${group.data.group.stories} in total, at most ${peak} in one bucket.`}
         />
       )}
     </Card>
@@ -344,15 +349,15 @@ export function StoryPage() {
   const { storyId } = useParams({ from: '/stories/$storyId' })
   const search = useSearch({ from: '/stories/$storyId' })
   const onSearch = useStorySearchUpdater()
-  const since = useSince()
+  const range = useRange()
   const story = useQuery(api.story(storyId))
   const s = story.data
   const trace = useQuery({ ...api.trace(s?.trace_id ?? ''), enabled: s !== undefined })
   // The trend uses the header range, widened until it contains the story itself, so an
   // older story still shows its group (and the API does not answer 404 for an empty range).
   const [now] = useState(() => Date.now())
-  const trendSince = s ? sinceCovering(s.ts_ns, now, since) : since
-  const group = useQuery({ ...api.storyGroup(s?.fingerprint ?? '', trendSince), enabled: s !== undefined })
+  const trend = s ? trendRange(range, s.ts_ns, now) : range
+  const group = useQuery({ ...api.storyGroup(s?.fingerprint ?? '', rangeParams(trend)), enabled: s !== undefined })
   const hasLogs = (trace.data?.logs.length ?? 0) > 0
   const templates = useQuery({ ...api.traceLogTemplates(s?.trace_id ?? ''), enabled: hasLogs })
   const alerts = useQuery({ ...api.logAlerts({ since: '7d' }), enabled: s !== undefined })
@@ -384,7 +389,7 @@ export function StoryPage() {
       <RefreshNote queries={[story, trace, group, templates, alerts]} />
       <StoryHeader story={st} services={services} />
       <div className="grid gap-4 lg:grid-cols-2">
-        <GroupTrend story={st} group={group} since={trendSince} />
+        <GroupTrend story={st} group={group} range={trend} />
         <ComparedWithNormal story={st} />
       </div>
       <WaterfallCard story={st} trace={trace} templates={templates.data} search={search} onSearch={onSearch} />
@@ -412,7 +417,7 @@ export function StoryPage() {
       </Card>
       <RelatedAlerts alerts={alerts} traceId={st.trace_id} templates={templates.data} />
       <p className="m-0 text-xs text-muted">
-        <Link to="/" search={sinceSearch(since)} className="text-accent hover:underline">
+        <Link to="/" search={rangeSearch(range)} className="text-accent hover:underline">
           Back to stories
         </Link>
       </p>

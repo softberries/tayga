@@ -6,8 +6,7 @@
 import { useQueries, useQuery } from '@tanstack/react-query'
 import { Activity } from 'lucide-react'
 import { api } from '../api/queries'
-import { useLiveInterval } from '../app/live'
-import { useSince } from '../components/shell/TimeRange'
+import { useAutoRefresh, useRange } from '../app/useRange'
 import { Card, PanelTitle } from '../components/ui/Card'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Skeleton } from '../components/ui/Skeleton'
@@ -19,8 +18,8 @@ import { CHARTS, JOBS, STATUS_SINCE } from '../features/pipeline/model'
 import { ErrorBanner } from '../features/stories/ErrorBanner'
 
 export function PipelinePage() {
-  const since = useSince()
-  const refetchInterval = useLiveInterval()
+  const range = useRange()
+  const refetchInterval = useAutoRefresh()
   const up = useQueries({
     queries: JOBS.map((job) => ({
       ...api.pipelineSeries({ since: STATUS_SINCE, metric: 'up', kind: 'gauge', job }),
@@ -59,7 +58,7 @@ export function PipelinePage() {
                 <Skeleton className="h-[222px]" />
               </Card>
             ) : (
-              <PipelineChart key={spec.id} spec={spec} since={since} refetchInterval={refetchInterval} />
+              <PipelineChart key={spec.id} spec={spec} range={range} refetchInterval={refetchInterval} />
             ),
           )}
         </div>

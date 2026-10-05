@@ -2,8 +2,8 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { ExternalLink, SearchX } from 'lucide-react'
 import { api } from '../../api/queries'
-import { sinceSearch } from '../../app/search'
-import { useSince } from '../shell/TimeRange'
+import { rangeSearch } from '../../app/range'
+import { useRange } from '../../app/useRange'
 import { Button } from '../ui/Button'
 import { Card } from '../ui/Card'
 import { EmptyState } from '../ui/EmptyState'
@@ -28,7 +28,7 @@ export function JaegerLink({ traceId }: { traceId: string }) {
 }
 
 export function NotFoundCard({ title, description }: { title: string; description: string }) {
-  const since = useSince()
+  const range = useRange()
   return (
     <Card className="tg-in">
       <EmptyState
@@ -37,7 +37,7 @@ export function NotFoundCard({ title, description }: { title: string; descriptio
         description={description}
         action={
           <Button asChild size="sm">
-            <Link to="/" search={sinceSearch(since)}>
+            <Link to="/" search={rangeSearch(range)}>
               Go to stories
             </Link>
           </Button>

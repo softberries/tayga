@@ -1,9 +1,9 @@
-import { SINCE_SECS } from '../../app/search'
 import { useQueries } from '@tanstack/react-query'
 import { Activity } from 'lucide-react'
 import { useMemo } from 'react'
 import { api } from '../../api/queries'
-import type { Since } from '../../app/search'
+import { rangeBounds, rangeParams, rangePhrase } from '../../app/range'
+import type { Range } from '../../app/range'
 import { TimeSeries } from '../../components/charts/TimeSeries'
 import { Card, PanelTitle } from '../../components/ui/Card'
 import { EmptyState } from '../../components/ui/EmptyState'
@@ -17,21 +17,22 @@ import type { ChartSpec } from './model'
 export const COLLECTING = 'Collecting… first points in 15 s'
 
 /** One metric chart: a request per series line, drawn together on a themed time axis. */
-export function PipelineChart({ spec, since, refetchInterval }: { spec: ChartSpec; since: Since; refetchInterval: number | false }) {
+export function PipelineChart({ spec, range, refetchInterval }: { spec: ChartSpec; range: Range; refetchInterval: number | false }) {
   const results = useQueries({
     queries: spec.series.map((s) => ({
-      ...api.pipelineSeries({ since, metric: s.metric, kind: s.kind, job: s.job, labels: s.labels }),
+      ...api.pipelineSeries({ ...rangeParams(range), metric: s.metric, kind: s.kind, job: s.job, labels: s.labels }),
       refetchInterval,
     })),
   })
   const updated = Math.max(...results.map((r) => r.dataUpdatedAt))
+  const [start, end] = rangeBounds(range, updated)
   const lines = useMemo(
-    () => spec.series.map((s, i) => ({ name: s.name, tone: s.tone, type: spec.type, points: seriesPoints(results[i]?.data, s.scale, updated) })),
+    () => spec.series.map((s, i) => ({ name: s.name, tone: s.tone, type: spec.type, points: seriesPoints(results[i]?.data, s.scale, end) })),
     // `results` is a fresh array each render; the data only changes with the update stamps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [spec, updated],
+    [spec, updated, end],
   )
-  const xRange = useMemo(() => [updated - SINCE_SECS[since] * 1000, updated] as const, [updated, since])
+  const xRange = useMemo(() => [start, end] as const, [start, end])
   const failed = results.find((r) => r.isError)
   // A failed refetch keeps the last good data (stale); a first load that failed has none (missing).
   const stale = results.filter((r) => r.isError && r.data !== undefined)
@@ -47,7 +48,7 @@ export function PipelineChart({ spec, since, refetchInterval }: { spec: ChartSpe
     })
     .filter((v): v is string => v !== null)
   const retry = () => results.forEach((r) => void r.refetch())
-  const summary = `${spec.title}, ${spec.unit}, last ${since}.${latest.length ? ` Latest: ${latest.join(', ')}.` : ''}`
+  const summary = `${spec.title}, ${spec.unit}, ${rangePhrase(range)}.${latest.length ? ` Latest: ${latest.join(', ')}.` : ''}`
 
   return (
     <Card className="flex min-w-0 flex-col gap-2 px-4 py-3.5">

@@ -14,9 +14,10 @@ import { ExternalLink, Network, Search } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api/queries'
 import type { Health, ServiceMapView } from '../api/types'
-import { useLiveInterval } from '../app/live'
-import type { MapSearch, Since } from '../app/search'
-import { useSince } from '../components/shell/TimeRange'
+import type { MapSearch } from '../app/search'
+import { rangeParams, rangePhrase, widerHint } from '../app/range'
+import type { Range } from '../app/range'
+import { useAutoRefresh, useRange } from '../app/useRange'
 import { Button } from '../components/ui/Button'
 import { Card, PanelTitle } from '../components/ui/Card'
 import { EmptyState } from '../components/ui/EmptyState'
@@ -90,13 +91,13 @@ function Legend() {
 interface CanvasProps {
   map: ServiceMapView
   layout: MapLayout
-  since: Since
+  range: Range
   matches: ReadonlySet<string>
   active: string | undefined
   onOpen: (service: string) => void
 }
 
-function Canvas({ map, layout, since, matches, active, onOpen }: CanvasProps) {
+function Canvas({ map, layout, range, matches, active, onOpen }: CanvasProps) {
   const { fitView, getViewport, setViewport } = useReactFlow()
   const narrow = useMediaQuery(NARROW_QUERY)
   const reduce = useMediaQuery(REDUCED_MOTION_QUERY)
@@ -167,7 +168,7 @@ function Canvas({ map, layout, since, matches, active, onOpen }: CanvasProps) {
         .filter((e) => e.parent !== e.child && layout.positions[e.parent] && layout.positions[e.child])
         .map((e) => {
           const id = edgeId(e.parent, e.child)
-          const perMin = callsPerMin(e.calls, since)
+          const perMin = callsPerMin(e.calls, range)
           const tone = edgeTone(e)
           return {
             id,
@@ -187,7 +188,7 @@ function Canvas({ map, layout, since, matches, active, onOpen }: CanvasProps) {
         })
         // Failing edges last, so they draw over the others (all edges stay under the cards).
         .sort((a, b) => Number(a.data.tone === 'err') - Number(b.data.tone === 'err')),
-    [map.edges, layout, since, pinned, searching, matches],
+    [map.edges, layout, range, pinned, searching, matches],
   )
 
   const activeRef = useRef(active)
@@ -279,14 +280,14 @@ function CanvasSkeleton({ label }: { label: string }) {
 }
 
 function MapView() {
-  const since = useSince()
+  const range = useRange()
   const search = useSearch({ from: '/map' })
   const navigate = useNavigate({ from: '/map' })
-  const refetchInterval = useLiveInterval()
+  const refetchInterval = useAutoRefresh()
   const reduce = useMediaQuery(REDUCED_MOTION_QUERY)
   const { fitView } = useReactFlow()
 
-  const map = useQuery({ ...api.serviceMap(since), refetchInterval, placeholderData: keepPreviousData })
+  const map = useQuery({ ...api.serviceMap(rangeParams(range)), refetchInterval, placeholderData: keepPreviousData })
   const config = useQuery(api.config())
   const grafana = grafanaMapUrl(config.data?.grafana_url)
 
@@ -386,7 +387,7 @@ function MapView() {
             className="m-auto"
             icon={<Network size={18} />}
             title="No service calls in this window"
-            description={`Tayga has seen no spans in the last ${since}. A longer time range may show older calls.`}
+            description={`Tayga has seen no spans in ${rangePhrase(range)}.${widerHint(range, 'calls')}`}
           />
         ) : layout.isError ? (
           <ErrorState error={layout.error} title="Could not lay out the map" onRetry={() => void layout.refetch()} className="m-auto" />
@@ -395,7 +396,7 @@ function MapView() {
         ) : (
           <section aria-label="Service map canvas" className="absolute inset-0">
             <p className="sr-only">{describeMap(data)}</p>
-            <Canvas map={data} layout={layout.data} since={since} matches={matches} active={search.service} onOpen={onOpen} />
+            <Canvas map={data} layout={layout.data} range={range} matches={matches} active={search.service} onOpen={onOpen} />
             <Legend />
           </section>
         )}
@@ -404,7 +405,7 @@ function MapView() {
       <ServiceDrawer
         service={search.service}
         map={data}
-        since={since}
+        range={range}
         onClose={() => setSearch({ service: undefined })}
         onCloseAutoFocus={onCloseAutoFocus}
       />

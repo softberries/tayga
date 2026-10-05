@@ -8,10 +8,9 @@ import { Link, useNavigate, useSearch } from '@tanstack/react-router'
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../api/queries'
 import type { StoryGroup } from '../../api/types'
-import { useLiveInterval } from '../../app/live'
-import { sinceSearch } from '../../app/search'
+import { doubledRange, rangeParams, rangePhrase, rangeSearch, widerHint } from '../../app/range'
 import type { HomeSearch } from '../../app/search'
-import { useSince } from '../../components/shell/TimeRange'
+import { useAutoRefresh, useRange } from '../../app/useRange'
 import { Card, PanelTitle } from '../../components/ui/Card'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { Skeleton } from '../../components/ui/Skeleton'
@@ -22,7 +21,6 @@ import { GroupsTable } from '../../features/stories/GroupsTable'
 import { Inspector, WIDE_QUERY } from '../../features/stories/Inspector'
 import { KpiTiles, KpiTilesSkeleton } from '../../features/stories/KpiTiles'
 import { MiniMap } from '../../features/stories/MiniMap'
-import { doubleSince } from '../../features/stories/model'
 import { useMediaQuery } from '../../lib/useMediaQuery'
 import { Reveal } from '../../components/ui/Reveal'
 
@@ -49,18 +47,22 @@ function TableSkeleton() {
 }
 
 export function StoriesHome() {
-  const since = useSince()
+  const range = useRange()
   const search = useSearch({ from: '/' })
   const navigate = useNavigate({ from: '/' })
-  const refetchInterval = useLiveInterval()
+  const refetchInterval = useAutoRefresh()
   const wide = useMediaQuery(WIDE_QUERY)
 
-  const overview = useQuery({ ...api.overview(since), refetchInterval })
-  const dbl = doubleSince(since)
-  const doubled = useQuery({ ...api.overview(dbl ?? ''), enabled: dbl !== null, refetchInterval })
-  const groups = useQuery({ ...api.storyGroups({ since }), refetchInterval })
-  const map = useQuery({ ...api.serviceMap(since), refetchInterval })
-  const alerts = useQuery({ ...api.logAlerts({ since }), refetchInterval })
+  const win = rangeParams(range)
+  const overview = useQuery({ ...api.overview(win), refetchInterval })
+  // The current and the previous window together, for the "vs prev" deltas; null past 7 days
+  // or retention. The clock only matters for a custom range, whose end is fixed.
+  const [now] = useState(() => Date.now())
+  const dbl = doubledRange(range, now)
+  const doubled = useQuery({ ...api.overview(dbl ? rangeParams(dbl) : win), enabled: dbl !== null, refetchInterval })
+  const groups = useQuery({ ...api.storyGroups(win), refetchInterval })
+  const map = useQuery({ ...api.serviceMap(win), refetchInterval })
+  const alerts = useQuery({ ...api.logAlerts(win), refetchInterval })
 
   const onSearch = useCallback(
     (patch: Partial<HomeSearch>) =>
@@ -95,7 +97,7 @@ export function StoriesHome() {
       ) : empty ? (
         <EmptyState
           title="No stories in this window"
-          description={`Nothing failed or ran slow in the last ${since}. A longer time range may show older stories.`}
+          description={`Nothing failed or ran slow in ${rangePhrase(range)}.${widerHint(range, 'stories')}`}
         />
       ) : groups.data ? (
         <Reveal>
@@ -103,7 +105,7 @@ export function StoriesHome() {
           <GroupsTable
             groups={groups.data}
             search={search}
-            since={since}
+            range={range}
             nowMs={groups.dataUpdatedAt}
             onSearch={onSearch}
             selected={selected?.fingerprint}
@@ -127,14 +129,14 @@ export function StoriesHome() {
         ) : (
           <Reveal>
             <RefreshNote queries={[map]} className="mb-1.5" />
-            <MiniMap map={map.data} since={since} />
+            <MiniMap map={map.data} range={range} />
           </Reveal>
         )}
       </Card>
       <Card className="flex min-w-0 flex-col gap-2.5 px-4 py-3.5">
         <div className="flex items-baseline gap-2">
           <PanelTitle>Log alerts</PanelTitle>
-          <Link to="/logs/alerts" search={sinceSearch(since)} className="ml-auto text-xs text-accent hover:underline">
+          <Link to="/logs/alerts" search={rangeSearch(range)} className="ml-auto text-xs text-accent hover:underline">
             View all
           </Link>
         </div>
@@ -148,7 +150,7 @@ export function StoriesHome() {
         ) : (
           <Reveal>
             <RefreshNote queries={[alerts]} className="mb-2.5" />
-            <AlertsPanel alerts={alerts.data} since={since} nowMs={alerts.dataUpdatedAt} />
+            <AlertsPanel alerts={alerts.data} range={range} nowMs={alerts.dataUpdatedAt} />
           </Reveal>
         )}
       </Card>
@@ -165,7 +167,7 @@ export function StoriesHome() {
       ) : (
         <>
           <RefreshNote queries={[overview, doubled]} />
-          <KpiTiles overview={overview.data} doubled={doubled} alerts={alerts.data} since={since} nowMs={overview.dataUpdatedAt} />
+          <KpiTiles overview={overview.data} doubled={doubled} alerts={alerts.data} range={range} nowMs={overview.dataUpdatedAt} />
         </>
       )}
       {wide ? (

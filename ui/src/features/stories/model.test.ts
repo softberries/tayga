@@ -6,7 +6,6 @@ import {
   bucketWord,
   deltaText,
   denseSeries,
-  doubleSince,
   endpointOf,
   previousCount,
   splitSummary,
@@ -41,10 +40,16 @@ describe('splitSummary', () => {
 describe('denseSeries', () => {
   const now = 600_000 // 600 s
   it('fills missing buckets with zero over the window', () => {
-    expect(denseSeries([[360, 2], [480, 5]], 60, 300, now)).toEqual([0, 2, 0, 5, 0, 0])
+    expect(denseSeries([[360, 2], [480, 5]], 60, 300, now)).toEqual([0, 2, 0, 5, 0])
   })
   it('ignores buckets outside the window and bad values', () => {
-    expect(denseSeries([[0, 9], [600, Number.NaN], [540, 1]], 60, 120, now)).toEqual([0, 1, 0])
+    expect(denseSeries([[0, 9], [600, Number.NaN], [540, 1]], 60, 120, now)).toEqual([0, 1])
+  })
+  it('starts the grid at the window start, as the API buckets it', () => {
+    // A window of 300 s ending at 610 s starts at 310 s, not on a minute.
+    expect(denseSeries([[370, 2], [550, 4]], 60, 300, 610_000)).toEqual([0, 2, 0, 0, 4])
+    // A live window fetched a moment after the API computed its start still lines up.
+    expect(denseSeries([[370, 2]], 60, 300, 610_800)).toEqual([0, 2, 0, 0, 0])
   })
   it('keeps the newest points of a very long window', () => {
     const s = denseSeries([], 1, 10_000, now)
@@ -53,12 +58,6 @@ describe('denseSeries', () => {
 })
 
 describe('window deltas', () => {
-  it('doubles the window, except 7d', () => {
-    expect(doubleSince('15m')).toBe('30m')
-    expect(doubleSince('1h')).toBe('2h')
-    expect(doubleSince('24h')).toBe('48h')
-    expect(doubleSince('7d')).toBeNull()
-  })
   it('derives the previous count and describes the change', () => {
     expect(previousCount(96, 154)).toBe(58)
     expect(previousCount(10, 8)).toBe(0)
@@ -93,7 +92,7 @@ describe('alerts', () => {
   it('counts open alerts per bucket', () => {
     // Window 300 s ending at 600 s: buckets 300..600.
     expect(alertActivity([alert('spike', true, 350, 470), alert('new', false, 100, 310)], 60, 300, 600_000)).toEqual([
-      2, 1, 1, 0, 0, 0,
+      2, 1, 1, 0, 0,
     ])
   })
 })

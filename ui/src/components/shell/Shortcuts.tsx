@@ -1,9 +1,9 @@
 import { useNavigate } from '@tanstack/react-router'
 import { useEffect, useRef, useState } from 'react'
-import { sinceSearch } from '../../app/search'
+import { rangeSearch } from '../../app/range'
 import { DialogContent, DialogRoot } from '../ui/Dialog'
 import { Kbd } from '../ui/Kbd'
-import { useSince } from './TimeRange'
+import { useRange } from '../../app/useRange'
 
 const GO = {
   s: { to: '/', label: 'Stories' },
@@ -29,7 +29,7 @@ function typing(e: KeyboardEvent): boolean {
  */
 export function Shortcuts() {
   const navigate = useNavigate()
-  const since = useSince()
+  const range = useRange()
   const [help, setHelp] = useState(false)
   const armed = useRef<number | null>(null)
 
@@ -45,7 +45,7 @@ export function Shortcuts() {
         const dest = GO[e.key as keyof typeof GO]
         if (dest) {
           e.preventDefault()
-          void navigate({ to: dest.to, search: sinceSearch(since) })
+          void navigate({ to: dest.to, search: rangeSearch(range) })
           return
         }
       }
@@ -61,7 +61,7 @@ export function Shortcuts() {
       window.removeEventListener('keydown', onKey)
       disarm()
     }
-  }, [navigate, since])
+  }, [navigate, range])
 
   return (
     <DialogRoot open={help} onOpenChange={setHelp}>

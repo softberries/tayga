@@ -8,16 +8,29 @@ use tayga_store::metrics_store::MetricPointRow;
 /// A series' identity: its scrape job and its sorted label set.
 type SeriesKey = (String, Vec<(String, String)>);
 
-fn bucket_of(ts_ms: i64, step_ms: i64) -> i64 {
-    ts_ms - ts_ms.rem_euclid(step_ms)
+/// The bucket grid of a series: buckets are `step_secs` wide and start at `origin_ms` (the
+/// query window's start), as the stored samples were bucketed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Grid {
+    pub step_secs: u32,
+    pub origin_ms: i64,
+}
+
+impl Grid {
+    fn step_ms(self) -> i64 {
+        i64::from(self.step_secs.max(1)) * 1000
+    }
+
+    fn bucket_of(self, ts_ms: i64) -> i64 {
+        ts_ms - (ts_ms - self.origin_ms).rem_euclid(self.step_ms())
+    }
 }
 
 /// Per series, the last finite value in each step bucket.
 fn last_per_bucket(
     points: &[MetricPointRow],
-    step_secs: u32,
+    grid: Grid,
 ) -> BTreeMap<SeriesKey, BTreeMap<i64, f64>> {
-    let step_ms = i64::from(step_secs.max(1)) * 1000;
     let mut sorted: Vec<&MetricPointRow> = points.iter().filter(|p| p.value.is_finite()).collect();
     sorted.sort_by_key(|p| p.ts_ms);
     let mut out: BTreeMap<SeriesKey, BTreeMap<i64, f64>> = BTreeMap::new();
@@ -26,7 +39,7 @@ fn last_per_bucket(
         labels.sort();
         out.entry((p.job.clone(), labels))
             .or_default()
-            .insert(bucket_of(p.ts_ms, step_ms), p.value);
+            .insert(grid.bucket_of(p.ts_ms), p.value);
     }
     out
 }
@@ -46,9 +59,9 @@ fn increases(buckets: &BTreeMap<i64, f64>) -> impl Iterator<Item = (i64, f64, i6
 /// Per-second counter rate per step, summed over series. Each series contributes its increase
 /// since its previous sampled bucket divided by the time between them, which is the step
 /// when there is no gap.
-pub fn rate(points: &[MetricPointRow], step_secs: u32) -> Vec<(i64, f64)> {
+pub fn rate(points: &[MetricPointRow], grid: Grid) -> Vec<(i64, f64)> {
     let mut sum: BTreeMap<i64, f64> = BTreeMap::new();
-    for buckets in last_per_bucket(points, step_secs).values() {
+    for buckets in last_per_bucket(points, grid).values() {
         for (t, inc, elapsed_ms) in increases(buckets) {
             *sum.entry(t).or_default() += inc * 1000.0 / elapsed_ms as f64;
         }
@@ -57,9 +70,9 @@ pub fn rate(points: &[MetricPointRow], step_secs: u32) -> Vec<(i64, f64)> {
 }
 
 /// Last value per step, summed over series.
-pub fn gauge(points: &[MetricPointRow], step_secs: u32) -> Vec<(i64, f64)> {
+pub fn gauge(points: &[MetricPointRow], grid: Grid) -> Vec<(i64, f64)> {
     let mut sum: BTreeMap<i64, f64> = BTreeMap::new();
-    for buckets in last_per_bucket(points, step_secs).values() {
+    for buckets in last_per_bucket(points, grid).values() {
         for (t, v) in buckets {
             *sum.entry(*t).or_default() += v;
         }
@@ -78,14 +91,10 @@ fn parse_le(labels: &[(String, String)]) -> Option<f64> {
 /// The q-quantile per step from `_bucket` counter samples, as Prometheus
 /// `histogram_quantile(q, sum by (le) (increase(..._bucket[step])))` computes it. `None` when
 /// a step has no observations or the buckets are unusable.
-pub fn quantile(
-    bucket_points: &[MetricPointRow],
-    q: f64,
-    step_secs: u32,
-) -> Vec<(i64, Option<f64>)> {
+pub fn quantile(bucket_points: &[MetricPointRow], q: f64, grid: Grid) -> Vec<(i64, Option<f64>)> {
     // step -> le -> summed increase.
     let mut steps: BTreeMap<i64, Vec<(f64, f64)>> = BTreeMap::new();
-    for ((_, labels), buckets) in last_per_bucket(bucket_points, step_secs) {
+    for ((_, labels), buckets) in last_per_bucket(bucket_points, grid) {
         let Some(le) = parse_le(&labels) else {
             continue;
         };
@@ -154,6 +163,37 @@ fn bucket_quantile(q: f64, buckets: &[(f64, f64)]) -> Option<f64> {
 mod tests {
     use super::*;
 
+    /// A grid starting at the epoch.
+    fn epoch(step_secs: u32) -> Grid {
+        Grid {
+            step_secs,
+            origin_ms: 0,
+        }
+    }
+
+    #[test]
+    fn buckets_start_at_the_grid_origin() {
+        let g = Grid {
+            step_secs: 10,
+            origin_ms: 3_000,
+        };
+        assert_eq!(
+            [3_000, 12_999, 13_000, 2_999].map(|t| g.bucket_of(t)),
+            [3_000, 3_000, 13_000, -7_000]
+        );
+        let pts: Vec<MetricPointRow> = [(4_000, 1.0), (12_000, 2.0), (14_000, 6.0)]
+            .iter()
+            .map(|(ts_ms, value)| MetricPointRow {
+                ts_ms: *ts_ms,
+                job: "j".into(),
+                labels: vec![],
+                value: *value,
+            })
+            .collect();
+        assert_eq!(gauge(&pts, g), vec![(3_000, 2.0), (13_000, 6.0)]);
+        assert_eq!(rate(&pts, g), vec![(13_000, 0.4)]);
+    }
+
     fn p(ts_s: i64, labels: &[(&str, &str)], value: f64) -> MetricPointRow {
         MetricPointRow {
             ts_ms: ts_s * 1000,
@@ -177,7 +217,7 @@ mod tests {
             p(30, &[], 50.0),
         ];
         assert_eq!(
-            rate(&pts, 10),
+            rate(&pts, epoch(10)),
             vec![(10_000, 3.0), (20_000, 2.0), (30_000, 3.0)]
         );
     }
@@ -191,7 +231,7 @@ mod tests {
             p(12, &[], 120.0),
             p(1, &[], 100.0),
         ];
-        assert_eq!(rate(&pts, 10), vec![(10_000, 4.0)]);
+        assert_eq!(rate(&pts, epoch(10)), vec![(10_000, 4.0)]);
     }
 
     #[test]
@@ -204,7 +244,7 @@ mod tests {
             p(30, &[("kind", "spans")], 300.0),
             // logs has no sample in the third step: only spans contribute there.
         ];
-        assert_eq!(rate(&pts, 15), vec![(15_000, 30.0), (30_000, 10.0)]);
+        assert_eq!(rate(&pts, epoch(15)), vec![(15_000, 30.0), (30_000, 10.0)]);
     }
 
     #[test]
@@ -218,13 +258,13 @@ mod tests {
         let mut b2 = p(10, &[], 1010.0);
         b2.job = "b".into();
         // Merged into one series, 1000 -> 20 would read as a reset.
-        assert_eq!(rate(&[a, b, a2, b2], 10), vec![(10_000, 2.0)]);
+        assert_eq!(rate(&[a, b, a2, b2], epoch(10)), vec![(10_000, 2.0)]);
     }
 
     #[test]
     fn rate_over_a_gap_spreads_the_increase_over_the_elapsed_time() {
         let pts = vec![p(0, &[], 0.0), p(30, &[], 60.0)];
-        assert_eq!(rate(&pts, 10), vec![(30_000, 2.0)]);
+        assert_eq!(rate(&pts, epoch(10)), vec![(30_000, 2.0)]);
     }
 
     #[test]
@@ -237,7 +277,7 @@ mod tests {
             p(14, &[("g", "a")], f64::NAN),
         ];
         // Bucket 0: a's last is 7, b's is 1 -> 8. Bucket 10: a's last finite value is 4.
-        assert_eq!(gauge(&pts, 10), vec![(0, 8.0), (10_000, 4.0)]);
+        assert_eq!(gauge(&pts, epoch(10)), vec![(0, 8.0), (10_000, 4.0)]);
     }
 
     fn hist(ts_s: i64, counts: &[(&str, f64)]) -> Vec<MetricPointRow> {
@@ -272,7 +312,7 @@ mod tests {
         let mut pts = hist(0, &EXAMPLE.map(|(le, _)| (le, 0.0)));
         pts.extend(hist(10, &EXAMPLE));
         let at = |q: f64| {
-            let s = quantile(&pts, q, 10);
+            let s = quantile(&pts, q, epoch(10));
             assert_eq!(s.len(), 1, "{s:?}");
             assert_eq!(s[0].0, 10_000);
             s[0].1.expect("observations present")
@@ -287,7 +327,7 @@ mod tests {
     fn quantile_in_inf_bucket_returns_highest_finite_bound() {
         let mut pts = hist(0, &[("0.1", 0.0), ("0.2", 0.0), ("+Inf", 0.0)]);
         pts.extend(hist(10, &[("0.1", 1.0), ("0.2", 2.0), ("+Inf", 10.0)]));
-        assert_eq!(quantile(&pts, 0.99, 10), vec![(10_000, Some(0.2))]);
+        assert_eq!(quantile(&pts, 0.99, epoch(10)), vec![(10_000, Some(0.2))]);
     }
 
     #[test]
@@ -295,8 +335,8 @@ mod tests {
         // Counters unchanged between the two steps: no observations in step 10.
         let mut pts = hist(0, &EXAMPLE);
         pts.extend(hist(10, &EXAMPLE));
-        assert_eq!(quantile(&pts, 0.5, 10), vec![(10_000, None)]);
-        assert!(quantile(&[], 0.5, 10).is_empty());
+        assert_eq!(quantile(&pts, 0.5, epoch(10)), vec![(10_000, None)]);
+        assert!(quantile(&[], 0.5, epoch(10)).is_empty());
     }
 
     #[test]
@@ -316,6 +356,6 @@ mod tests {
         pts.extend(b(10, "b", [2.0, 4.0, 4.0]));
         // Merged: le 1: 4, le 2: 8, +Inf: 8. q 0.75 -> rank 6 -> bucket le 2:
         // 1 + (2 - 1) * (6 - 4) / (8 - 4) = 1.5.
-        assert_eq!(quantile(&pts, 0.75, 10), vec![(10_000, Some(1.5))]);
+        assert_eq!(quantile(&pts, 0.75, epoch(10)), vec![(10_000, Some(1.5))]);
     }
 }

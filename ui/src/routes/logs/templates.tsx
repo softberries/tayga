@@ -7,9 +7,9 @@ import { useNavigate, useSearch } from '@tanstack/react-router'
 import { Search } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../api/queries'
-import { useLiveInterval } from '../../app/live'
 import type { LogTemplatesSearch } from '../../app/search'
-import { useSince } from '../../components/shell/TimeRange'
+import { useAutoRefresh, useRange } from '../../app/useRange'
+import { rangeParams, rangePhrase, widerHint } from '../../app/range'
 import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
 import { Combobox } from '../../components/ui/Combobox'
@@ -69,14 +69,14 @@ function TableSkeleton() {
 }
 
 export function LogTemplatesPage() {
-  const since = useSince()
+  const range = useRange()
   const search = useSearch({ from: '/logs/templates/' })
   const navigate = useNavigate({ from: '/logs/templates/' })
-  const refetchInterval = useLiveInterval()
+  const refetchInterval = useAutoRefresh()
   const [sort, setSort] = useState<TemplateSort>({ key: 'count', desc: true })
   const services = useQuery(api.services())
   const templates = useQuery({
-    ...api.logTemplates({ since, service: search.service, q: search.q }),
+    ...api.logTemplates({ ...rangeParams(range), service: search.service, q: search.q }),
     refetchInterval,
     // Keep the old rows while a new filter loads, instead of flashing skeletons.
     placeholderData: keepPreviousData,
@@ -139,7 +139,7 @@ export function LogTemplatesPage() {
           <EmptyState
             title={filtered ? 'No templates match these filters' : 'No log templates in this window'}
             description={
-              filtered ? 'Clear the search or the service filter to see more.' : `No logs arrived in the last ${since}. A longer time range may show older templates.`
+              filtered ? 'Clear the search or the service filter to see more.' : `No logs arrived in ${rangePhrase(range)}.${widerHint(range, 'templates')}`
             }
             action={
               filtered ? (
@@ -151,7 +151,7 @@ export function LogTemplatesPage() {
           />
         ) : data ? (
           <Reveal>
-            <TemplatesTable rows={data} since={since} nowMs={templates.dataUpdatedAt} sort={sort} onSort={setSort} />
+            <TemplatesTable rows={data} range={range} nowMs={templates.dataUpdatedAt} sort={sort} onSort={setSort} />
           </Reveal>
         ) : null}
       </Card>

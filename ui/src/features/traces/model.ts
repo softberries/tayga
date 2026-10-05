@@ -1,14 +1,16 @@
 /** Pure helpers of the traces explorer: the API query, point tones, and the brush filter. */
 import type { TraceHit } from '../../api/types'
-import type { DurationRect, Since, TracesSearch } from '../../app/search'
+import type { DurationRect, TracesSearch } from '../../app/search'
+import { rangeParams } from '../../app/range'
+import type { Range } from '../../app/range'
 
 /** Rows asked of /traces/search: the API's maximum, so the scatter shows the whole picture. */
 export const TRACE_LIMIT = 500
 
 /** Params for `api.traceSearch` from the URL search and the header's time range. */
-export function traceQuery(search: TracesSearch, since: Since) {
+export function traceQuery(search: TracesSearch, range: Range) {
   return {
-    since,
+    ...rangeParams(range),
     service: search.service,
     // The API's flag spelling; only meaningful with a service.
     touched: search.service && search.touched ? (1 as const) : undefined,

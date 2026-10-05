@@ -12,9 +12,9 @@ import type { ReactNode } from 'react'
 import { isApiError } from '../../api/client'
 import { api } from '../../api/queries'
 import type { EdgeView, Health, LogAlertView, LogTemplateView, NodeView, ServiceMapView, ServiceView, StoryGroup } from '../../api/types'
-import { useLiveInterval } from '../../app/live'
-import { sinceSearch, SINCE_SECS } from '../../app/search'
-import type { Since } from '../../app/search'
+import { useAutoRefresh } from '../../app/useRange'
+import { rangeParams, rangePhrase, rangeSearch } from '../../app/range'
+import type { Range } from '../../app/range'
 import { TimeSeries } from '../../components/charts/TimeSeries'
 import type { SeriesTone } from '../../components/charts/TimeSeries'
 import { Badge } from '../../components/ui/Badge'
@@ -79,7 +79,7 @@ const rateFmt = rateText
 const pctFmt = (v: number) => `${v < 10 && v !== 0 ? v.toFixed(1) : Math.round(v)} %`
 const msFmt = (v: number) => duration(v * 1e6)
 
-function range(points: readonly [number, number][], fmt: (v: number) => string): string {
+function spread(points: readonly [number, number][], fmt: (v: number) => string): string {
   if (points.length === 0) return 'no data'
   let lo = Infinity
   let hi = -Infinity
@@ -90,14 +90,14 @@ function range(points: readonly [number, number][], fmt: (v: number) => string):
   return `from ${fmt(lo)} to ${fmt(hi)}`
 }
 
-export function redSpecs(service: string, view: ServiceView, node: NodeView | undefined, since: Since): RedSpec[] {
+export function redSpecs(service: string, view: ServiceView, node: NodeView | undefined, range: Range): RedSpec[] {
   const at = (b: { bucket: number }) => b.bucket * 1000
   const rate = view.buckets.map((b) => [at(b), b.rate] as [number, number])
   const errors = view.buckets.map((b) => [at(b), b.error_ratio * 100] as [number, number])
   const p99 = view.buckets.map((b) => [at(b), b.p99_ns / 1e6] as [number, number])
-  const windowRate = view.calls / SINCE_SECS[since]
+  const windowRate = view.calls / range.secs
   const errRatio = node?.error_ratio ?? (view.calls > 0 ? view.errors / view.calls : 0)
-  const per = `per ${view.bucket_secs} s bucket over the last ${since}`
+  const per = `per ${view.bucket_secs} s bucket over ${rangePhrase(range)}`
   return [
     {
       label: 'Rate',
@@ -105,7 +105,7 @@ export function redSpecs(service: string, view: ServiceView, node: NodeView | un
       tone: 'accent',
       points: rate,
       format: rateFmt,
-      summary: `${service} calls per second ${per}: ${range(rate, rateFmt)}.`,
+      summary: `${service} calls per second ${per}: ${spread(rate, rateFmt)}.`,
     },
     {
       label: 'Errors',
@@ -113,7 +113,7 @@ export function redSpecs(service: string, view: ServiceView, node: NodeView | un
       tone: 'err',
       points: errors,
       format: pctFmt,
-      summary: `${service} error percentage ${per}: ${range(errors, pctFmt)}.`,
+      summary: `${service} error percentage ${per}: ${spread(errors, pctFmt)}.`,
     },
     {
       label: 'p99',
@@ -121,13 +121,13 @@ export function redSpecs(service: string, view: ServiceView, node: NodeView | un
       tone: node?.health === 'slow' ? 'slow' : 'accent',
       points: p99,
       format: msFmt,
-      summary: `${service} p99 latency ${per}: ${range(p99, msFmt)}.`,
+      summary: `${service} p99 latency ${per}: ${spread(p99, msFmt)}.`,
     },
   ]
 }
 
-function RedTiles({ service, red, node, since }: { service: string; red: UseQueryResult<ServiceView>; node: NodeView | undefined; since: Since }) {
-  const specs = useMemo(() => (red.data ? redSpecs(service, red.data, node, since) : null), [red.data, service, node, since])
+function RedTiles({ service, red, node, range }: { service: string; red: UseQueryResult<ServiceView>; node: NodeView | undefined; range: Range }) {
+  const specs = useMemo(() => (red.data ? redSpecs(service, red.data, node, range) : null), [red.data, service, node, range])
   if (red.isPending) {
     return (
       <div aria-busy="true" aria-label="Loading RED metrics" className="flex flex-col gap-2">
@@ -140,9 +140,9 @@ function RedTiles({ service, red, node, since }: { service: string; red: UseQuer
   // The API answers 404 when the service has no spans in the window: nothing to chart, not a
   // failure. This holds after a refresh too, as the window slides past its last span.
   if (red.isError && isApiError(red.error) && red.error.status === 404)
-    return <Muted>No spans for {service} in the last {since}.</Muted>
+    return <Muted>No spans for {service} in {rangePhrase(range)}.</Muted>
   if (!specs) return <ErrorState error={red.error} onRetry={() => void red.refetch()} className="py-4" />
-  if (red.data?.buckets.length === 0) return <Muted>No calls to {service} in the last {since}.</Muted>
+  if (red.data?.buckets.length === 0) return <Muted>No calls to {service} in {rangePhrase(range)}.</Muted>
   return (
     <div className="flex flex-col gap-2">
       <RefreshNote queries={[red]} />
@@ -176,7 +176,7 @@ function RedTiles({ service, red, node, since }: { service: string; red: UseQuer
   )
 }
 
-function Stories({ groups, since, service, nowMs }: { groups: readonly StoryGroup[]; since: Since; service: string; nowMs: number }) {
+function Stories({ groups, range, service, nowMs }: { groups: readonly StoryGroup[]; range: Range; service: string; nowMs: number }) {
   if (groups.length === 0) return <Muted>No stories have their root cause in {service}.</Muted>
   const top = [...groups].sort((a, b) => b.stories - a.stories).slice(0, GROUPS_SHOWN)
   return (
@@ -185,7 +185,7 @@ function Stories({ groups, since, service, nowMs }: { groups: readonly StoryGrou
         <li key={g.fingerprint}>
           <Link
             to="/"
-            search={{ ...sinceSearch(since), service, group: g.fingerprint }}
+            search={{ ...rangeSearch(range), service, group: g.fingerprint }}
             className={cx(
               'tg-card flex flex-col gap-1.5 rounded-field border px-3 py-2.5',
               g.kind === 'error' ? 'border-err/35 bg-err-soft' : 'border-slow/35 bg-slow-soft',
@@ -235,7 +235,7 @@ export function logSignals(alerts: readonly LogAlertView[], templates: readonly 
   return out
 }
 
-function Signals({ signals, since, service }: { signals: readonly Signal[]; since: Since; service: string }) {
+function Signals({ signals, range, service }: { signals: readonly Signal[]; range: Range; service: string }) {
   if (signals.length === 0) return <Muted>No log alerts for {service} in this window.</Muted>
   return (
     <ul className="m-0 flex list-none flex-col gap-2 p-0">
@@ -244,7 +244,7 @@ function Signals({ signals, since, service }: { signals: readonly Signal[]; sinc
           <Link
             to="/logs/templates/$templateId"
             params={{ templateId: s.templateId }}
-            search={sinceSearch(since)}
+            search={rangeSearch(range)}
             className="tg-card flex flex-col gap-1.5 rounded-field border border-panel-line bg-inner px-3 py-2.5 hover:border-field-line"
           >
             <span className="flex min-w-0 items-center gap-2">
@@ -263,7 +263,7 @@ function Signals({ signals, since, service }: { signals: readonly Signal[]; sinc
   )
 }
 
-function Calls({ edges, side, since }: { edges: readonly EdgeView[]; side: 'callers' | 'callees'; since: Since }) {
+function Calls({ edges, side, range }: { edges: readonly EdgeView[]; side: 'callers' | 'callees'; range: Range }) {
   if (edges.length === 0) return <Muted>{side === 'callers' ? 'No callers in this window.' : 'Calls no other service.'}</Muted>
   return (
     <ul className="m-0 flex list-none flex-col p-0">
@@ -274,7 +274,7 @@ function Calls({ edges, side, since }: { edges: readonly EdgeView[]; side: 'call
           <li key={`${e.parent}>${e.child}`} className="border-b border-line-soft last:border-b-0">
             <Link
               to="/map"
-              search={{ ...sinceSearch(since), service: other }}
+              search={{ ...rangeSearch(range), service: other }}
               className="flex min-w-0 items-center gap-3 py-1.5 font-mono text-xs hover:text-accent"
             >
               <span className="min-w-0 truncate">{side === 'callers' ? `${other} →` : `→ ${other}`}</span>
@@ -289,12 +289,12 @@ function Calls({ edges, side, since }: { edges: readonly EdgeView[]; side: 'call
   )
 }
 
-function DrawerBody({ service, map, since }: { service: string; map: ServiceMapView | undefined; since: Since }) {
-  const refetchInterval = useLiveInterval()
-  const red = useQuery({ ...api.service(service, since), refetchInterval })
-  const groups = useQuery({ ...api.storyGroups({ since, service }), refetchInterval })
-  const alerts = useQuery({ ...api.logAlerts({ since, service }), refetchInterval })
-  const templates = useQuery({ ...api.logTemplates({ since, service }), refetchInterval })
+function DrawerBody({ service, map, range }: { service: string; map: ServiceMapView | undefined; range: Range }) {
+  const refetchInterval = useAutoRefresh()
+  const red = useQuery({ ...api.service(service, rangeParams(range)), refetchInterval })
+  const groups = useQuery({ ...api.storyGroups({ ...rangeParams(range), service }), refetchInterval })
+  const alerts = useQuery({ ...api.logAlerts({ ...rangeParams(range), service }), refetchInterval })
+  const templates = useQuery({ ...api.logTemplates({ ...rangeParams(range), service }), refetchInterval })
   const node = map ? nodeOf(map, service) : undefined
   const near = useMemo(() => (map ? neighbours(map, service) : { callers: [], callees: [] }), [map, service])
   const signals = useMemo(() => logSignals(alerts.data ?? [], templates.data ?? []), [alerts.data, templates.data])
@@ -305,13 +305,13 @@ function DrawerBody({ service, map, since }: { service: string; map: ServiceMapV
     <div className="flex flex-col gap-5">
       <Button asChild variant="primary" size="md" className="w-full">
         {/* Any span, not just the endpoint: most services never serve a trace's root. */}
-        <Link to="/traces" search={{ ...sinceSearch(since), service, touched: true }}>
+        <Link to="/traces" search={{ ...rangeSearch(range), service, touched: true }}>
           Open {service} traces <ArrowRight aria-hidden size={14} />
         </Link>
       </Button>
 
-      <Section title={`RED · last ${since}`}>
-        <RedTiles service={service} red={red} node={node} since={since} />
+      <Section title={`RED · ${range.until === undefined ? `last ${range.label}` : range.label}`}>
+        <RedTiles service={service} red={red} node={node} range={range} />
       </Section>
 
       <Section title="Stories with root cause here">
@@ -322,7 +322,7 @@ function DrawerBody({ service, map, since }: { service: string; map: ServiceMapV
         ) : (
           <>
             <RefreshNote queries={[groups]} />
-            <Stories groups={groups.data} since={since} service={service} nowMs={nowMs} />
+            <Stories groups={groups.data} range={range} service={service} nowMs={nowMs} />
           </>
         )}
       </Section>
@@ -342,16 +342,16 @@ function DrawerBody({ service, map, since }: { service: string; map: ServiceMapV
         ) : (
           <>
             <RefreshNote queries={[alerts, templates]} />
-            <Signals signals={signals} since={since} service={service} />
+            <Signals signals={signals} range={range} service={service} />
           </>
         )}
       </Section>
 
       <Section title="Callers">
-        <Calls edges={near.callers} side="callers" since={since} />
+        <Calls edges={near.callers} side="callers" range={range} />
       </Section>
       <Section title="Callees">
-        <Calls edges={near.callees} side="callees" since={since} />
+        <Calls edges={near.callees} side="callees" range={range} />
       </Section>
     </div>
   )
@@ -361,12 +361,12 @@ export interface ServiceDrawerProps {
   /** The open service, or undefined when closed. */
   service: string | undefined
   map: ServiceMapView | undefined
-  since: Since
+  range: Range
   onClose: () => void
   onCloseAutoFocus?: (e: Event) => void
 }
 
-export function ServiceDrawer({ service, map, since, onClose, onCloseAutoFocus }: ServiceDrawerProps) {
+export function ServiceDrawer({ service, map, range, onClose, onCloseAutoFocus }: ServiceDrawerProps) {
   const node = service && map ? nodeOf(map, service) : undefined
   const onMap = Boolean(service && map && (node || map.edges.some((e) => e.parent === service || e.child === service)))
   const health: Health = node?.health ?? 'ok'
@@ -392,7 +392,7 @@ export function ServiceDrawer({ service, map, since, onClose, onCloseAutoFocus }
       }
       subtitle={
         !map ? undefined : !onMap ? (
-          `Not on the map in the last ${since}`
+          `Not on the map in ${rangePhrase(range)}`
         ) : node ? (
           <span className={cx(health === 'error' && 'text-err', health === 'slow' && 'text-slow')}>{healthText(node)}</span>
         ) : (
@@ -400,7 +400,7 @@ export function ServiceDrawer({ service, map, since, onClose, onCloseAutoFocus }
         )
       }
     >
-      {service ? <DrawerBody key={service} service={service} map={map} since={since} /> : null}
+      {service ? <DrawerBody key={service} service={service} map={map} range={range} /> : null}
     </Sheet>
   )
 }

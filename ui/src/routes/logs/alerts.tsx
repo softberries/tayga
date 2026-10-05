@@ -6,9 +6,8 @@ import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
 import { useCallback, useMemo } from 'react'
 import { api } from '../../api/queries'
-import { useLiveInterval } from '../../app/live'
 import type { LogAlertsSearch } from '../../app/search'
-import { useSince } from '../../components/shell/TimeRange'
+import { useAutoRefresh, useRange } from '../../app/useRange'
 import { Button } from '../../components/ui/Button'
 import { Card, PanelTitle } from '../../components/ui/Card'
 import { Combobox } from '../../components/ui/Combobox'
@@ -19,8 +18,8 @@ import { ToggleGroup } from '../../components/ui/ToggleGroup'
 import { ErrorBanner } from '../../features/stories/ErrorBanner'
 import { AlertsTable } from '../../features/logs/AlertsTable'
 import { AlertsTimeline } from '../../features/logs/AlertsTimeline'
-import { sinceSearch } from '../../app/search'
-import { TIMELINE_STEP, sortAlerts, stepWord } from '../../features/logs/model'
+import { rangeParams, rangePhrase, rangeSearch, widerHint } from '../../app/range'
+import { sortAlerts, stepWord, timelineStep } from '../../features/logs/model'
 import { Reveal } from '../../components/ui/Reveal'
 
 const KINDS = [
@@ -45,12 +44,12 @@ function TableSkeleton() {
 }
 
 export function LogAlertsPage() {
-  const since = useSince()
+  const range = useRange()
   const search = useSearch({ from: '/logs/alerts' })
   const navigate = useNavigate({ from: '/logs/alerts' })
-  const refetchInterval = useLiveInterval()
+  const refetchInterval = useAutoRefresh()
   const services = useQuery(api.services())
-  const alerts = useQuery({ ...api.logAlerts({ since, kind: search.kind, service: search.service }), refetchInterval })
+  const alerts = useQuery({ ...api.logAlerts({ ...rangeParams(range), kind: search.kind, service: search.service }), refetchInterval })
 
   const onSearch = useCallback(
     (patch: Partial<LogAlertsSearch>) =>
@@ -98,7 +97,7 @@ export function LogAlertsPage() {
           ) : null}
           <Link
             to="/logs/templates"
-            search={{ ...sinceSearch(since), service: search.service }}
+            search={{ ...rangeSearch(range), service: search.service }}
             className="ml-auto text-xs text-accent hover:underline"
           >
             Browse templates
@@ -111,7 +110,7 @@ export function LogAlertsPage() {
 
       <Card className="flex min-w-0 flex-col gap-2 px-4 py-3.5">
         <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-          <PanelTitle>Alerts per {stepWord(TIMELINE_STEP[since])}</PanelTitle>
+          <PanelTitle>Alerts per {stepWord(timelineStep(range.secs))}</PanelTitle>
           <span className="text-xs text-muted">alerts started in this window, by kind</span>
           <ul aria-label="Legend" className="m-0 flex list-none gap-3 p-0 text-xs text-muted">
             <li className="flex items-center gap-1.5">
@@ -125,7 +124,7 @@ export function LogAlertsPage() {
           </ul>
         </div>
         {alerts.data ? <Reveal>
-            <AlertsTimeline alerts={alerts.data} since={since} nowMs={alerts.dataUpdatedAt} />
+            <AlertsTimeline alerts={alerts.data} range={range} nowMs={alerts.dataUpdatedAt} />
           </Reveal> : <Skeleton className="h-[170px]" />}
       </Card>
 
@@ -144,7 +143,7 @@ export function LogAlertsPage() {
         ) : data === undefined ? null : data.length === 0 ? (
           <EmptyState
             title={filtered ? 'No alerts match these filters' : 'No log alerts in this window'}
-            description={filtered ? 'Clear a filter to see more.' : `No template was new or spiked in the last ${since}. A longer time range may show older alerts.`}
+            description={filtered ? 'Clear a filter to see more.' : `No template was new or spiked in ${rangePhrase(range)}.${widerHint(range, 'alerts')}`}
             action={
               filtered ? (
                 <Button size="sm" onClick={() => onSearch({ kind: undefined, service: undefined, active: undefined })}>
@@ -155,7 +154,7 @@ export function LogAlertsPage() {
           />
         ) : (
           <Reveal>
-            <AlertsTable alerts={data} since={since} nowMs={alerts.dataUpdatedAt} />
+            <AlertsTable alerts={data} range={range} nowMs={alerts.dataUpdatedAt} />
           </Reveal>
         )}
       </Card>

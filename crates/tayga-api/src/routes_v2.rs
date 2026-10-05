@@ -4,11 +4,10 @@
 use crate::lag::{self, Lag};
 use crate::model::SeriesView;
 use crate::params::{
-    SeriesKind, TraceParams, bucket_secs, group_filter, parse_q, parse_service, parse_since,
-    series_query, since_or, trace_filter,
+    SeriesKind, TraceParams, group_filter, parse_q, parse_service, series_query, trace_filter,
 };
 use crate::repo::Repo;
-use crate::routes::{ApiError, ApiMetrics, AppState, GroupsQuery, SinceQuery};
+use crate::routes::{ApiError, ApiMetrics, AppState, GroupsQuery, WindowQuery, window_of};
 use crate::series;
 use axum::Json;
 use axum::Router;
@@ -118,6 +117,7 @@ impl<R> Clone for V2State<R> {
 #[derive(Deserialize, Default)]
 pub struct TracesQuery {
     pub since: Option<String>,
+    pub until: Option<String>,
     pub service: Option<String>,
     pub touched: Option<String>,
     pub endpoint: Option<String>,
@@ -135,6 +135,7 @@ pub struct SearchQuery {
 #[derive(Deserialize, Default)]
 pub struct SeriesParams {
     pub since: Option<String>,
+    pub until: Option<String>,
     pub metric: Option<String>,
     pub job: Option<String>,
     pub kind: Option<String>,
@@ -171,14 +172,14 @@ fn query<T>(q: Result<Query<T>, QueryRejection>) -> Result<T, ApiError> {
 
 async fn overview<R: Repo>(
     State(s): State<V2State<R>>,
-    q: Result<Query<SinceQuery>, QueryRejection>,
+    q: Result<Query<WindowQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let q = query(q)?;
-    let since = parse_since(since_or(q.since.as_deref(), "1h")).map_err(ApiError::BadRequest)?;
+    let w = window_of(&q.since, &q.until, "1h")?;
     let v = s
         .app
         .repo
-        .overview(since)
+        .overview(w)
         .await
         .map_err(|e| s.app.unavailable(e))?;
     Ok(Json(v).into_response())
@@ -189,8 +190,9 @@ async fn stories_series<R: Repo>(
     q: Result<Query<GroupsQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let q = query(q)?;
-    let f = group_filter(q.since.as_deref(), q.kind.as_deref(), q.service.as_deref())
-        .map_err(ApiError::BadRequest)?;
+    let w = window_of(&q.since, &q.until, "1h")?;
+    let f =
+        group_filter(w, q.kind.as_deref(), q.service.as_deref()).map_err(ApiError::BadRequest)?;
     let v = s
         .app
         .repo
@@ -205,16 +207,19 @@ async fn traces_search<R: Repo>(
     q: Result<Query<TracesQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let q = query(q)?;
-    let f = trace_filter(&TraceParams {
-        since: q.since.as_deref(),
-        service: q.service.as_deref(),
-        touched: q.touched.as_deref(),
-        endpoint: q.endpoint.as_deref(),
-        min_ms: q.min_ms.as_deref(),
-        max_ms: q.max_ms.as_deref(),
-        errors: q.errors.as_deref(),
-        limit: q.limit.as_deref(),
-    })
+    let w = window_of(&q.since, &q.until, "1h")?;
+    let f = trace_filter(
+        w,
+        &TraceParams {
+            service: q.service.as_deref(),
+            touched: q.touched.as_deref(),
+            endpoint: q.endpoint.as_deref(),
+            min_ms: q.min_ms.as_deref(),
+            max_ms: q.max_ms.as_deref(),
+            errors: q.errors.as_deref(),
+            limit: q.limit.as_deref(),
+        },
+    )
     .map_err(ApiError::BadRequest)?;
     let v = s
         .app
@@ -238,15 +243,15 @@ async fn services<R: Repo>(State(s): State<V2State<R>>) -> Result<Response, ApiE
 async fn service<R: Repo>(
     State(s): State<V2State<R>>,
     Path(name): Path<String>,
-    q: Result<Query<SinceQuery>, QueryRejection>,
+    q: Result<Query<WindowQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let q = query(q)?;
     let name = parse_service(&name).map_err(ApiError::BadRequest)?;
-    let since = parse_since(since_or(q.since.as_deref(), "1h")).map_err(ApiError::BadRequest)?;
+    let w = window_of(&q.since, &q.until, "1h")?;
     match s
         .app
         .repo
-        .service(&name, since)
+        .service(&name, w)
         .await
         .map_err(|e| s.app.unavailable(e))?
     {
@@ -274,28 +279,33 @@ async fn pipeline_series<R: Repo>(
     q: Result<Query<SeriesParams>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let q = query(q)?;
+    let w = window_of(&q.since, &q.until, "1h")?;
     let sq = series_query(
-        q.since.as_deref(),
+        w,
         q.metric.as_deref(),
         q.job.as_deref(),
         q.kind.as_deref(),
         q.labels.as_deref(),
     )
     .map_err(ApiError::BadRequest)?;
-    let step = bucket_secs(sq.since_secs);
+    let step = w.step();
+    let grid = series::Grid {
+        step_secs: step,
+        origin_ms: w.start * 1000,
+    };
     let pts = s
         .app
         .repo
-        .metric_buckets(&sq, step)
+        .metric_buckets(&sq)
         .await
         .map_err(|e| s.app.unavailable(e))?;
     let some = |v: Vec<(i64, f64)>| v.into_iter().map(|(t, v)| (t, Some(v))).collect();
     let points = if let Some(quantile) = sq.kind.quantile() {
-        series::quantile(&pts, quantile, step)
+        series::quantile(&pts, quantile, grid)
     } else if sq.kind == SeriesKind::Rate {
-        some(series::rate(&pts, step))
+        some(series::rate(&pts, grid))
     } else {
-        some(series::gauge(&pts, step))
+        some(series::gauge(&pts, grid))
     };
     Ok(Json(SeriesView {
         metric: sq.metric,
@@ -440,7 +450,8 @@ mod tests {
         .router();
         let (status, json) = call(&app, "/api/v1/overview?since=").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(*repo.last_since.lock().unwrap(), Some(3600));
+        let secs = || repo.last_window.lock().unwrap().map(|w| w.secs());
+        assert_eq!(secs(), Some(3600));
         assert_eq!(json["error_stories"], 3);
         assert_eq!(json["active_alerts"], 2);
         assert_eq!(json["spans_per_sec"], 12.5);
@@ -449,7 +460,7 @@ mod tests {
         assert_eq!(json["stories"]["slow"][0][0], 120);
         assert_eq!(json["spans"][0], serde_json::json!([60, 12.5]));
         call(&app, "/api/v1/overview?since=7d").await;
-        assert_eq!(*repo.last_since.lock().unwrap(), Some(604_800));
+        assert_eq!(secs(), Some(604_800));
     }
 
     #[tokio::test]
@@ -478,13 +489,10 @@ mod tests {
             json,
             serde_json::json!({"bucket_secs": 720, "error": [[720, 4]], "slow": []})
         );
+        let f = repo.last_filter.lock().unwrap().clone().unwrap();
         assert_eq!(
-            repo.last_filter.lock().unwrap().clone(),
-            Some(crate::params::GroupFilter {
-                since_secs: 86_400,
-                kind: Some("slow".into()),
-                service: Some("payment".into()),
-            })
+            (f.window.secs(), f.kind.as_deref(), f.service.as_deref()),
+            (86_400, Some("slow"), Some("payment"))
         );
     }
 
@@ -532,10 +540,12 @@ mod tests {
         assert_eq!(json[1]["story_id"], serde_json::Value::Null);
         assert_eq!(json[1]["story_kind"], serde_json::Value::Null);
         assert!(json[1].as_object().unwrap().contains_key("story_kind"));
+        let f = repo.last_trace_filter.lock().unwrap().clone().unwrap();
+        assert_eq!(f.window.secs(), 900);
         assert_eq!(
-            repo.last_trace_filter.lock().unwrap().clone(),
-            Some(TraceFilter {
-                since_secs: 900,
+            f,
+            TraceFilter {
+                window: f.window,
                 service: Some("payment".into()),
                 touched: true,
                 endpoint: Some("POST /api/checkout".into()),
@@ -543,7 +553,7 @@ mod tests {
                 max_ns: 100_000_000,
                 errors_only: true,
                 limit: 500,
-            })
+            }
         );
     }
 
@@ -594,7 +604,10 @@ mod tests {
         assert_eq!(json["service"], "payment");
         assert_eq!(json["buckets"][0]["p99_ns"], 3.0);
         assert_eq!(json["buckets"][0]["error_ratio"], 0.5);
-        assert_eq!(*repo.last_since.lock().unwrap(), Some(900));
+        assert_eq!(
+            repo.last_window.lock().unwrap().map(|w| w.secs()),
+            Some(900)
+        );
     }
 
     #[tokio::test]
@@ -644,10 +657,13 @@ mod tests {
         }
     }
 
-    async fn series(
-        points: Vec<MetricPointRow>,
-        uri: &str,
-    ) -> (serde_json::Value, (SeriesQuery, u32)) {
+    /// The latest moment that is a multiple of `step`, so a window ending there whose length is
+    /// a multiple of `step` has epoch-aligned buckets, as the fixtures below assume.
+    fn aligned_until(step: i64) -> i64 {
+        crate::params::now_ms() / 1000 / step * step
+    }
+
+    async fn series(points: Vec<MetricPointRow>, uri: &str) -> (serde_json::Value, SeriesQuery) {
         let repo = Arc::new(FakeRepo {
             metric_points: points,
             ..Default::default()
@@ -667,12 +683,14 @@ mod tests {
     #[tokio::test]
     async fn pipeline_series_applies_the_series_math() {
         let counter = vec![p(0, &[], 0.0), p(60, &[], 120.0), p(120, &[], 180.0)];
-        let (json, (q, step)) = series(
+        let until = aligned_until(60);
+        let (json, q) = series(
             counter.clone(),
-            "/api/v1/pipeline/series?metric=tayga_writer_rows_inserted_total&kind=rate&job=tayga-writer&labels=kind%3Dspans",
+            &format!("/api/v1/pipeline/series?metric=tayga_writer_rows_inserted_total&kind=rate&job=tayga-writer&labels=kind%3Dspans&until={until}"),
         )
         .await;
-        assert_eq!(step, 60, "bucket_secs of the default 1h window");
+        assert_eq!(q.window.step(), 60, "bucket_secs of the default 1h window");
+        assert_eq!((q.window.start, q.window.end), (until - 3600, until));
         assert_eq!(q.job.as_deref(), Some("tayga-writer"));
         assert_eq!(q.labels, vec![("kind".to_string(), "spans".to_string())]);
         assert_eq!(
@@ -685,16 +703,18 @@ mod tests {
             })
         );
 
-        let (json, (_, step)) = series(
+        let until = aligned_until(4320);
+        let (json, q) = series(
             counter,
-            "/api/v1/pipeline/series?metric=g&kind=gauge&since=7d",
+            &format!("/api/v1/pipeline/series?metric=g&kind=gauge&since=6d&until={until}"),
         )
         .await;
-        assert_eq!(step, 5040);
+        assert_eq!(q.window.step(), 4320);
+        assert_eq!(json["bucket_secs"], 4320);
         assert_eq!(
             json["points"],
             serde_json::json!([[0, 180.0]]),
-            "one 5040 s bucket, last value"
+            "one 4320 s bucket, last value"
         );
 
         let mut hist: Vec<MetricPointRow> = ["1", "2", "+Inf"]
@@ -706,8 +726,12 @@ mod tests {
         hist.extend(
             [("1", 4.0), ("2", 8.0), ("+Inf", 8.0)].map(|(le, v)| p(120, &[("le", le)], v)),
         );
-        let (json, (q, _)) =
-            series(hist, "/api/v1/pipeline/series?metric=h_seconds&kind=q50").await;
+        let until = aligned_until(60);
+        let (json, q) = series(
+            hist,
+            &format!("/api/v1/pipeline/series?metric=h_seconds&kind=q50&until={until}"),
+        )
+        .await;
         assert_eq!(q.metric, "h_seconds_bucket");
         assert_eq!(json["kind"], "q50");
         assert_eq!(json["points"][0], serde_json::json!([60_000, 1.0]));
@@ -715,6 +739,114 @@ mod tests {
             json["points"][1][1].is_null(),
             "no observations in the last step"
         );
+    }
+
+    #[tokio::test]
+    async fn pipeline_series_buckets_start_at_the_window() {
+        // A window whose start is 7 s past a minute: the buckets follow it.
+        let until = aligned_until(60) - 53;
+        let start = until - 900;
+        let pts = vec![
+            p(start + 1, &[], 4.0),
+            p(start + 59, &[], 6.0),
+            p(start + 60, &[], 9.0),
+        ];
+        let (json, q) = series(
+            pts,
+            &format!("/api/v1/pipeline/series?metric=g&kind=gauge&since=15m&until={until}"),
+        )
+        .await;
+        assert_eq!((q.window.start, q.window.end), (start, until));
+        assert_eq!(
+            json["points"],
+            serde_json::json!([[start * 1000, 6.0], [(start + 60) * 1000, 9.0]])
+        );
+    }
+
+    #[tokio::test]
+    async fn until_moves_the_window_and_bad_until_is_400() {
+        let now = crate::params::now_ms() / 1000;
+        let end = now - 86_400;
+        let repo = Arc::new(FakeRepo {
+            service: Some(ServiceView {
+                service: "payment".into(),
+                bucket_secs: 60,
+                calls: 0,
+                errors: 0,
+                buckets: vec![],
+            }),
+            ..Default::default()
+        });
+        let app = App {
+            repo: repo.clone(),
+            metrics: ApiMetrics::default(),
+            lag: None,
+        }
+        .router();
+        let w = |secs: i64| crate::params::Window {
+            start: end - secs,
+            end,
+        };
+        let ok = |uri: String| {
+            let app = app.clone();
+            async move {
+                let (status, json) = call(&app, &uri).await;
+                assert_eq!(status, StatusCode::OK, "{uri}: {json}");
+            }
+        };
+        ok(format!("/api/v1/overview?since=2h&until={end}")).await;
+        assert_eq!(repo.last_window.lock().unwrap().take(), Some(w(7200)));
+        ok(format!("/api/v1/services/payment?until={end}")).await;
+        assert_eq!(repo.last_window.lock().unwrap().take(), Some(w(3600)));
+        ok(format!("/api/v1/stories/series?since=15m&until={end}")).await;
+        let f = repo.last_filter.lock().unwrap().take().unwrap();
+        assert_eq!(f.window, w(900));
+        ok(format!("/api/v1/traces/search?since=15m&until={end}")).await;
+        let f = repo.last_trace_filter.lock().unwrap().take().unwrap();
+        assert_eq!(f.window, w(900));
+        ok(format!(
+            "/api/v1/pipeline/series?metric=x&kind=rate&until={end}"
+        ))
+        .await;
+        let q = repo.last_series_query.lock().unwrap().take().unwrap();
+        assert_eq!(q.window, w(3600));
+        // Lag is live only: `until` is ignored, not rejected.
+        ok("/api/v1/pipeline/lag?until=nonsense".to_string()).await;
+
+        let ahead = now + 3600;
+        let old = now - 7 * 86_400 + 60;
+        for (uri, needle) in [
+            (format!("/api/v1/overview?until={ahead}"), "future"),
+            (format!("/api/v1/stories/series?until={ahead}"), "future"),
+            (format!("/api/v1/traces/search?until={ahead}"), "future"),
+            (format!("/api/v1/services/payment?until={ahead}"), "future"),
+            (
+                format!("/api/v1/pipeline/series?metric=x&kind=rate&until={ahead}"),
+                "future",
+            ),
+            (
+                format!("/api/v1/overview?since=1h&until={old}"),
+                "retention",
+            ),
+            (
+                format!("/api/v1/traces/search?since=1h&until={old}"),
+                "retention",
+            ),
+            (
+                format!("/api/v1/pipeline/series?metric=x&kind=rate&until={old}"),
+                "retention",
+            ),
+            ("/api/v1/overview?until=noon".to_string(), "RFC 3339"),
+            (
+                "/api/v1/services/payment?until=12:00".to_string(),
+                "RFC 3339",
+            ),
+        ] {
+            let (status, json) = call(&app, &uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            let message = json["error"].as_str().unwrap_or_default();
+            assert!(message.contains(needle), "{uri}: {message}");
+        }
     }
 
     #[tokio::test]

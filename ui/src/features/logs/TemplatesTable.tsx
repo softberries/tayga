@@ -8,8 +8,8 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { useMemo, useRef } from 'react'
 import type { KeyboardEvent } from 'react'
 import type { LogTemplateListItem } from '../../api/types'
-import { sinceSearch, SINCE_SECS } from '../../app/search'
-import type { Since } from '../../app/search'
+import { rangeEnd, rangeSearch } from '../../app/range'
+import type { Range } from '../../app/range'
 import { Spark } from '../../components/charts/Spark'
 import { Badge } from '../../components/ui/Badge'
 import { SortHeader } from '../../components/ui/SortHeader'
@@ -27,14 +27,14 @@ const AREAS = '"svc tmpl count spark first alert"'
 const NARROW_COLS = 'minmax(0, 1fr) auto auto'
 const NARROW_AREAS = '"tmpl tmpl tmpl" "svc count alert"'
 const HEADER_H = 34
-function RowSpark({ t, since, nowMs }: { t: LogTemplateListItem; since: Since; nowMs: number }) {
-  const values = denseSeries(t.buckets, t.bucket_secs, SINCE_SECS[since], nowMs)
-  return <Spark values={values} tone="accent" height={22} label={`${t.count} hits over ${since}, peak ${peak(values)} per bucket`} />
+function RowSpark({ t, range, nowMs }: { t: LogTemplateListItem; range: Range; nowMs: number }) {
+  const values = denseSeries(t.buckets, t.bucket_secs, range.secs, rangeEnd(range, nowMs))
+  return <Spark values={values} tone="accent" height={22} label={`${t.count} hits over ${range.label}, peak ${peak(values)} per bucket`} />
 }
 
 export interface TemplatesTableProps {
   rows: readonly LogTemplateListItem[]
-  since: Since
+  range: Range
   /** When the rows were fetched: the end of the sparkline window and "first seen" reference. */
   nowMs: number
   sort: TemplateSort
@@ -43,7 +43,7 @@ export interface TemplatesTableProps {
   height?: number | string
 }
 
-export function TemplatesTable({ rows, since, nowMs, sort, onSort, height = 'min(68vh, 760px)' }: TemplatesTableProps) {
+export function TemplatesTable({ rows, range, nowMs, sort, onSort, height = 'min(68vh, 760px)' }: TemplatesTableProps) {
   const sorted = useMemo(() => sortTemplates(rows, sort), [rows, sort])
   const narrow = useMediaQuery(NARROW_QUERY)
   const rowHeight = narrow ? 64 : 42
@@ -152,7 +152,7 @@ export function TemplatesTable({ rows, since, nowMs, sort, onSort, height = 'min
                     <Link
                       to="/logs/templates/$templateId"
                       params={{ templateId: t.template_id }}
-                      search={sinceSearch(since)}
+                      search={rangeSearch(range)}
                       className="block truncate rounded-badge font-mono text-xs text-ink hover:underline"
                     >
                       {t.template}
@@ -163,7 +163,7 @@ export function TemplatesTable({ rows, since, nowMs, sort, onSort, height = 'min
                   {compact(t.count)}
                 </span>
                 <span role="cell" style={{ gridArea: 'spark' }} className={narrow ? 'hidden' : undefined}>
-                  {narrow ? null : <RowSpark t={t} since={since} nowMs={nowMs} />}
+                  {narrow ? null : <RowSpark t={t} range={range} nowMs={nowMs} />}
                 </span>
                 <span role="cell" style={{ gridArea: 'first' }} className={cx('tabular whitespace-nowrap text-xs text-muted', narrow && 'hidden')} title={dateTime(t.first_seen_ns)}>
                   {ago(t.first_seen_ns, nowMs)}

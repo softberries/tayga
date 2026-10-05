@@ -7,8 +7,8 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { useMemo, useRef } from 'react'
 import type { KeyboardEvent } from 'react'
 import type { TraceHit } from '../../api/types'
-import { sinceSearch } from '../../app/search'
-import type { Since } from '../../app/search'
+import { rangeSearch } from '../../app/range'
+import type { Range } from '../../app/range'
 import { Badge } from '../../components/ui/Badge'
 import { SortHeader } from '../../components/ui/SortHeader'
 import { cx } from '../../lib/cx'
@@ -29,9 +29,9 @@ const NARROW_AREAS = '"ep ep err" "start dur story"'
 
 const BAR: Record<ReturnType<typeof toneOf>, string> = { err: 'bg-err', slow: 'bg-slow', accent: 'bg-accent' }
 
-/** Start time: wall clock with ms for short ranges, the date too for 24h and 7d. */
-function startLabel(ns: number, since: Since): string {
-  return since === '15m' || since === '1h' ? clockMs(ns) : dateTime(ns).slice(5)
+/** Start time: wall clock with ms for ranges up to an hour (ending now), the date too otherwise. */
+function startLabel(ns: number, range: Range): string {
+  return range.secs <= 3600 && range.until === undefined ? clockMs(ns) : dateTime(ns).slice(5)
 }
 
 export interface TraceTableProps {
@@ -39,13 +39,13 @@ export interface TraceTableProps {
   /** All plotted rows: the duration bars share their extent with the chart. */
   extent: readonly TraceHit[]
   logY: boolean
-  since: Since
+  range: Range
   sort: Sort
   onSort: (s: Sort) => void
   height?: number
 }
 
-export function TraceTable({ rows, extent, logY, since, sort, onSort, height = 520 }: TraceTableProps) {
+export function TraceTable({ rows, extent, logY, range, sort, onSort, height = 520 }: TraceTableProps) {
   const sorted = useMemo(() => sortRows(rows, sort), [rows, sort])
   const [lo, hi] = useMemo(() => {
     let a = Infinity
@@ -156,14 +156,14 @@ export function TraceTable({ rows, extent, logY, since, sort, onSort, height = 5
                 }}
               >
                 <span role="cell" style={{ gridArea: 'start' }} className="tabular font-mono text-[11.5px] text-muted" title={dateTime(t.ts_ns)}>
-                  {startLabel(t.ts_ns, since)}
+                  {startLabel(t.ts_ns, range)}
                 </span>
                 <span role="cell" style={{ gridArea: 'ep' }} className="flex min-w-0 items-center gap-2">
                   <span aria-hidden className="size-2 shrink-0 rounded-full" style={{ backgroundColor: serviceColor(t.endpoint_service) }} />
                   <Link
                     to="/traces/$traceId"
                     params={{ traceId: t.trace_id }}
-                    search={sinceSearch(since)}
+                    search={rangeSearch(range)}
                     className="flex min-w-0 items-baseline gap-1.5 rounded-badge hover:underline"
                   >
                     <span className="shrink-0 text-xs text-muted">{t.endpoint_service}</span>
@@ -194,7 +194,7 @@ export function TraceTable({ rows, extent, logY, since, sort, onSort, height = 5
                     <Link
                       to="/stories/$storyId"
                       params={{ storyId: t.story_id }}
-                      search={sinceSearch(since)}
+                      search={rangeSearch(range)}
                       aria-label={`${t.story_kind ?? 'Story'} story of trace ${t.trace_id}`}
                       className={cx('text-xs hover:underline', t.story_kind === 'error' ? 'text-err' : t.story_kind === 'slow' ? 'text-slow' : 'text-accent')}
                     >

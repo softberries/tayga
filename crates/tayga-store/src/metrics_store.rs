@@ -36,16 +36,16 @@ impl Store {
     }
 
     /// The last finite sample of `metric` per series (job and label set) and `step_secs`
-    /// bucket over the last `since_secs` seconds, oldest first. `ts_ms` is the bucket start
-    /// (epoch-aligned), so the series math sees one point per series and step whatever the
-    /// window; at most `MAX_METRIC_POINTS` rows. `labels` keeps only series carrying every
-    /// listed label with that value.
+    /// bucket in the window `(start, end]` (unix seconds), oldest first. `ts_ms` is the bucket
+    /// start; buckets start at `start`, so the series math sees one point per series and step
+    /// whatever the window; at most `MAX_METRIC_POINTS` rows. `labels` keeps only series
+    /// carrying every listed label with that value.
     pub async fn metric_buckets(
         &self,
         job: Option<&str>,
         metric: &str,
         labels: &[(String, String)],
-        since_secs: u32,
+        (start, end): (i64, i64),
         step_secs: u32,
     ) -> clickhouse::error::Result<Vec<MetricPointRow>> {
         let job_clause = if job.is_some() { "AND job = ? " } else { "" };
@@ -54,16 +54,20 @@ impl Store {
         let sql = format!(
             "SELECT job, labels, ts_ms, last AS value FROM ( \
              SELECT toString(job) AS job, labels, \
-             toInt64(toUnixTimestamp(toStartOfInterval(ts, toIntervalSecond(?)))) * 1000 AS ts_ms, \
+             (toInt64(?) + intDiv(toInt64(toUnixTimestamp(ts)) - toInt64(?), ?) * ?) * 1000 AS ts_ms, \
              argMax(value, ts) AS last FROM metric_samples \
              WHERE metric = ? {job_clause}{label_clause}AND isFinite(value) \
-             AND ts > now64(3) - toIntervalSecond(?) GROUP BY job, labels, ts_ms) \
+             AND ts > toDateTime(?) AND ts <= toDateTime(?) GROUP BY job, labels, ts_ms) \
              ORDER BY ts_ms LIMIT ?"
         );
+        let step = step_secs.max(1);
         let mut q = self
             .client()
             .query(&sql)
-            .bind(step_secs.max(1))
+            .bind(start)
+            .bind(start)
+            .bind(step)
+            .bind(step)
             .bind(metric);
         if let Some(job) = job {
             q = q.bind(job);
@@ -71,6 +75,10 @@ impl Store {
         for (k, v) in labels {
             q = q.bind(k.as_str()).bind(v.as_str());
         }
-        q.bind(since_secs).bind(MAX_METRIC_POINTS).fetch_all().await
+        q.bind(start)
+            .bind(end)
+            .bind(MAX_METRIC_POINTS)
+            .fetch_all()
+            .await
     }
 }

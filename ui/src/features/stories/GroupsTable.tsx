@@ -3,7 +3,6 @@
  * filters and the text search come from the URL, sorting is local. One row is selected (the
  * inspector shows it); ↑/↓ move the selection and Enter opens the group's sample story.
  */
-import { SINCE_SECS } from '../../app/search'
 import {
   columnFilteringFeature,
   createColumnHelper,
@@ -23,7 +22,9 @@ import { ChevronDown, Search, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, ReactNode } from 'react'
 import type { StoryGroup } from '../../api/types'
-import type { HomeSearch, Since } from '../../app/search'
+import type { HomeSearch } from '../../app/search'
+import { rangeEnd } from '../../app/range'
+import type { Range } from '../../app/range'
 import { Spark } from '../../components/charts/Spark'
 import { Button } from '../../components/ui/Button'
 import {
@@ -180,7 +181,7 @@ function GroupSortHeader({
 export interface GroupsTableProps {
   groups: readonly StoryGroup[]
   search: HomeSearch
-  since: Since
+  range: Range
   /** When the groups were fetched: the end of the sparkline window and "last seen" reference. */
   nowMs: number
   onSearch: (patch: Partial<HomeSearch>) => void
@@ -192,7 +193,7 @@ export interface GroupsTableProps {
   onVisible: (groups: StoryGroup[]) => void
 }
 
-export function GroupsTable({ groups, search, since, nowMs, onSearch, selected, onSelect, onOpen, onVisible }: GroupsTableProps) {
+export function GroupsTable({ groups, search, range, nowMs, onSearch, selected, onSelect, onOpen, onVisible }: GroupsTableProps) {
   const [sorting, setSorting] = useState<SortingState>(DEFAULT_SORT)
   const { kind, service, endpoint } = search
   // Only the filter values: a selection change (search.group) must not re-filter or re-sort.
@@ -221,7 +222,8 @@ export function GroupsTable({ groups, search, since, nowMs, onSearch, selected, 
 
   const services = useMemo(() => countBy(groups, (g) => g.rc_service), [groups])
   const endpoints = useMemo(() => countBy(groups, endpointOf), [groups])
-  const win = SINCE_SECS[since]
+  const win = range.secs
+  const end = rangeEnd(range, nowMs)
   const current = visible.find((g) => g.fingerprint === selected) ?? visible[0]
 
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
@@ -319,7 +321,7 @@ export function GroupsTable({ groups, search, since, nowMs, onSearch, selected, 
             const g = r.original
             const sel = g.fingerprint === current?.fingerprint
             const { title, detail } = splitSummary(g.summary)
-            const values = denseSeries(g.buckets, g.bucket_secs, win, nowMs)
+            const values = denseSeries(g.buckets, g.bucket_secs, win, end)
             const slow = g.kind === 'slow'
             return (
               <div
@@ -386,7 +388,7 @@ export function GroupsTable({ groups, search, since, nowMs, onSearch, selected, 
                   <Spark
                     values={values}
                     tone={slow ? 'slow' : 'err'}
-                    label={`Stories per ${bucketWord(g.bucket_secs)} over ${since}, peak ${peak(values)}`}
+                    label={`Stories per ${bucketWord(g.bucket_secs)} over ${range.label}, peak ${peak(values)}`}
                   />
                 </span>
                 <span role="gridcell" className="tabular text-right font-semibold">

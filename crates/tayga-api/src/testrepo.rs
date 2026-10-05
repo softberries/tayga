@@ -1,5 +1,5 @@
 use crate::model::*;
-use crate::params::{AlertFilter, GroupFilter, SeriesQuery, TemplateFilter, TraceFilter};
+use crate::params::{AlertFilter, GroupFilter, SeriesQuery, TemplateFilter, TraceFilter, Window};
 use crate::repo::Repo;
 use std::sync::Mutex;
 use tayga_store::metrics_store::MetricPointRow;
@@ -24,9 +24,9 @@ pub struct FakeRepo {
     pub search: SearchView,
     pub metric_points: Vec<MetricPointRow>,
     pub fail: bool,
-    pub last_since: Mutex<Option<u32>>,
+    pub last_window: Mutex<Option<Window>>,
     pub last_trace_filter: Mutex<Option<TraceFilter>>,
-    pub last_series_query: Mutex<Option<(SeriesQuery, u32)>>,
+    pub last_series_query: Mutex<Option<SeriesQuery>>,
     pub last_q: Mutex<Option<String>>,
     pub last_filter: Mutex<Option<GroupFilter>>,
     pub last_alert_filter: Mutex<Option<AlertFilter>>,
@@ -49,8 +49,9 @@ impl Repo for FakeRepo {
         *self.last_filter.lock().unwrap() = Some(f.clone());
         Ok(self.groups.clone())
     }
-    async fn story_group(&self, _fp: &str, _since: u32) -> anyhow::Result<Option<GroupDetail>> {
+    async fn story_group(&self, _fp: &str, w: Window) -> anyhow::Result<Option<GroupDetail>> {
         self.check()?;
+        *self.last_window.lock().unwrap() = Some(w);
         Ok(self.detail.clone())
     }
     async fn story(&self, _id: &str) -> anyhow::Result<Option<StoryView>> {
@@ -66,7 +67,7 @@ impl Repo for FakeRepo {
             story_id: None,
         }))
     }
-    async fn service_map(&self, _since: u32) -> anyhow::Result<Vec<EdgeView>> {
+    async fn service_map(&self, _w: Window) -> anyhow::Result<Vec<EdgeView>> {
         self.check()?;
         Ok(self.edges.clone())
     }
@@ -83,18 +84,19 @@ impl Repo for FakeRepo {
     async fn log_template(
         &self,
         _id: &str,
-        _since: u32,
+        w: Window,
     ) -> anyhow::Result<Option<LogTemplateDetail>> {
         self.check()?;
+        *self.last_window.lock().unwrap() = Some(w);
         Ok(self.template_detail.clone())
     }
     async fn trace_log_templates(&self, _trace_id: &str) -> anyhow::Result<Vec<TraceLogTemplate>> {
         self.check()?;
         Ok(self.trace_templates.clone())
     }
-    async fn overview(&self, since: u32) -> anyhow::Result<OverviewView> {
+    async fn overview(&self, w: Window) -> anyhow::Result<OverviewView> {
         self.check()?;
-        *self.last_since.lock().unwrap() = Some(since);
+        *self.last_window.lock().unwrap() = Some(w);
         Ok(self.overview.clone())
     }
     async fn stories_series(&self, f: &GroupFilter) -> anyhow::Result<StoriesSeries> {
@@ -111,14 +113,14 @@ impl Repo for FakeRepo {
         self.check()?;
         Ok(self.services.clone())
     }
-    async fn service(&self, _name: &str, since: u32) -> anyhow::Result<Option<ServiceView>> {
+    async fn service(&self, _name: &str, w: Window) -> anyhow::Result<Option<ServiceView>> {
         self.check()?;
-        *self.last_since.lock().unwrap() = Some(since);
+        *self.last_window.lock().unwrap() = Some(w);
         Ok(self.service.clone())
     }
-    async fn service_graph(&self, since: u32) -> anyhow::Result<ServiceMapView> {
+    async fn service_graph(&self, w: Window) -> anyhow::Result<ServiceMapView> {
         self.check()?;
-        *self.last_since.lock().unwrap() = Some(since);
+        *self.last_window.lock().unwrap() = Some(w);
         Ok(ServiceMapView {
             edges: self.edges.clone(),
             nodes: self.nodes.clone(),
@@ -129,13 +131,9 @@ impl Repo for FakeRepo {
         *self.last_q.lock().unwrap() = Some(q.to_string());
         Ok(self.search.clone())
     }
-    async fn metric_buckets(
-        &self,
-        q: &SeriesQuery,
-        step: u32,
-    ) -> anyhow::Result<Vec<MetricPointRow>> {
+    async fn metric_buckets(&self, q: &SeriesQuery) -> anyhow::Result<Vec<MetricPointRow>> {
         self.check()?;
-        *self.last_series_query.lock().unwrap() = Some((q.clone(), step));
+        *self.last_series_query.lock().unwrap() = Some(q.clone());
         Ok(self.metric_points.clone())
     }
 }

@@ -10,11 +10,10 @@ import { useMemo } from 'react'
 import { isApiError } from '../../api/client'
 import { api } from '../../api/queries'
 import type { TemplateHit } from '../../api/types'
-import { useLiveInterval } from '../../app/live'
-import { sinceSearch, SINCE_SECS } from '../../app/search'
-import type { Since } from '../../app/search'
+import { rangeBounds, rangeParams, rangePhrase, rangeSearch, widerHint } from '../../app/range'
+import type { Range } from '../../app/range'
 import { TimeSeries } from '../../components/charts/TimeSeries'
-import { useSince } from '../../components/shell/TimeRange'
+import { useAutoRefresh, useRange } from '../../app/useRange'
 import { Badge } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
 import { Card, PanelTitle } from '../../components/ui/Card'
@@ -55,7 +54,7 @@ function Stat({ label, value, title }: { label: string; value: string; title?: s
   )
 }
 
-function RecentHits({ hits, since, nowMs }: { hits: readonly TemplateHit[]; since: Since; nowMs: number }) {
+function RecentHits({ hits, range, nowMs }: { hits: readonly TemplateHit[]; range: Range; nowMs: number }) {
   if (hits.length === 0) return <EmptyState title="No hits recorded" description="No log has matched this template yet." />
   const th = 'whitespace-nowrap px-3 py-2 text-left text-[11px] font-normal uppercase tracking-[0.06em] text-muted first:pl-4 last:pr-4'
   const td = 'px-3 py-2 align-middle first:pl-4 last:pr-4'
@@ -93,7 +92,7 @@ function RecentHits({ hits, since, nowMs }: { hits: readonly TemplateHit[]; sinc
                 <Link
                   to="/traces/$traceId"
                   params={{ traceId: h.trace_id }}
-                  search={sinceSearch(since)}
+                  search={rangeSearch(range)}
                   title={h.trace_id}
                   className="font-mono text-xs text-accent hover:underline"
                 >
@@ -105,7 +104,7 @@ function RecentHits({ hits, since, nowMs }: { hits: readonly TemplateHit[]; sinc
                   <Link
                     to="/stories/$storyId"
                     params={{ storyId: h.story_id }}
-                    search={sinceSearch(since)}
+                    search={rangeSearch(range)}
                     aria-label={`Story of trace ${h.trace_id}`}
                     className="text-xs text-accent hover:underline"
                   >
@@ -125,17 +124,17 @@ function RecentHits({ hits, since, nowMs }: { hits: readonly TemplateHit[]; sinc
 
 export function LogTemplatePage() {
   const { templateId } = useParams({ from: '/logs/templates/$templateId' })
-  const since = useSince()
-  const refetchInterval = useLiveInterval()
-  const detail = useQuery({ ...api.logTemplate(templateId, since), refetchInterval })
+  const range = useRange()
+  const refetchInterval = useAutoRefresh()
+  const detail = useQuery({ ...api.logTemplate(templateId, rangeParams(range)), refetchInterval })
   const nowMs = detail.dataUpdatedAt
   const d = detail.data
-  const points = useMemo(
-    () => (d ? bucketPoints(d.buckets, d.bucket_secs, SINCE_SECS[since], nowMs) : []),
-    [d, since, nowMs],
-  )
+  const [start, end] = rangeBounds(range, nowMs)
+  const points = useMemo(() => (d ? bucketPoints(d.buckets, d.bucket_secs, range.secs, end) : []), [d, range.secs, end])
   const series = useMemo(() => [{ name: 'hits', type: 'bar' as const, tone: 'accent' as const, points }], [points])
-  const xRange = useMemo(() => [nowMs - SINCE_SECS[since] * 1000, nowMs + ((d?.bucket_secs ?? 60) * 1000) / 2] as const, [nowMs, since, d?.bucket_secs])
+  // Bars sit at their bucket's start: half a bucket on each side keeps the first and last whole.
+  const half = ((d?.bucket_secs ?? 60) * 1000) / 2
+  const xRange = useMemo(() => [start - half, end + half] as const, [start, end, half])
 
   if (detail.isPending) return <PageSkeleton />
   if (!detail.data) {
@@ -148,7 +147,7 @@ export function LogTemplatePage() {
             description={`No log template ${templateId} is stored. It may have expired.`}
             action={
               <Button asChild size="sm">
-                <Link to="/logs/templates" search={sinceSearch(since)}>
+                <Link to="/logs/templates" search={rangeSearch(range)}>
                   All templates
                 </Link>
               </Button>
@@ -163,7 +162,7 @@ export function LogTemplatePage() {
     )
   }
   const t = detail.data.template
-  const summary = `Hits of this template per ${stepWord(detail.data.bucket_secs)} over the last ${since}: ${t.count} in total.`
+  const summary = `Hits of this template per ${stepWord(detail.data.bucket_secs)} over ${rangePhrase(range)}: ${t.count} in total.`
 
   return (
     <div className="flex flex-col gap-3.5">
@@ -175,7 +174,7 @@ export function LogTemplatePage() {
             {t.service}
           </span>
           {t.alerting ? <Badge kind="spike">alerting</Badge> : null}
-          <Link to="/logs/templates" search={sinceSearch(since)} className="ml-auto text-xs text-accent hover:underline">
+          <Link to="/logs/templates" search={rangeSearch(range)} className="ml-auto text-xs text-accent hover:underline">
             All templates
           </Link>
         </div>
@@ -183,7 +182,7 @@ export function LogTemplatePage() {
           {t.template}
         </h2>
         <dl className="m-0 grid grid-cols-[repeat(auto-fit,minmax(120px,1fr))] gap-4">
-          <Stat label={`Hits in ${since}`} value={compact(t.count)} title={String(t.count)} />
+          <Stat label={`Hits in ${range.label}`} value={compact(t.count)} title={String(t.count)} />
           <Stat label="First seen" value={ago(t.first_seen_ns, nowMs)} title={dateTime(t.first_seen_ns)} />
           <Stat label="Last seen" value={ago(t.last_seen_ns, nowMs)} title={dateTime(t.last_seen_ns)} />
           <Stat label="Alerts" value={String(detail.data.alerts.length)} />
@@ -193,7 +192,7 @@ export function LogTemplatePage() {
       <Card className="flex min-w-0 flex-col gap-2 px-4 py-3.5">
         <PanelTitle>Hits per {stepWord(detail.data.bucket_secs)}</PanelTitle>
         {detail.data.buckets.length === 0 ? (
-          <EmptyState title="No hits in this window" description={`This template did not match any log in the last ${since}. A longer time range may show older hits.`} />
+          <EmptyState title="No hits in this window" description={`This template did not match any log in ${rangePhrase(range)}.${widerHint(range, 'hits')}`} />
         ) : (
           <TimeSeries series={series} height={190} summary={summary} xRange={xRange} />
         )}
@@ -213,7 +212,7 @@ export function LogTemplatePage() {
             <span className="text-xs text-muted">the newest, whatever the time range</span>
           </div>
         </div>
-        <RecentHits hits={detail.data.recent} since={since} nowMs={nowMs} />
+        <RecentHits hits={detail.data.recent} range={range} nowMs={nowMs} />
       </Card>
 
       <Card className="overflow-hidden">
@@ -223,7 +222,7 @@ export function LogTemplatePage() {
         {detail.data.alerts.length === 0 ? (
           <EmptyState title="No alerts for this template" description="It has not spiked and was not flagged as new." />
         ) : (
-          <AlertsTable alerts={detail.data.alerts} since={since} nowMs={nowMs} showTemplate={false} label="Alerts of this template" />
+          <AlertsTable alerts={detail.data.alerts} range={range} nowMs={nowMs} showTemplate={false} label="Alerts of this template" />
         )}
       </Card>
     </div>

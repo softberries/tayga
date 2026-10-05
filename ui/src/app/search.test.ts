@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { HEX32, U64, formatRect, parseRect, sinceCovering, validateHomeSearch, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch, validateTracesSearch } from './search'
+import { HEX32, U64, formatRect, formatUntil, sinceSecs, untilMs, parseRect, sinceCovering, validateHomeSearch, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch, validateTracesSearch } from './search'
 
 describe('validateRootSearch', () => {
   it('keeps a valid non-default since', () => {
@@ -8,10 +8,38 @@ describe('validateRootSearch', () => {
   })
   it('clears the default and invalid values', () => {
     // Explicit undefined, so the router's merge overrides the raw value.
-    expect(validateRootSearch({ since: '1h' })).toStrictEqual({ since: undefined })
-    expect(validateRootSearch({ since: '99y' })).toStrictEqual({ since: undefined })
-    expect(validateRootSearch({ since: 5 })).toStrictEqual({ since: undefined })
-    expect(validateRootSearch({ other: 'x' })).toStrictEqual({ since: undefined })
+    const none = { since: undefined, until: undefined }
+    expect(validateRootSearch({ since: '1h' })).toStrictEqual(none)
+    expect(validateRootSearch({ since: '99y' })).toStrictEqual(none)
+    expect(validateRootSearch({ since: 5 })).toStrictEqual(none)
+    expect(validateRootSearch({ other: 'x' })).toStrictEqual(none)
+    // Without until, only a preset is a range.
+    expect(validateRootSearch({ since: '2h' })).toStrictEqual(none)
+  })
+  it('keeps a custom range: any API since with a valid until, normalized to UTC', () => {
+    expect(validateRootSearch({ since: '2h', until: '2026-10-04T14:00:00Z' })).toStrictEqual({ since: '2h', until: '2026-10-04T14:00:00Z' })
+    expect(validateRootSearch({ since: '7201s', until: '2026-10-04T16:00:00.250+02:00' })).toStrictEqual({
+      since: '7201s',
+      until: '2026-10-04T14:00:00Z',
+    })
+    // The router parses `?until=1791115200` as a number: unix seconds.
+    expect(validateRootSearch({ until: 1_791_115_200 })).toStrictEqual({ since: undefined, until: '2026-10-04T12:00:00Z' })
+    expect(validateRootSearch({ since: '1h', until: '2026-10-04T14:00:00Z' })).toStrictEqual({ since: undefined, until: '2026-10-04T14:00:00Z' })
+  })
+  it('drops a custom range with a bad since or until', () => {
+    const none = { since: undefined, until: undefined }
+    expect(validateRootSearch({ since: '8d', until: '2026-10-04T14:00:00Z' })).toStrictEqual(none)
+    expect(validateRootSearch({ since: '0s', until: '2026-10-04T14:00:00Z' })).toStrictEqual(none)
+    expect(validateRootSearch({ since: '15m', until: 'yesterday' })).toStrictEqual({ since: '15m', until: undefined })
+    expect(validateRootSearch({ since: '15m', until: '2026-10-04 14:00' })).toStrictEqual({ since: '15m', until: undefined })
+    expect(validateRootSearch({ until: -5 })).toStrictEqual(none)
+    expect(validateRootSearch({ until: 1.5 })).toStrictEqual(none)
+  })
+  it('reads API durations', () => {
+    expect([sinceSecs('30s'), sinceSecs('90m'), sinceSecs('2h'), sinceSecs('7d')]).toEqual([30, 5400, 7200, 604_800])
+    expect([sinceSecs('8d'), sinceSecs('0m'), sinceSecs('1w'), sinceSecs('h'), sinceSecs(5)]).toEqual([undefined, undefined, undefined, undefined, undefined])
+    expect(untilMs('2026-10-04T12:00:00Z')).toBe(Date.UTC(2026, 9, 4, 12))
+    expect(formatUntil(Date.UTC(2026, 9, 4, 12, 0, 0, 999))).toBe('2026-10-04T12:00:00Z')
   })
   it('id patterns', () => {
     expect(HEX32.test('334c8a31ddeaa3304a4e4e7f219bebbc')).toBe(true)
@@ -63,8 +91,8 @@ describe('sinceCovering', () => {
     expect(sinceCovering(ago(30 * 86_400), now)).toBe('7d')
   })
   it('never goes below the requested range', () => {
-    expect(sinceCovering(ago(60), now, '24h')).toBe('24h')
-    expect(sinceCovering(ago(5 * 3600), now, '1h')).toBe('24h')
+    expect(sinceCovering(ago(60), now, 86_400)).toBe('24h')
+    expect(sinceCovering(ago(5 * 3600), now, 3600)).toBe('24h')
   })
 })
 

@@ -1,18 +1,20 @@
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { Command } from 'cmdk'
-import { Activity, ChartGantt, Clock, History, Moon, ScrollText, Server, TextAlignStart, Waypoints } from 'lucide-react'
+import { Activity, CalendarClock, ChartGantt, Clock, History, Moon, ScrollText, Server, TextAlignStart, Waypoints } from 'lucide-react'
 import type { ReactElement, ReactNode } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../api/queries'
-import { HEX32, SINCE_VALUES, sinceSearch } from '../../app/search'
+import { DEFAULT_SINCE, HEX32, SINCE_VALUES } from '../../app/search'
+import { setCustomRangeOpen } from '../../app/customRangeDialog'
+import { rangeSearch } from '../../app/range'
 import type { Since } from '../../app/search'
 import { pushRecent, readRecent } from '../../lib/recent'
 import type { RecentItem } from '../../lib/recent'
 import { useTheme } from '../../theme/ThemeProvider'
 import { DialogContent, DialogRoot, DialogTrigger } from '../ui/Dialog'
 import { Kbd } from '../ui/Kbd'
-import { useSince } from './TimeRange'
+import { useRange } from '../../app/useRange'
 
 const DEBOUNCE_MS = 150
 
@@ -28,10 +30,10 @@ export const PAGES: readonly (RecentItem & { icon: typeof Server; keys: string }
 /** Navigates to a palette item, keeping the current time range. */
 export function useOpenItem() {
   const navigate = useNavigate()
-  const since = useSince()
+  const range = useRange()
   return useCallback(
     (item: RecentItem) => {
-      const s = sinceSearch(since)
+      const s = rangeSearch(range)
       switch (item.kind) {
         case 'page':
           switch (item.id) {
@@ -58,7 +60,7 @@ export function useOpenItem() {
           return void navigate({ to: '/traces/$traceId', params: { traceId: item.id }, search: s })
       }
     },
-    [navigate, since],
+    [navigate, range],
   )
 }
 
@@ -93,6 +95,12 @@ function Row({ icon, label, hint, right }: { icon: ReactNode; label: string; hin
 
 /** `children` is the one focusable trigger element; closing returns focus to it. */
 export function CommandPalette({ open, onOpenChange, children }: { open: boolean; onOpenChange: (o: boolean) => void; children: ReactElement }) {
+  // An action that opens something focusable of its own (the custom range popover) runs once
+  // the palette has closed, instead of focus going back to the opener.
+  const afterClose = useRef<(() => void) | null>(null)
+  const runAfterClose = useCallback((fn: () => void) => {
+    afterClose.current = fn
+  }, [])
   return (
     <DialogRoot open={open} onOpenChange={onOpenChange}>
       <DialogTrigger asChild>{children}</DialogTrigger>
@@ -100,15 +108,22 @@ export function CommandPalette({ open, onOpenChange, children }: { open: boolean
         title="Command palette"
         bare
         className="top-[10vh]"
+        onCloseAutoFocus={(e) => {
+          const run = afterClose.current
+          if (!run) return
+          afterClose.current = null
+          e.preventDefault()
+          run()
+        }}
       >
-        <PaletteBody onOpenChange={onOpenChange} />
+        <PaletteBody onOpenChange={onOpenChange} runAfterClose={runAfterClose} />
       </DialogContent>
     </DialogRoot>
   )
 }
 
 /** Mounted only while the dialog is open, so the query and recents start fresh each time. */
-function PaletteBody({ onOpenChange }: { onOpenChange: (o: boolean) => void }) {
+function PaletteBody({ onOpenChange, runAfterClose }: { onOpenChange: (o: boolean) => void; runAfterClose: (fn: () => void) => void }) {
   const [text, setText] = useState('')
   const [recent] = useState<RecentItem[]>(readRecent)
   const { setMode } = useTheme()
@@ -175,16 +190,25 @@ function PaletteBody({ onOpenChange }: { onOpenChange: (o: boolean) => void }) {
         id: `since-${v}`,
         label: `Time range: ${v}`,
         icon: <Clock size={15} />,
+        // A preset ends now: it clears a custom range's `until`.
         run: () =>
           void navigate({
             to: '.',
-            search: (prev: Record<string, unknown>) => ({ ...prev, since: v === '1h' ? undefined : v }),
+            search: (prev: Record<string, unknown>) => ({ ...prev, since: v === DEFAULT_SINCE ? undefined : v, until: undefined }),
             replace: true,
           } as never),
       })),
+      {
+        id: 'since-custom',
+        label: 'Time range: Custom range…',
+        icon: <CalendarClock size={15} />,
+        // Once the palette has closed: focus returning to its opener would read as an outside
+        // interaction and close the popover at once.
+        run: () => runAfterClose(() => setCustomRangeOpen(true)),
+      },
     ]
     return list.filter((a) => !needle || a.label.toLowerCase().includes(needle) || 'action'.includes(needle))
-  }, [setMode, navigate, needle])
+  }, [setMode, navigate, needle, runAfterClose])
 
   const showRecent = !query && recent.length > 0
   return (

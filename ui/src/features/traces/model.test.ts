@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { apiUrl } from '../../api/client'
+import { customRange, presetRange } from '../../app/range'
 import type { TraceHit } from '../../api/types'
 import { MS_FLOOR, TRACE_LIMIT, axisMs, barFraction, plotMs, rowsInRect, sortRows, toneOf, traceQuery } from './model'
 
@@ -18,22 +19,28 @@ const hit = (o: Partial<TraceHit>): TraceHit => ({
 
 describe('traceQuery', () => {
   it('builds the API query string from the URL filters and time range', () => {
-    const q = traceQuery({ service: 'payment', endpoint: 'POST /api/checkout', min_ms: 5, max_ms: 100, errors: true }, '15m')
+    const q = traceQuery({ service: 'payment', endpoint: 'POST /api/checkout', min_ms: 5, max_ms: 100, errors: true }, presetRange('15m'))
     expect(apiUrl('/traces/search', q)).toBe(
       '/api/v1/traces/search?since=15m&service=payment&endpoint=POST+%2Fapi%2Fcheckout&min_ms=5&max_ms=100&errors=true&limit=500',
     )
   })
   it('sends touched=1 to match the service on any span, and only with a service', () => {
-    expect(apiUrl('/traces/search', traceQuery({ service: 'payment', touched: true }, '1h'))).toBe(
+    expect(apiUrl('/traces/search', traceQuery({ service: 'payment', touched: true }, presetRange('1h')))).toBe(
       '/api/v1/traces/search?since=1h&service=payment&touched=1&limit=500',
     )
-    expect(apiUrl('/traces/search', traceQuery({ touched: true }, '1h'))).toBe('/api/v1/traces/search?since=1h&limit=500')
+    expect(apiUrl('/traces/search', traceQuery({ touched: true }, presetRange('1h')))).toBe('/api/v1/traces/search?since=1h&limit=500')
   })
   it('leaves unset filters out and ignores view-only params', () => {
-    expect(apiUrl('/traces/search', traceQuery({ log: true, sel: '1_2_3_4' }, '1h'))).toBe(
+    expect(apiUrl('/traces/search', traceQuery({ log: true, sel: '1_2_3_4' }, presetRange('1h')))).toBe(
       `/api/v1/traces/search?since=1h&limit=${TRACE_LIMIT}`,
     )
-    expect(apiUrl('/traces/search', traceQuery({ min_ms: 0 }, '7d'))).toBe('/api/v1/traces/search?since=7d&min_ms=0&limit=500')
+    expect(apiUrl('/traces/search', traceQuery({ min_ms: 0 }, presetRange('7d')))).toBe('/api/v1/traces/search?since=7d&min_ms=0&limit=500')
+  })
+  it('sends the end of a custom range as until', () => {
+    const r = customRange(Date.UTC(2026, 9, 4, 12), Date.UTC(2026, 9, 4, 14))
+    expect(apiUrl('/traces/search', traceQuery({ errors: true }, r))).toBe(
+      '/api/v1/traces/search?since=2h&until=2026-10-04T14%3A00%3A00Z&errors=true&limit=500',
+    )
   })
 })
 
