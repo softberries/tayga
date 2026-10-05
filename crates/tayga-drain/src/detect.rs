@@ -120,10 +120,14 @@ pub fn new_template_since(watermark_ns: i64) -> i64 {
 }
 
 /// A template is new when it first appeared after `since_ns` (in log time) and its service already
-/// had templates `new_template_warmup_min` minutes before it appeared.
-pub fn is_new(cfg: &DetectConfig, c: &NewCandidate, since_ns: i64) -> bool {
+/// had templates `new_template_warmup_min` minutes before it appeared. After a masking change
+/// (`epoch_start_ns > 0`) it must also have appeared `new_template_warmup_min` after the epoch
+/// start, so templates re-created by the new masking do not alert.
+pub fn is_new(cfg: &DetectConfig, c: &NewCandidate, since_ns: i64, epoch_start_ns: i64) -> bool {
+    let warmup_ns = i64::from(cfg.new_template_warmup_min) * MIN_NS;
     c.template != OVERFLOW
         && c.first_seen_ns > since_ns
+        && (epoch_start_ns <= 0 || c.first_seen_ns >= epoch_start_ns.saturating_add(warmup_ns))
         && c.service_oldest_ns
             <= c.first_seen_ns
                 .saturating_sub(i64::from(cfg.new_template_warmup_min) * MIN_NS)
@@ -256,13 +260,26 @@ mod tests {
         let since = NOW - 10 * MIN_NS;
         let oldest = since - 60 * MIN_NS;
         assert!(
-            !is_new(&cfg, &candidate(since, oldest), since),
+            !is_new(&cfg, &candidate(since, oldest), since, 0),
             "bound is exclusive"
         );
-        assert!(is_new(&cfg, &candidate(since + 1, oldest), since));
+        assert!(is_new(&cfg, &candidate(since + 1, oldest), since, 0));
         let mut o = candidate(since + 1, oldest);
         o.template = OVERFLOW.into();
-        assert!(!is_new(&cfg, &o, since));
+        assert!(!is_new(&cfg, &o, since, 0));
+    }
+
+    #[test]
+    fn epoch_warmup_suppresses_new_templates() {
+        let cfg = DetectConfig::default();
+        let epoch = NOW;
+        let since = epoch - 60 * MIN_NS;
+        let oldest = since - 60 * MIN_NS;
+        let at = |min: i64| candidate(epoch + min * MIN_NS, oldest);
+        assert!(!is_new(&cfg, &at(5), since, epoch));
+        assert!(is_new(&cfg, &at(16), since, epoch));
+        assert!(is_new(&cfg, &at(15), since, epoch), "bound is inclusive");
+        assert!(is_new(&cfg, &at(5), since, 0), "epoch 0 is no gate");
     }
 
     #[test]
@@ -270,13 +287,18 @@ mod tests {
         let cfg = DetectConfig::default();
         let first = NOW - 30 * MIN_NS; // long before the wall clock: only data time matters
         let since = first - MIN_NS;
-        assert!(is_new(&cfg, &candidate(first, first - 15 * MIN_NS), since));
+        assert!(is_new(
+            &cfg,
+            &candidate(first, first - 15 * MIN_NS),
+            since,
+            0
+        ));
         assert!(
-            !is_new(&cfg, &candidate(first, first - 15 * MIN_NS + 1), since),
+            !is_new(&cfg, &candidate(first, first - 15 * MIN_NS + 1), since, 0),
             "service one nanosecond short of the warmup"
         );
         assert!(
-            !is_new(&cfg, &candidate(first, first), since),
+            !is_new(&cfg, &candidate(first, first), since, 0),
             "new service"
         );
     }

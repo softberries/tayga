@@ -15,6 +15,7 @@ use tayga_drain::detect::{
     new_alert, new_template_since, spike_baseline,
 };
 use tayga_drain::drain::DrainConfig;
+use tayga_drain::preprocess::masking_version;
 use tayga_kafka::KafkaSettings;
 use tayga_logminer::metrics::LogminerMetrics;
 use tayga_logminer::miner::{Miner, alert_from_row, alert_json, alert_row};
@@ -30,6 +31,9 @@ const GROUP: &str = "tayga-logminer";
 const EXAMPLES: u32 = 5;
 const ALERTS_PARTITIONS: i32 = 3;
 const MIN_NS: i64 = 60_000_000_000;
+const KEY_WATERMARK: &str = "new_template_watermark_ns";
+const KEY_MASKING_VERSION: &str = "masking_version";
+const KEY_EPOCH_START: &str = "masking_epoch_start_ns";
 
 #[derive(Deserialize)]
 struct Settings {
@@ -217,7 +221,58 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     };
     // Data time up to which new templates have been checked; advanced after each detection pass.
     let now = now_ns();
-    let mut new_watermark = initial_watermark(&detect_cfg, data_clock(data_now, now), now);
+    let Some(stored_watermark) = retry_until(
+        "load watermark",
+        || store.state_get(KEY_WATERMARK),
+        &mut stop_rx,
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    let new_watermark = stored_watermark
+        .unwrap_or_else(|| initial_watermark(&detect_cfg, data_clock(data_now, now), now));
+    let Some(stored_version) = retry_until(
+        "load masking version",
+        || store.state_get(KEY_MASKING_VERSION),
+        &mut stop_rx,
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    let Some(stored_epoch) = retry_until(
+        "load masking epoch",
+        || store.state_get(KEY_EPOCH_START),
+        &mut stop_rx,
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    let current_version = masking_version(cfg.keep_http_status);
+    let (epoch_start, must_store) =
+        startup_epoch(stored_version, stored_epoch, current_version, now);
+    if must_store {
+        // The epoch start goes first: a crash between the two writes re-detects the change.
+        if retry_until(
+            "store masking epoch",
+            || store.state_put(KEY_EPOCH_START, epoch_start),
+            &mut stop_rx,
+        )
+        .await
+        .is_none()
+            || retry_until(
+                "store masking version",
+                || store.state_put(KEY_MASKING_VERSION, i64::from(current_version)),
+                &mut stop_rx,
+            )
+            .await
+            .is_none()
+        {
+            return Ok(());
+        }
+    }
 
     let consumer = tayga_kafka::consumer(&settings.kafka, GROUP)?;
     consumer.subscribe(&[&settings.kafka.topic])?;
@@ -231,12 +286,18 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
             tracing::warn!(error = %e, "metrics server stopped");
         }
     });
+    let mut clock = NewTemplateClock {
+        watermark: new_watermark,
+        epoch_start,
+    };
     tracing::info!(
         topic = %settings.kafka.topic,
         alerts = %cfg.alerts_topic,
         restored,
         active_spikes,
         new_watermark,
+        epoch_start,
+        masking_version = current_version,
         "tayga-logminer consuming"
     );
 
@@ -286,7 +347,7 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
         if detect_due {
             let mut detect_stop = stop_rx.clone();
             tokio::select! {
-                _ = detect(&store, &producer, cfg, &detect_cfg, &mut tracker, &mut new_watermark, &metrics) => {}
+                _ = detect(&store, &producer, cfg, &detect_cfg, &mut tracker, &mut clock, &metrics) => {}
                 _ = detect_stop.wait_for(|stop| *stop) => break,
             }
         }
@@ -429,6 +490,13 @@ where
     }
 }
 
+/// What new-template detection needs between passes: the data time checked so far (advanced
+/// after each pass) and the start of the current masking epoch.
+struct NewTemplateClock {
+    watermark: i64,
+    epoch_start: i64,
+}
+
 /// One detection pass (spec §6). Failures are logged; the loop continues. The new-template
 /// watermark advances to this pass's data clock only when the pass found and stored its alerts,
 /// so a failed pass is retried over the same range.
@@ -438,15 +506,29 @@ async fn detect(
     cfg: &LogminerSettings,
     detect_cfg: &DetectConfig,
     tracker: &mut SpikeTracker,
-    new_watermark: &mut i64,
+    clock: &mut NewTemplateClock,
     metrics: &LogminerMetrics,
 ) {
     let started = Instant::now();
     let now = now_ns();
-    match find_alerts(store, detect_cfg, tracker, *new_watermark, now, metrics).await {
+    match find_alerts(
+        store,
+        detect_cfg,
+        tracker,
+        clock.watermark,
+        clock.epoch_start,
+        now,
+        metrics,
+    )
+    .await
+    {
         Ok((alerts, data_now)) => {
             if publish_alerts(store, producer, &cfg.alerts_topic, &alerts, now, metrics).await {
-                *new_watermark = (*new_watermark).max(data_now);
+                clock.watermark = clock.watermark.max(data_now);
+                if let Err(e) = store.state_put(KEY_WATERMARK, clock.watermark).await {
+                    metrics.state_save_failures.inc();
+                    tracing::warn!(error = %e, "saving the new-template watermark failed");
+                }
             }
         }
         Err(e) => tracing::warn!(error = %e, "detection failed"),
@@ -455,6 +537,22 @@ async fn detect(
         .detect_seconds
         .observe(started.elapsed().as_secs_f64());
     tracker.expire(detect_cfg, now);
+}
+
+/// Masking epoch at startup: `(epoch start, whether to store the version and start)`.
+/// A first install has no epoch (start 0, so no extra warmup); a changed masking version
+/// starts a new epoch now; an unchanged one keeps the stored start.
+fn startup_epoch(
+    stored_version: Option<i64>,
+    stored_start: Option<i64>,
+    current_version: u32,
+    now_ns: i64,
+) -> (i64, bool) {
+    match stored_version {
+        None => (0, true),
+        Some(v) if v == i64::from(current_version) => (stored_start.unwrap_or(0), false),
+        Some(_) => (now_ns, true),
+    }
 }
 
 /// The data clock never runs ahead of the wall clock: a log stamped slightly in the future
@@ -482,6 +580,7 @@ async fn find_alerts(
     cfg: &DetectConfig,
     tracker: &mut SpikeTracker,
     new_watermark: i64,
+    epoch_start: i64,
     now: i64,
     metrics: &LogminerMetrics,
 ) -> anyhow::Result<(Vec<(Alert, bool)>, i64)> {
@@ -528,7 +627,7 @@ async fn find_alerts(
             first_seen_ns: r.first_seen_ns,
             service_oldest_ns: r.service_oldest_ns,
         };
-        if !is_new(cfg, &c, since) {
+        if !is_new(cfg, &c, since, epoch_start) {
             continue;
         }
         let window = minutes_covering(c.first_seen_ns, now, cfg.new_template_recent_min);
@@ -622,6 +721,15 @@ mod tests {
             serde_json::from_str(r#"{"detect_secs": 5, "alerts_topic": "x"}"#).unwrap();
         assert_eq!((s.detect_secs, s.alerts_topic.as_str()), (5, "x"));
         assert_eq!(s.max_batch, 5_000);
+    }
+
+    #[test]
+    fn startup_epoch_tracks_the_masking_version() {
+        let now = 100 * MIN_NS;
+        assert_eq!(startup_epoch(None, None, 2, now), (0, true));
+        assert_eq!(startup_epoch(Some(2), Some(7), 2, now), (7, false));
+        assert_eq!(startup_epoch(Some(2), None, 2, now), (0, false));
+        assert_eq!(startup_epoch(Some(1), Some(7), 2, now), (now, true));
     }
 
     #[test]

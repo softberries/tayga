@@ -48,7 +48,7 @@ fn span(id: &str) -> SpanRow {
 #[ignore = "requires ClickHouse: make it"]
 async fn migrate_is_idempotent_and_rows_roundtrip() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6]);
     assert!(migrate(&s).await.unwrap().is_empty());
 
     let store = Store::new(&s);
@@ -150,7 +150,7 @@ fn story_row(id: &str) -> StoryRow {
 #[ignore = "requires ClickHouse: run against the live stack"]
 async fn analysis_tables_roundtrip_and_baseline_queries() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6]);
     let store = Store::new(&s);
 
     let mut summaries: Vec<TraceSummaryRow> = (0..60).map(|i| summary_row(i, i % 2 == 0)).collect();
@@ -221,7 +221,7 @@ async fn analysis_tables_roundtrip_and_baseline_queries() {
 #[ignore = "requires ClickHouse: run against the live stack"]
 async fn replayed_trace_collapses_to_most_complete_row() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6]);
     let store = Store::new(&s);
 
     let full = TraceSummaryRow {
@@ -294,7 +294,7 @@ async fn replayed_trace_collapses_to_most_complete_row() {
 #[ignore = "requires ClickHouse: make it"]
 async fn slow_story_traces_are_excluded_from_baselines() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6]);
     let store = Store::new(&s);
 
     let summaries: Vec<TraceSummaryRow> = (0..60).map(|i| summary_row(i, i % 2 == 0)).collect();
@@ -532,6 +532,19 @@ async fn data_now_is_the_latest_recent_hit_or_zero() {
         now - 5 * MIN_NS,
         "a log stamped an hour ahead is ignored"
     );
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn logminer_state_round_trips_and_keeps_latest() {
+    let (s, store) = log_store().await;
+    assert_eq!(store.state_get("k").await.unwrap(), None);
+    store.state_put("k", 1).await.unwrap();
+    store.state_put("k", 2).await.unwrap();
+    store.state_put("other", 9).await.unwrap();
+    assert_eq!(store.state_get("k").await.unwrap(), Some(2));
+    assert_eq!(store.state_get("other").await.unwrap(), Some(9));
     drop_db(&s, &store).await;
 }
 

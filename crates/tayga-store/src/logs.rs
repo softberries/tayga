@@ -170,6 +170,25 @@ impl Store {
             .await
     }
 
+    /// Persisted logminer state value for `key`, or `None` when never stored.
+    pub async fn state_get(&self, key: &str) -> clickhouse::error::Result<Option<i64>> {
+        self.client()
+            .query("SELECT value FROM logminer_state FINAL WHERE key = ?")
+            .bind(key)
+            .fetch_optional()
+            .await
+    }
+
+    /// Stores `value` under `key`; the latest write wins.
+    pub async fn state_put(&self, key: &str, value: i64) -> clickhouse::error::Result<()> {
+        self.client()
+            .query("INSERT INTO logminer_state (key, value, updated) VALUES (?, ?, now64(9))")
+            .bind(key)
+            .bind(value)
+            .execute()
+            .await
+    }
+
     /// Distinct trace ids of recent hits of a template, newest first.
     pub async fn example_traces(
         &self,

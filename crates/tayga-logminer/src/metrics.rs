@@ -19,6 +19,8 @@ pub struct LogminerMetrics {
     pub detect_seconds: Histogram,
     /// Wall clock minus the latest mined log's `ts`, set each detection tick.
     pub data_lag_seconds: Gauge<f64, AtomicU64>,
+    /// Failed saves of the new-template watermark to `logminer_state`.
+    pub state_save_failures: Counter,
 }
 
 impl Default for LogminerMetrics {
@@ -33,6 +35,7 @@ impl Default for LogminerMetrics {
             // 10 ms .. ~20 s.
             detect_seconds: Histogram::new(exponential_buckets(0.01, 2.0, 12)),
             data_lag_seconds: Gauge::default(),
+            state_save_failures: Counter::default(),
         }
     }
 }
@@ -80,6 +83,11 @@ impl LogminerMetrics {
             "Wall clock minus the newest mined log timestamp, at the last detection pass",
             m.data_lag_seconds.clone(),
         );
+        registry.register(
+            "tayga_logminer_state_save_failures",
+            "Failed saves of the new-template watermark to logminer_state",
+            m.state_save_failures.clone(),
+        );
         // Export both series at 0 so the family is visible before the first alert.
         for kind in [AlertKind::New, AlertKind::Spike] {
             drop(m.alerts.get_or_create(&KindLabel::new(kind.as_str())));
@@ -114,6 +122,7 @@ mod tests {
             "tayga_logminer_detect_seconds_bucket{le=\"0.02\"} 1",
             "# TYPE tayga_logminer_data_lag_seconds gauge",
             "tayga_logminer_data_lag_seconds 2.5",
+            "tayga_logminer_state_save_failures_total 0",
         ] {
             assert!(out.contains(line), "missing {line:?} in\n{out}");
         }
