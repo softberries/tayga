@@ -156,7 +156,13 @@ pub fn spike_baseline(
         return Err(SpikeSkip::Coverage);
     }
     let effective_min = possible_min.min(i64::from(cov.covered_min));
-    let per_window = w.baseline_total as f64 / (effective_min / spike_min).max(1) as f64;
+    // A full baseline keeps the whole-window divisor; a shortened one (young template, gap) is
+    // scaled by the minutes actually covered, so 3 minutes are not read as a full window.
+    let per_window = if effective_min >= i64::from(cfg.baseline_window_min) {
+        w.baseline_total as f64 / (effective_min / spike_min).max(1) as f64
+    } else {
+        w.baseline_total as f64 * spike_min as f64 / effective_min as f64
+    };
     Ok((w.current >= cfg.spike_min_count
         && w.current as f64 >= cfg.spike_factor * per_window.max(1.0))
     .then_some(per_window))
@@ -359,21 +365,22 @@ mod tests {
             spike_baseline(&cfg, &window(100, 0, 10), cov(60), NOW),
             Ok(Some(0.0))
         );
-        // 11 minutes old with a burst: one window of baseline.
+        // 11 minutes old with a burst: existed 6 min, 4 hits -> 4 * 5 / 6 per window.
         assert_eq!(
             spike_baseline(&cfg, &window(100, 4, 11), cov(60), NOW),
-            Ok(Some(4.0))
+            Ok(Some(4.0 * 5.0 / 6.0))
         );
         assert_eq!(
-            spike_baseline(&cfg, &window(19, 4, 11), cov(60), NOW),
-            Ok(None)
+            spike_baseline(&cfg, &window(16, 4, 11), cov(60), NOW),
+            Ok(None),
+            "16 < 5 * 3.33"
         );
-        // 64 minutes old: effective 59 -> 11 windows, not 12.
+        // 64 minutes old: effective 59 of 60 minutes, scaled proportionally.
         assert_eq!(
             spike_baseline(&cfg, &window(100, 110, 64), cov(60), NOW),
-            Ok(Some(10.0))
+            Ok(Some(110.0 * 5.0 / 59.0))
         );
-        // Coverage below the existed minutes wins: effective 30 -> 6 windows.
+        // Coverage below the existed minutes wins: effective 30 minutes -> 120 * 5 / 30.
         assert_eq!(
             spike_baseline(&cfg, &window(100, 120, 64), cov(30), NOW),
             Ok(Some(20.0))
@@ -413,6 +420,34 @@ mod tests {
         assert_eq!(old.covered_min, 60, "capped at the baseline window");
         let young = template_coverage(&cfg, &buckets, NOW - 20 * MIN_NS, NOW);
         assert!((16..=17).contains(&young.covered_min), "{young:?}");
+    }
+
+    #[test]
+    fn a_short_baseline_is_scaled_by_its_minutes() {
+        let cfg = DetectConfig {
+            baseline_window_min: 6,
+            ..DetectConfig::default()
+        };
+        // 3 of 6 minutes covered: 12 hits in 3 minutes = 20 per 5-minute window, not 12.
+        let w = window(100, 12, 120);
+        assert_eq!(spike_baseline(&cfg, &w, cov(3), NOW), Ok(Some(20.0)));
+        assert_eq!(
+            spike_baseline(&cfg, &window(99, 12, 120), cov(3), NOW),
+            Ok(None),
+            "99 < 5 * 20"
+        );
+        // Full coverage of the same config: the whole-window divisor (6 / 5 = 1 window).
+        assert_eq!(spike_baseline(&cfg, &w, cov(6), NOW), Ok(Some(12.0)));
+        // A non-divisible default-window config keeps the old integer maths at full coverage.
+        let odd = DetectConfig {
+            baseline_window_min: 62,
+            ..DetectConfig::default()
+        };
+        assert_eq!(
+            spike_baseline(&odd, &window(100, 120, 120), cov(62), NOW),
+            Ok(Some(10.0)),
+            "62 / 5 = 12 windows"
+        );
     }
 
     fn candidate(first_seen_ns: i64, service_oldest_ns: i64) -> NewCandidate {

@@ -619,6 +619,34 @@ fn partition_state(
     }
 }
 
+/// Offsets of `topic` partitions in `tpl` that hold a concrete offset (not invalid/beginning).
+fn offsets_of(
+    tpl: rdkafka::error::KafkaResult<TopicPartitionList>,
+    topic: &str,
+) -> HashMap<i32, i64> {
+    tpl.map(|tpl| {
+        tpl.elements()
+            .iter()
+            .filter(|e| e.topic() == topic)
+            .filter_map(|e| match e.offset() {
+                Offset::Offset(o) => Some((e.partition(), o)),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Where an unconsumed partition will read next: the consumer position, else the committed
+/// offset, else (last resort) the low watermark.
+fn resolve_position(
+    position: Option<i64>,
+    committed: Option<i64>,
+    low: Option<i64>,
+) -> Option<i64> {
+    position.or(committed).or(low)
+}
+
 /// Builds the per-partition view for one detection pass: prunes revoked partitions using the
 /// consumer's current assignment, then fetches the watermarks of every assigned partition
 /// (blocking librdkafka calls, run on the blocking pool, `WATERMARK_TIMEOUT` each; a failed
@@ -646,23 +674,11 @@ async fn partition_snapshot(
     if assigned.is_empty() {
         return BTreeMap::new();
     }
-    let positions: HashMap<i32, i64> = consumer
-        .position()
-        .map(|tpl| {
-            tpl.elements()
-                .iter()
-                .filter(|e| e.topic() == topic)
-                .filter_map(|e| match e.offset() {
-                    Offset::Offset(o) => Some((e.partition(), o)),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let positions = offsets_of(consumer.position(), topic);
     let c = Arc::clone(consumer);
     let t = topic.to_string();
     let ids = assigned.clone();
-    let marks = tokio::task::spawn_blocking(move || {
+    let (marks, committed) = tokio::task::spawn_blocking(move || {
         let mut marks = HashMap::new();
         for p in ids {
             match c.fetch_watermarks(&t, p, WATERMARK_TIMEOUT) {
@@ -672,7 +688,10 @@ async fn partition_snapshot(
                 Err(e) => tracing::warn!(partition = p, error = %e, "fetching watermarks failed"),
             }
         }
-        marks
+        // `position()` is invalid until a message is delivered after a restart; the committed
+        // offset is where consumption resumes.
+        let committed = offsets_of(c.committed(WATERMARK_TIMEOUT), &t);
+        (marks, committed)
     })
     .await
     .unwrap_or_default();
@@ -682,7 +701,8 @@ async fn partition_snapshot(
             let (low, high) = marks
                 .get(&p)
                 .map_or((None, None), |&(l, h)| (Some(l), Some(h)));
-            let position = positions.get(&p).copied().or(low);
+            let position =
+                resolve_position(positions.get(&p).copied(), committed.get(&p).copied(), low);
             partition_state(
                 seen.by_partition.get(&p).copied(),
                 position,
@@ -1059,6 +1079,24 @@ mod tests {
         assert_eq!(
             partition_state(None, None, None, NOW_T, 777),
             Some((777, false))
+        );
+    }
+
+    #[test]
+    fn an_idle_partition_with_a_committed_offset_at_the_high_watermark_is_caught_up() {
+        let pos = resolve_position(None, Some(9), Some(0));
+        assert_eq!(pos, Some(9), "committed beats the low watermark");
+        assert_eq!(partition_state(None, pos, Some(9), NOW_T, 777), None);
+        let behind = resolve_position(None, Some(4), Some(0));
+        assert_eq!(
+            partition_state(None, behind, Some(9), NOW_T, 777),
+            Some((777, false))
+        );
+        assert_eq!(resolve_position(Some(2), Some(9), Some(0)), Some(2));
+        assert_eq!(
+            resolve_position(None, None, Some(0)),
+            Some(0),
+            "last resort"
         );
     }
 
