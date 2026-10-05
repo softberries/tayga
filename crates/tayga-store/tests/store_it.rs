@@ -48,7 +48,7 @@ fn span(id: &str) -> SpanRow {
 #[ignore = "requires ClickHouse: make it"]
 async fn migrate_is_idempotent_and_rows_roundtrip() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     assert!(migrate(&s).await.unwrap().is_empty());
 
     let store = Store::new(&s);
@@ -150,7 +150,7 @@ fn story_row(id: &str) -> StoryRow {
 #[ignore = "requires ClickHouse: run against the live stack"]
 async fn analysis_tables_roundtrip_and_baseline_queries() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     let store = Store::new(&s);
 
     let mut summaries: Vec<TraceSummaryRow> = (0..60).map(|i| summary_row(i, i % 2 == 0)).collect();
@@ -224,7 +224,7 @@ async fn analysis_tables_roundtrip_and_baseline_queries() {
 #[ignore = "requires ClickHouse: run against the live stack"]
 async fn replayed_trace_collapses_to_most_complete_row() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     let store = Store::new(&s);
 
     let full = TraceSummaryRow {
@@ -297,7 +297,7 @@ async fn replayed_trace_collapses_to_most_complete_row() {
 #[ignore = "requires ClickHouse: make it"]
 async fn slow_story_traces_are_excluded_from_baselines() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     let store = Store::new(&s);
 
     let summaries: Vec<TraceSummaryRow> = (0..60).map(|i| summary_row(i, i % 2 == 0)).collect();
@@ -1150,5 +1150,96 @@ async fn seasonal_counts_cover_shifted_windows() {
             .counts
             .is_empty()
     );
+    drop_db(&s, &store).await;
+}
+
+const BACKFILL_SQL: &str = include_str!("../migrations/0009_backfill_log_template_minutes.sql");
+const MINUTES_MV_SQL: &str = "CREATE MATERIALIZED VIEW IF NOT EXISTS log_template_minutes_mv \
+     TO log_template_minutes AS \
+     SELECT template_id, toStartOfMinute(ts) AS minute, uniqExactState(log_id) AS hits \
+     FROM log_template_hits GROUP BY template_id, minute";
+
+/// `(state rows, distinct log_ids)` per minute offset (minutes after `base_ns`) for template 7.
+async fn minute_counts(store: &Store, base_ns: i64) -> Vec<(i64, u64, u64)> {
+    store
+        .client()
+        .query(
+            "SELECT intDiv(toUnixTimestamp(minute) - ?, 60) AS m, count(), uniqExactMerge(hits) \
+             FROM log_template_minutes WHERE template_id = 7 GROUP BY m ORDER BY m",
+        )
+        .bind(base_ns / 1_000_000_000)
+        .fetch_all::<(i64, u64, u64)>()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn backfill_fills_minutes_before_the_view_without_double_counting() {
+    let (s, store) = log_store().await;
+    let c = store.client().clone();
+    let base = (now_ns() - 40 * MIN_NS).div_euclid(MIN_NS) * MIN_NS;
+    let at = |minute: i64, i: u64| base + minute * MIN_NS + 1_000_000_000 + i as i64;
+    let hits = |minute: i64, ids: std::ops::RangeInclusive<u64>| -> Vec<LogHitRow> {
+        ids.map(|i| hit(i, 7, at(minute, i), "")).collect()
+    };
+    // Upgrade shape: hits from before the view existed (minutes 0 and 10, and the first half of
+    // minute 20), then the view is created mid-minute 20 and sees the rest.
+    c.query("DROP VIEW log_template_minutes_mv")
+        .execute()
+        .await
+        .unwrap();
+    for h in [hits(0, 1..=4), hits(10, 11..=13), hits(20, 21..=25)] {
+        store.insert_log_hits(&h).await.unwrap();
+    }
+    c.query(MINUTES_MV_SQL).execute().await.unwrap();
+    store.insert_log_hits(&hits(20, 26..=30)).await.unwrap();
+    store.insert_log_hits(&hits(30, 31..=33)).await.unwrap();
+    assert_eq!(
+        minute_counts(&store, base).await,
+        vec![(20, 1, 5), (30, 1, 3)],
+        "the view saw only its own inserts"
+    );
+
+    c.query(BACKFILL_SQL).execute().await.unwrap();
+    let want = vec![(0, 1, 4), (10, 1, 3), (20, 2, 10), (30, 1, 3)];
+    assert_eq!(
+        minute_counts(&store, base).await,
+        want,
+        "older minutes filled, the boundary minute completed, later minutes not re-inserted"
+    );
+    // A re-run only re-reads the (new) earliest minute; uniqExactMerge counts its ids once.
+    c.query(BACKFILL_SQL).execute().await.unwrap();
+    let rerun = minute_counts(&store, base).await;
+    assert_eq!(
+        rerun[0],
+        (0, 2, 4),
+        "a second state row, same distinct count"
+    );
+    assert_eq!(&rerun[1..], &want[1..]);
+    // After background merges the states combine and the distinct counts are unchanged.
+    c.query("OPTIMIZE TABLE log_template_minutes FINAL")
+        .execute()
+        .await
+        .unwrap();
+    let merged: Vec<(i64, u64)> = minute_counts(&store, base)
+        .await
+        .into_iter()
+        .map(|(m, _, n)| (m, n))
+        .collect();
+    assert_eq!(merged, vec![(0, 4), (10, 3), (20, 10), (30, 3)]);
+
+    // An empty minutes table (no hit since the view was created) backfills every hit.
+    c.query("TRUNCATE TABLE log_template_minutes")
+        .execute()
+        .await
+        .unwrap();
+    c.query(BACKFILL_SQL).execute().await.unwrap();
+    let all: Vec<(i64, u64)> = minute_counts(&store, base)
+        .await
+        .into_iter()
+        .map(|(m, _, n)| (m, n))
+        .collect();
+    assert_eq!(all, vec![(0, 4), (10, 3), (20, 10), (30, 3)]);
     drop_db(&s, &store).await;
 }

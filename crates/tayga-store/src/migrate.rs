@@ -33,6 +33,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
         8,
         include_str!("../migrations/0008_log_alerts_seasonal.sql"),
     ),
+    (
+        9,
+        include_str!("../migrations/0009_backfill_log_template_minutes.sql"),
+    ),
 ];
 
 pub fn split_statements(sql: &str) -> Vec<String> {
@@ -98,5 +102,6 @@ mod tests {
         assert_eq!(split_statements(MIGRATIONS[3].1).len(), 3);
         assert_eq!(split_statements(MIGRATIONS[4].1).len(), 1);
         assert_eq!(split_statements(MIGRATIONS[5].1).len(), 1);
+        assert_eq!(split_statements(MIGRATIONS[8].1).len(), 1);
     }
 }
