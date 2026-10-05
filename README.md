@@ -178,9 +178,9 @@ JSON API:
 | `GET /api/v1/story-groups/{fingerprint}` | `since` (default `24h`) | One group with example stories; 404 if absent |
 | `GET /api/v1/stories/{story_id}` | none | Full story; 404 if absent |
 | `GET /api/v1/traces/{trace_id}` | none | Spans and logs from the raw tables; 404 if neither exists |
-| `GET /api/v1/service-map` | `since` (default `1h`) | Service-to-service edges |
+| `GET /api/v1/service-map` | `since` (default `1h`) | `{edges, nodes}`: `edges` are service-to-service calls (`parent`, `child`, `calls`, `errors`, `error_rate`, `avg_duration_ns`); `nodes` are per-service RED summaries (`service`, `calls`, `rate`, `error_ratio`, `p99_ns`, `baseline_p99_ns`, `health`: `ok`, `slow` or `error`). Before plan 5 the body was a plain array of edges |
 | `GET /api/v1/log-alerts` | `since` (default `24h`), `kind` (`new` or `spike`), `service` | Up to 200 alerts, newest `last_at` first; each has `active` and `example_traces` (`[{trace_id, story_id \| null}]`) |
-| `GET /api/v1/log-templates` | `since` (default `1h`), `service`, `q` (substring, at most 200 chars) | Top 200 templates with hits in the window, by count; each has `alerting` |
+| `GET /api/v1/log-templates` | `since` (default `1h`), `service`, `q` (substring, at most 200 chars) | Top 200 templates with hits in the window, by count; each has `alerting`, plus `bucket_secs` (the window / 120, rounded up to whole minutes) and `buckets` (`[bucket_start_unix_s, hits]`, oldest first; buckets without hits are left out) |
 | `GET /api/v1/log-templates/{id}` | `since` (default `24h`) | One template with `buckets`, the 20 most recent hits and its alerts |
 | `GET /api/v1/traces/{trace_id}/log-templates` | none | `[{log_id, template_id, template, alert}]` for the trace's logs |
 | `GET /api/v1/overview` | `since` | KPI values and bucket series for the Stories page |
@@ -195,7 +195,7 @@ JSON API:
 | `GET /healthz` | none | `ok` |
 | `GET /metrics` | none | Prometheus metrics |
 
-Errors on these routes are JSON `{"error": "..."}`. A ClickHouse failure returns 503. `GET /api/v1/traces/{trace_id}` and `GET /api/v1/service-map` also carry the extra fields the app uses (span attributes, resource, events, self time; per-node RED summary and health).
+Errors on these routes are JSON `{"error": "..."}`. A ClickHouse failure returns 503. `GET /api/v1/traces/{trace_id}` also carries the extra fields the app uses (span attributes, resource, events, self time). `GET /api/v1/service-map` changed shape: it returns an object, not an array, so a client that read the old array must read `edges`.
 
 App routes (client-side; every path below serves `index.html`, and the app renders the page):
 
