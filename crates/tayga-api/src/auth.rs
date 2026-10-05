@@ -360,6 +360,15 @@ fn too_many(retry_after: u64) -> Response {
     res
 }
 
+/// 415 for `login` and `logout`: requiring JSON (a CORS-preflighted type), together with
+/// `SameSite=Strict`, keeps third-party pages from posting to them.
+fn not_json() -> Response {
+    error(
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "content type must be application/json",
+    )
+}
+
 fn is_json(headers: &HeaderMap) -> bool {
     headers
         .get(header::CONTENT_TYPE)
@@ -393,10 +402,7 @@ async fn login(
     body: Bytes,
 ) -> Response {
     if !is_json(&headers) {
-        return error(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "content type must be application/json",
-        );
+        return not_json();
     }
     let Ok(body) = serde_json::from_slice::<LoginBody>(&body) else {
         return error(
@@ -422,7 +428,12 @@ async fn login(
     }
 }
 
-async fn logout(State(auth): State<Arc<Auth>>) -> Response {
+/// Needs no session (a stale cookie must always be clearable), but needs JSON so a
+/// third-party page cannot force a sign-out. The body is ignored; the app sends `{}`.
+async fn logout(State(auth): State<Arc<Auth>>, headers: HeaderMap) -> Response {
+    if !is_json(&headers) {
+        return not_json();
+    }
     let mut res = StatusCode::NO_CONTENT.into_response();
     res.headers_mut()
         .insert(header::SET_COOKIE, auth.cookie("", 0));
@@ -688,6 +699,26 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_session_cookies_first_ascii_value_wins() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("tayga_session=first; tayga_session=second"),
+        );
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("tayga_session=third"),
+        );
+        assert_eq!(session_cookie(&headers), Some("first"));
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_bytes(b"tayga_session=\xe9; tayga_session=good").unwrap(),
+        );
+        assert_eq!(session_cookie(&headers), Some("good"));
+    }
+
+    #[test]
     fn open_routes_match_method_and_exact_path() {
         assert!(is_open(&Method::POST, "/api/v1/auth/login"));
         assert!(is_open(&Method::POST, "/api/v1/auth/logout"));
@@ -703,6 +734,9 @@ mod tests {
             (Method::GET, "/api/v1/configX"),
             (Method::GET, "/api/v1/config/"),
             (Method::GET, "//api/v1/config"),
+            (Method::GET, "///api/v1/config"),
+            (Method::GET, "/api/v1/%61uth/me"),
+            (Method::GET, "/api/v1/auth/me/../x"),
             (Method::GET, "//api/v1/story-groups"),
             (Method::GET, "/api"),
         ] {
@@ -1102,6 +1136,8 @@ mod tests {
             "/api/v1/nope",
             "/api/v1/configX",
             "/api/v1/config/",
+            // Encoded and dot-segment forms of `me` are not open (asserted on `is_open` in
+            // `open_routes_match_method_and_exact_path`, since `me` answers the same 401).
             "/api/v1/%61uth/me",
             "/api/v1/auth/me/../x",
             "/api/v1/auth/login",
@@ -1111,6 +1147,25 @@ mod tests {
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
             assert_eq!(body, r#"{"error":"unauthorized"}"#, "{uri}");
         }
+        // A lookalike of a protected route gets the guard's 401, not data. Unguarded, the
+        // router would not match it and the SPA would answer 404.
+        let (status, _, body) = send(
+            &app,
+            get_req("/api/v1/story-group%73")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body, r#"{"error":"unauthorized"}"#);
+        let (status, _, _) = send(
+            &app_with(None, PEER),
+            get_req("/api/v1/story-group%73")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "no data even without auth");
         // HEAD on an open GET route is open.
         let (status, _, _) = send(
             &app,
@@ -1154,7 +1209,8 @@ mod tests {
     async fn logout_needs_no_session() {
         // e.g. a stale cookie signed with the previous process's random key.
         for cookie in [None, Some("tayga_session=stale.token")] {
-            let mut req = Request::post("/api/v1/auth/logout");
+            let mut req = Request::post("/api/v1/auth/logout")
+                .header(header::CONTENT_TYPE, "application/json");
             if let Some(c) = cookie {
                 req = req.header(header::COOKIE, c);
             }
@@ -1171,6 +1227,7 @@ mod tests {
         let (status, headers, _) = send(
             &app_with(secure, PEER),
             Request::post("/api/v1/auth/logout")
+                .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1183,12 +1240,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn logout_requires_json_content_type() {
+        let app = app(auth());
+        let (_, login_headers, _) = send(&app, login_req("admin", "secret")).await;
+        for ct in [
+            None,
+            Some("text/plain"),
+            Some("application/x-www-form-urlencoded"),
+        ] {
+            let mut req = Request::post("/api/v1/auth/logout")
+                .header(header::COOKIE, cookie_pair(&login_headers));
+            if let Some(ct) = ct {
+                req = req.header(header::CONTENT_TYPE, ct);
+            }
+            let (status, headers, _) = send(&app, req.body(Body::from("{}")).unwrap()).await;
+            assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{ct:?}");
+            assert!(headers.get(header::SET_COOKIE).is_none(), "{ct:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn logout_clears_cookie() {
         let app = app(auth());
         let (_, login_headers, _) = send(&app, login_req("admin", "secret")).await;
         let (status, headers, _) = send(
             &app,
             Request::post("/api/v1/auth/logout")
+                .header(header::CONTENT_TYPE, "application/json")
                 .header(header::COOKIE, cookie_pair(&login_headers))
                 .body(Body::empty())
                 .unwrap(),
