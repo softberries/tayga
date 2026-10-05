@@ -368,6 +368,7 @@ export const ConsumerLagSchema = z.strictObject({
 export const ClientConfigSchema = z.strictObject({
   jaeger_url: z.nullable(str),
   grafana_url: z.nullable(str),
+  auth_enabled: z.boolean(),
 })
 
 /** Every error response: `{"error": "..."}`. */

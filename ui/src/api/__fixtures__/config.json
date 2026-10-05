@@ -1,1 +1,1 @@
-{"jaeger_url":"http://localhost:8080/jaeger/ui","grafana_url":"http://localhost:3001"}
+{"jaeger_url":"http://localhost:8080/jaeger/ui","grafana_url":"http://localhost:3001","auth_enabled":false}
