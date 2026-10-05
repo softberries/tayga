@@ -10,8 +10,9 @@ export function shouldRetry(failureCount: number, error: unknown): boolean {
 }
 
 /**
- * Whether a query speaks for the storage backend. A query that sets `meta: { outage: false }`
- * (consumer lag, which reads Kafka) neither raises nor clears the "storage unavailable" banner.
+ * Whether a query speaks for the storage backend (ClickHouse). A query that sets
+ * `meta: { outage: false }` (consumer lag, which reads Kafka; `/config`, which reads no storage)
+ * neither raises nor clears the "storage unavailable" banner.
  */
 function isOutageQuery(query: Pick<Query, 'meta'>): boolean {
   return query.meta?.outage !== false

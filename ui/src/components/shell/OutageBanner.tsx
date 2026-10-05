@@ -1,7 +1,11 @@
 import { TriangleAlert } from 'lucide-react'
 import { useOutage } from '../../app/apiStatus'
 
-/** Global banner while the API answers 503 (ClickHouse or Kafka down). */
+/**
+ * Global banner while ClickHouse is down: raised by a 503 from a storage-backed query, cleared
+ * by the next storage-backed success. Queries with `meta: { outage: false }` (consumer lag,
+ * which reads Kafka; `/config`; the palette search) neither raise nor clear it.
+ */
 export function OutageBanner() {
   const outage = useOutage()
   if (!outage) return null

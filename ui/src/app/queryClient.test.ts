@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../api/client'
+import { api } from '../api/queries'
 import { getOutage } from './apiStatus'
 import { createQueryClient, shouldRetry } from './queryClient'
 
@@ -44,5 +45,14 @@ describe('query client', () => {
     await qc.fetchQuery({ queryKey: ['f'], queryFn: () => Promise.resolve(1), meta: { outage: false } })
     expect(getOutage()?.message).toBe('clickhouse down')
     await qc.fetchQuery({ queryKey: ['g'], queryFn: () => Promise.resolve(1) })
+  })
+
+  it('a /config success does not clear the banner: it never touches ClickHouse', async () => {
+    const qc = createQueryClient()
+    await qc.fetchQuery({ queryKey: ['h'], queryFn: () => Promise.reject(new ApiError(503, 'clickhouse down')), retry: false }).catch(() => {})
+    await qc.fetchQuery({ ...api.config(), queryFn: () => Promise.resolve({ jaeger_url: null, grafana_url: null }) })
+    expect(getOutage()?.message).toBe('clickhouse down')
+    await qc.fetchQuery({ queryKey: ['i'], queryFn: () => Promise.resolve(1) })
+    expect(getOutage()).toBeNull()
   })
 })

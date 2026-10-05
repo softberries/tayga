@@ -70,5 +70,6 @@ export const api = {
   pipelineSeries: (p: { since: Since; metric: string; kind: string; job?: string; labels?: string }) =>
     q<SeriesView>('pipeline-series', '/pipeline/series', p),
   pipelineLag: () => q<ConsumerLag[]>('pipeline-lag', '/pipeline/lag'),
-  config: () => queryOptions({ ...q<ClientConfig>('config', '/config'), staleTime: Infinity }),
+  /** Read from the API's own config, not ClickHouse: kept out of the storage banner. */
+  config: () => queryOptions({ ...q<ClientConfig>('config', '/config'), staleTime: Infinity, meta: { outage: false } }),
 }
