@@ -7,7 +7,7 @@ import { useQuery } from '@tanstack/react-query'
 import type { UseQueryResult } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { ArrowRight } from 'lucide-react'
-import { m } from 'motion/react'
+import { m, useReducedMotionConfig } from 'motion/react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { isApiError } from '../../api/client'
@@ -172,10 +172,11 @@ function Frame({ wide, children }: { wide: boolean; children: ReactNode }) {
     max: inspectorMax,
     storageKey: INSPECTOR_KEY,
   })
+  const reduce = useReducedMotionConfig() ?? false
   return (
     <m.aside
       aria-label="Selected story"
-      initial={{ opacity: 0, x: 24 }}
+      initial={reduce ? false : { opacity: 0, x: 24 }}
       animate={{ opacity: 1, x: 0 }}
       transition={{ type: 'tween', duration: 0.3, ease: [0.2, 0.8, 0.2, 1] }}
       style={wide ? { width } : undefined}
@@ -220,6 +221,7 @@ function useSettledGroup(group: StoryGroup | undefined): StoryGroup | undefined 
 export function Inspector({ group: selected, pending }: { group: StoryGroup | undefined; pending?: boolean }) {
   const wide = useMediaQuery(WIDE_QUERY)
   const group = useSettledGroup(selected)
+  const reduce = useReducedMotionConfig() ?? false
   return (
     <Frame wide={wide}>
       {pending ? (
@@ -232,7 +234,7 @@ export function Inspector({ group: selected, pending }: { group: StoryGroup | un
         <m.div
           key={group.fingerprint}
           className="flex flex-col gap-4"
-          initial={{ opacity: 0 }}
+          initial={reduce ? false : { opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.2 }}
         >

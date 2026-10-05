@@ -441,6 +441,12 @@
   .tg-card:hover {
     transform: none;
   }
+  /* Safety net for utilities such as transition-colors: nothing eases under reduced motion. */
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+  }
 }
 
 /* Theme cross-fade: ThemeProvider adds this class for one switch only. */

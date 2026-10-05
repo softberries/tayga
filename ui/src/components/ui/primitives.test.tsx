@@ -348,6 +348,22 @@ describe('CountUp', () => {
 })
 
 describe('Stagger', () => {
+  const list = (mode: 'never' | 'always') => (
+    <LazyMotion features={domAnimation} strict>
+      <MotionConfig reducedMotion={mode}>
+        <StaggerList role="list">
+          <StaggerItem role="listitem">a</StaggerItem>
+        </StaggerList>
+      </MotionConfig>
+    </LazyMotion>
+  )
+  it('fades items in from transparent, but starts them visible under reduced motion', () => {
+    const first = render(list('never'))
+    expect(screen.getByRole('listitem').style.opacity).toBe('0')
+    first.unmount()
+    render(list('always'))
+    expect(screen.getByRole('listitem').style.opacity).toBe('1')
+  })
   it('renders every item', () => {
     render(
       <StaggerList role="list">

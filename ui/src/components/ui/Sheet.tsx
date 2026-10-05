@@ -1,6 +1,6 @@
 import { Dialog as D } from 'radix-ui'
 import { X } from 'lucide-react'
-import { AnimatePresence, m } from 'motion/react'
+import { AnimatePresence, m, useReducedMotionConfig } from 'motion/react'
 import type { ReactNode } from 'react'
 import { cx } from '../../lib/cx'
 import { useResizableWidth } from './useResizableWidth'
@@ -50,6 +50,7 @@ export function Sheet({
   className,
 }: SheetProps) {
   const { width, handleProps } = useResizableWidth({ defaultWidth, min: SHEET_MIN, max: maxWidth, storageKey })
+  const reduce = useReducedMotionConfig() ?? false
 
   return (
     <D.Root open={open} onOpenChange={onOpenChange} modal={modal}>
@@ -60,9 +61,9 @@ export function Sheet({
               <D.Overlay forceMount asChild>
                 <m.div
                   className="fixed inset-0 z-40 bg-scrim"
-                  initial={{ opacity: 0 }}
+                  initial={reduce ? false : { opacity: 0 }}
                   animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
+                  exit={reduce ? undefined : { opacity: 0 }}
                   transition={{ duration: 0.15 }}
                 />
               </D.Overlay>
@@ -81,9 +82,9 @@ export function Sheet({
                   className,
                 )}
                 style={{ width }}
-                initial={{ x: '100%' }}
+                initial={reduce ? false : { x: '100%' }}
                 animate={{ x: 0 }}
-                exit={{ x: '100%' }}
+                exit={reduce ? undefined : { x: '100%' }}
                 transition={{ type: 'tween', duration: 0.22, ease: [0.2, 0.8, 0.2, 1] }}
               >
                 <div

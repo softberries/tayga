@@ -5,7 +5,7 @@ import type { ReactElement, ReactNode, Ref } from 'react'
 export const TooltipProvider = T.Provider
 
 const CONTENT =
-  'z-50 rounded-control border border-panel-line bg-panel px-2 py-1 text-xs text-ink shadow-panel data-[state=delayed-open]:animate-[tg-in_.15s_ease] motion-reduce:animate-none'
+  'z-50 rounded-control border border-panel-line bg-panel px-2 py-1 text-xs text-ink shadow-panel motion-safe:data-[state=delayed-open]:animate-[tg-in_.15s_ease]'
 
 export interface TooltipProps {
   content: ReactNode

@@ -1,4 +1,4 @@
-import { m, stagger } from 'motion/react'
+import { m, stagger, useReducedMotionConfig } from 'motion/react'
 import type { HTMLMotionProps, Variants } from 'motion/react'
 
 const list: Variants = {
@@ -13,7 +13,9 @@ const item: Variants = {
 
 /** Container whose StaggerItem children fade and rise in one after another (60 ms apart). */
 export function StaggerList(props: HTMLMotionProps<'div'>) {
-  return <m.div variants={list} initial="hidden" animate="shown" {...props} />
+  // Under reduced motion the items start in their final state: no fade at all.
+  const reduce = useReducedMotionConfig() ?? false
+  return <m.div variants={list} initial={reduce ? false : 'hidden'} animate="shown" {...props} />
 }
 
 export function StaggerItem(props: HTMLMotionProps<'div'>) {

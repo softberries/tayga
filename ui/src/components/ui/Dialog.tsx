@@ -23,14 +23,14 @@ export interface DialogContentProps {
 export function DialogContent({ title, description, children, className, hideTitle, bare }: DialogContentProps) {
   return (
     <D.Portal>
-      <D.Overlay className="fixed inset-0 z-40 bg-scrim backdrop-blur-[2px] data-[state=open]:animate-[tg-fade_.15s_ease] motion-reduce:animate-none" />
+      <D.Overlay className="fixed inset-0 z-40 bg-scrim backdrop-blur-[2px] motion-safe:data-[state=open]:animate-[tg-fade_.15s_ease]" />
       <D.Content
         {...(description ? {} : { 'aria-describedby': undefined })}
         className={cx(
           'fixed left-1/2 top-[12vh] z-50 w-[min(640px,calc(100vw-32px))] -translate-x-1/2',
           'rounded-panel border border-panel-line bg-panel text-ink shadow-panel-lg',
           !bare && 'p-5',
-          'data-[state=open]:animate-[tg-in_.2s_ease] motion-reduce:animate-none focus:outline-none',
+          'motion-safe:data-[state=open]:animate-[tg-in_.2s_ease] focus:outline-none',
           className,
         )}
       >

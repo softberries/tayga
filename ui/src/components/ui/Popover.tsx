@@ -7,7 +7,7 @@ export const PopoverTrigger = P.Trigger
 export const PopoverClose = P.Close
 
 export const floatingPanel =
-  'z-50 rounded-field border border-panel-line bg-panel text-ink shadow-panel-lg data-[state=open]:animate-[tg-in_.15s_ease] motion-reduce:animate-none'
+  'z-50 rounded-field border border-panel-line bg-panel text-ink shadow-panel-lg motion-safe:data-[state=open]:animate-[tg-in_.15s_ease]'
 
 export function PopoverContent({ className, sideOffset = 6, align = 'start', ...rest }: ComponentProps<typeof P.Content>) {
   return (
