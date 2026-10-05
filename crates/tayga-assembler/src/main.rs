@@ -149,7 +149,14 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!(error = %e, "metrics server stopped");
         }
     });
-    let mut baselines = load_baselines(&store, a.baseline_window_minutes, HashMap::new()).await;
+    let mut baselines = load_baselines(
+        &store,
+        a.baseline_window_minutes,
+        HashMap::new(),
+        &settings.thresholds,
+        &metrics,
+    )
+    .await;
     metrics.baseline_endpoints.set(baselines.len() as i64);
     let mut main_stop = stop.clone();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -206,7 +213,14 @@ async fn main() -> anyhow::Result<()> {
             }
             _ = refresh.tick() => {
                 let started = Instant::now();
-                baselines = load_baselines(&store, a.baseline_window_minutes, baselines).await;
+                baselines = load_baselines(
+                    &store,
+                    a.baseline_window_minutes,
+                    baselines,
+                    &settings.thresholds,
+                    &metrics,
+                )
+                .await;
                 metrics.baseline_endpoints.set(baselines.len() as i64);
                 windows.shift(started.elapsed());
             }
@@ -261,10 +275,13 @@ async fn load_baselines(
     store: &Store,
     window_minutes: u32,
     previous: HashMap<Endpoint, Baseline>,
+    thresholds: &Thresholds,
+    metrics: &AssemblerMetrics,
 ) -> HashMap<Endpoint, Baseline> {
-    match tayga_assembler::baselines::load(store, window_minutes).await {
-        Ok(b) => {
-            tracing::debug!(endpoints = b.len(), "baselines refreshed");
+    match tayga_assembler::baselines::load(store, window_minutes, &previous, thresholds).await {
+        Ok((b, excluded)) => {
+            metrics.baseline_excluded_traces.set(excluded as i64);
+            tracing::debug!(endpoints = b.len(), excluded, "baselines refreshed");
             b
         }
         Err(e) => {

@@ -1,7 +1,7 @@
 use tayga_store::ClickHouseSettings;
 use tayga_store::migrate::migrate;
 use tayga_store::rows::{LogRow, SpanRow};
-use tayga_store::store::Store;
+use tayga_store::store::{EndpointCaps, Store};
 
 fn settings() -> ClickHouseSettings {
     let url =
@@ -187,10 +187,13 @@ async fn analysis_tables_roundtrip_and_baseline_queries() {
         .await
         .unwrap();
 
-    let eps = store.endpoint_stats(60).await.unwrap();
+    let eps = store
+        .endpoint_stats(60, &EndpointCaps::default())
+        .await
+        .unwrap();
     assert_eq!(eps.len(), 1);
     assert_eq!(eps[0].traces, 60, "error trace excluded");
-    let ops = store.op_stats(60).await.unwrap();
+    let ops = store.op_stats(60, &EndpointCaps::default()).await.unwrap();
     let cart = ops.iter().find(|o| o.op == "cart:GetCart").unwrap();
     assert_eq!(cart.present, 30);
     let back: Vec<StoryRow> = store
@@ -313,16 +316,144 @@ async fn slow_story_traces_are_excluded_from_baselines() {
         .await
         .unwrap();
 
-    let eps = store.endpoint_stats(60).await.unwrap();
+    let eps = store
+        .endpoint_stats(60, &EndpointCaps::default())
+        .await
+        .unwrap();
     assert_eq!(eps.len(), 1);
     assert_eq!(eps[0].traces, 59, "slow-story trace excluded");
-    let ops = store.op_stats(60).await.unwrap();
+    let ops = store.op_stats(60, &EndpointCaps::default()).await.unwrap();
     let root = ops.iter().find(|o| o.op == "frontend:GET").unwrap();
     assert_eq!(root.present, 59, "presence denominator matches traces");
     let cart = ops.iter().find(|o| o.op == "cart:GetCart").unwrap();
     assert_eq!(
         cart.present, 29,
         "slow-story trace excluded from op presence"
+    );
+    store
+        .client()
+        .query(&format!("DROP DATABASE `{}`", s.database))
+        .execute()
+        .await
+        .unwrap();
+}
+
+const MS_NS: u64 = 1_000_000;
+
+fn timed_row(service: &str, name: &str, id: &str, duration_ms: u64) -> TraceSummaryRow {
+    TraceSummaryRow {
+        trace_id: format!("{service}-{id}"),
+        ts: now_ns(),
+        endpoint_service: service.into(),
+        endpoint_name: name.into(),
+        duration_ns: duration_ms * MS_NS,
+        is_error: 0,
+        op_durations: vec![(format!("{service}:op"), duration_ms * MS_NS / 2)],
+        span_count: 2,
+    }
+}
+
+/// Endpoint `frontend` GET /: 64 traces of 100..=150 ms plus one 5 s outlier.
+/// Endpoint `cart` Get: 64 traces of 10..=20 ms, nothing unusual.
+async fn seed_outlier_endpoints(store: &Store) {
+    let mut rows: Vec<TraceSummaryRow> = (0..64)
+        .map(|i| timed_row("frontend", "GET /", &i.to_string(), 100 + i % 51))
+        .collect();
+    rows.push(timed_row("frontend", "GET /", "outlier", 5_000));
+    rows.extend((0..64).map(|i| timed_row("cart", "Get", &i.to_string(), 10 + i % 11)));
+    store.insert_rows("trace_summaries", &rows).await.unwrap();
+}
+
+fn stats_of<'a>(
+    eps: &'a [tayga_store::rows::EndpointStatsRow],
+    service: &str,
+) -> &'a tayga_store::rows::EndpointStatsRow {
+    eps.iter().find(|e| e.endpoint_service == service).unwrap()
+}
+
+/// The previous refresh's limit for an endpoint caps this refresh, so one missed outlier cannot
+/// raise p99. The uncapped endpoint is unchanged and `op_stats` uses the same trace set.
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn one_outlier_does_not_raise_p99_with_previous_cap() {
+    let s = settings();
+    migrate(&s).await.unwrap();
+    let store = Store::new(&s);
+    seed_outlier_endpoints(&store).await;
+
+    let none = EndpointCaps::default();
+    let before = store.endpoint_stats(60, &none).await.unwrap();
+    // No previous baseline: the 10 x p50 bootstrap cap already drops the outlier.
+    assert_eq!(stats_of(&before, "frontend").traces, 64);
+
+    let caps = EndpointCaps {
+        keys: vec!["frontend\0GET /".into(), "cart\0Get".into()],
+        caps_ns: vec![250 * MS_NS, 1_000 * MS_NS],
+    };
+    let eps = store.endpoint_stats(60, &caps).await.unwrap();
+    let frontend = stats_of(&eps, "frontend");
+    assert_eq!(frontend.traces, 64);
+    assert!(frontend.p99 <= (150 * MS_NS) as f64, "p99 {}", frontend.p99);
+    assert_eq!(stats_of(&eps, "cart"), stats_of(&before, "cart"));
+    assert_eq!(store.capped_traces(60, &caps).await.unwrap(), 1);
+
+    // A tight cap proves the bound key matches (the bootstrap alone would keep these).
+    let tight = EndpointCaps {
+        keys: vec!["frontend\0GET /".into()],
+        caps_ns: vec![120 * MS_NS],
+    };
+    let tight_eps = store.endpoint_stats(60, &tight).await.unwrap();
+    assert!(stats_of(&tight_eps, "frontend").traces < 64);
+    assert_eq!(stats_of(&tight_eps, "cart").traces, 64);
+    assert!(store.capped_traces(60, &tight).await.unwrap() > 1);
+
+    let ops = store.op_stats(60, &caps).await.unwrap();
+    let present = |service: &str| {
+        ops.iter()
+            .find(|o| o.endpoint_service == service)
+            .unwrap()
+            .present
+    };
+    assert_eq!(present("frontend"), 64, "op presence uses the capped set");
+    assert_eq!(present("cart"), 64);
+    let frontend_op = ops
+        .iter()
+        .find(|o| o.endpoint_service == "frontend")
+        .unwrap();
+    assert!(frontend_op.p95 <= (75 * MS_NS) as f64);
+    store
+        .client()
+        .query(&format!("DROP DATABASE `{}`", s.database))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// A brand-new endpoint has no previous limit: its first baseline is capped at 10 x p50.
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn bootstrap_cap_is_ten_times_p50() {
+    let s = settings();
+    migrate(&s).await.unwrap();
+    let store = Store::new(&s);
+    seed_outlier_endpoints(&store).await;
+
+    let none = EndpointCaps::default();
+    let eps = store.endpoint_stats(60, &none).await.unwrap();
+    let frontend = stats_of(&eps, "frontend");
+    assert_eq!(frontend.traces, 64, "5 s outlier is above 10 x p50");
+    assert!(
+        frontend.p99 < (1_000 * MS_NS) as f64,
+        "p99 {}",
+        frontend.p99
+    );
+    assert_eq!(stats_of(&eps, "cart").traces, 64);
+    assert_eq!(store.capped_traces(60, &none).await.unwrap(), 1);
+    let ops = store.op_stats(60, &none).await.unwrap();
+    assert!(
+        ops.iter()
+            .filter(|o| o.endpoint_service == "frontend")
+            .all(|o| o.present == 64)
     );
     store
         .client()
