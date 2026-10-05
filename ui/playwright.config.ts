@@ -7,7 +7,7 @@ import type { Theme } from './e2e/fixtures'
 //
 // Projects: `perf` measures the budgets alone (the others wait for it, so nothing else loads the
 // machine meanwhile); `dark` and `light` run every spec with the theme stored in localStorage
-// before load; `reduced-motion` runs them again with prefers-reduced-motion emulated.
+// before load; `reduced-motion` and `light-reduced-motion` run them again with prefers-reduced-motion emulated.
 const baseURL = process.env.TAYGA_UI_URL ?? 'http://localhost:8090'
 
 const desktop = (theme: Theme, reducedMotion: 'no-preference' | 'reduce' = 'no-preference') => ({
@@ -31,5 +31,6 @@ export default defineConfig({
     { name: 'dark', testIgnore: /perf\.spec\.ts/, dependencies: ['perf'], use: desktop('dark') },
     { name: 'light', testIgnore: /perf\.spec\.ts/, dependencies: ['perf'], use: desktop('light') },
     { name: 'reduced-motion', testIgnore: /perf\.spec\.ts/, dependencies: ['perf'], use: desktop('dark', 'reduce') },
+    { name: 'light-reduced-motion', testIgnore: /perf\.spec\.ts/, dependencies: ['perf'], use: desktop('light', 'reduce') },
   ],
 })

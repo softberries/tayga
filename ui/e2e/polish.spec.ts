@@ -38,3 +38,29 @@ test('a truncated template shows its full text in a tooltip, a short one shows n
     await expect(page.getByRole('tooltip')).toHaveCount(0)
   }
 })
+
+test('tabbing to a truncated story row exposes the full text', async ({ page }) => {
+  await page.goto('/')
+  const rows = page.locator('[data-fingerprint]')
+  await expect(rows.first()).toBeVisible()
+  // The summary of each row as the DOM holds it (CSS truncation does not shorten it).
+  const cut = await rows.evaluateAll((els) =>
+    els.map((r) => ({ id: r.getAttribute('data-fingerprint')!, truncated: [...r.querySelectorAll('.truncate')].some((e) => e.scrollWidth > e.clientWidth) })),
+  )
+  const target = cut.find((c) => c.truncated)
+  expect(target, 'the live stories include a truncated row').toBeDefined()
+  const row = page.locator(`[data-fingerprint="${target!.id}"]`)
+
+  // Keyboard only: Tab until that row has focus.
+  for (let i = 0; i < 80; i++) {
+    if (await row.evaluate((e) => e === document.activeElement)) break
+    await page.keyboard.press('Tab')
+  }
+  await expect(row).toBeFocused()
+  const tip = page.getByRole('tooltip').first()
+  await expect(tip).toBeVisible()
+  const text = (await tip.textContent())!
+  expect(text.length).toBeGreaterThan(10)
+  // What the tooltip shows is part of the row, whole.
+  expect((await row.textContent())!.replace(/\s+/g, ' ')).toContain(text.replace(/\s+/g, ' ').trim().slice(0, 30))
+})

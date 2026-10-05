@@ -167,7 +167,7 @@ export function TraceTable({ rows, extent, logY, since, sort, onSort, height = 5
                     className="flex min-w-0 items-baseline gap-1.5 rounded-badge hover:underline"
                   >
                     <span className="shrink-0 text-xs text-muted">{t.endpoint_service}</span>
-                    <TruncationTooltip content={`${t.endpoint_service} · ${t.endpoint_name}`}>
+                    <TruncationTooltip content={`${t.endpoint_service} · ${t.endpoint_name}`} openOnHostFocus>
                       <span className="min-w-0 truncate font-mono text-xs text-ink">{t.endpoint_name}</span>
                     </TruncationTooltip>
                   </Link>

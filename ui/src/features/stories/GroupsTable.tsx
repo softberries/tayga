@@ -359,7 +359,7 @@ export function GroupsTable({ groups, search, since, nowMs, onSearch, selected, 
                     >
                       {g.kind}
                     </span>
-                    <TruncationTooltip content={g.summary}>
+                    <TruncationTooltip content={`${g.summary}\n${endpointOf(g)}`} openOnHostFocus="any-cut">
                       <span className="truncate font-medium">{title}</span>
                     </TruncationTooltip>
                   </span>

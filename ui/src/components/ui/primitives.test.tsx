@@ -154,6 +154,24 @@ describe('TruncationTooltip', () => {
   })
 })
 
+describe('TruncationTooltip keyboard', () => {
+  it('opens when the focusable row it sits in gets focus, only if truncated', async () => {
+    vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockReturnValue(300)
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(100)
+    withTooltips(
+      <div role="row" tabIndex={0}>
+        <TruncationTooltip content="the whole summary" openOnHostFocus>
+          <span className="truncate">the whole…</span>
+        </TruncationTooltip>
+      </div>,
+    )
+    act(() => screen.getByRole('row').focus())
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('the whole summary')
+    act(() => screen.getByRole('row').blur())
+    await waitFor(() => expect(screen.queryByRole('tooltip')).toBeNull())
+  })
+})
+
 describe('Reveal', () => {
   it('fades in from transparent, and renders at full opacity under reduced motion', () => {
     const motion = (mode: 'never' | 'always', id: string) => (

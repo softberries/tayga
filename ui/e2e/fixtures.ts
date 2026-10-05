@@ -1,5 +1,5 @@
 import { expect, test as base } from '@playwright/test'
-import type { APIRequestContext } from '@playwright/test'
+import type { APIRequestContext, Page } from '@playwright/test'
 
 export type Theme = 'light' | 'dark'
 
@@ -8,6 +8,23 @@ interface Fixtures {
   theme: Theme
   /** Console errors, page errors, failed requests and 4xx/5xx responses of the test; must stay empty. */
   problems: string[]
+}
+
+/** Collects console errors, page errors, failed requests and 4xx/5xx responses of `page`. */
+export function trackProblems(page: Page): string[] {
+  const problems: string[] = []
+  page.on('console', (m) => {
+    if (m.type() === 'error') problems.push(`console: ${m.text()}`)
+  })
+  page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`))
+  page.on('requestfailed', (r) => {
+    // Leaving a page cancels its in-flight fetches; that is not a failure.
+    if (r.failure()?.errorText !== 'net::ERR_ABORTED') problems.push(`request failed: ${r.url()} ${r.failure()?.errorText}`)
+  })
+  page.on('response', (r) => {
+    if (r.status() >= 400) problems.push(`HTTP ${r.status()}: ${r.url()}`)
+  })
+  return problems
 }
 
 export const test = base.extend<Fixtures>({
@@ -28,18 +45,7 @@ export const test = base.extend<Fixtures>({
 
   problems: [
     async ({ page }, use) => {
-      const problems: string[] = []
-      page.on('console', (m) => {
-        if (m.type() === 'error') problems.push(`console: ${m.text()}`)
-      })
-      page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`))
-      page.on('requestfailed', (r) => {
-        // Leaving a page cancels its in-flight fetches; that is not a failure.
-        if (r.failure()?.errorText !== 'net::ERR_ABORTED') problems.push(`request failed: ${r.url()} ${r.failure()?.errorText}`)
-      })
-      page.on('response', (r) => {
-        if (r.status() >= 400) problems.push(`HTTP ${r.status()}: ${r.url()}`)
-      })
+      const problems = trackProblems(page)
       await use(problems)
       expect(problems, 'console errors and failed requests').toEqual([])
     },

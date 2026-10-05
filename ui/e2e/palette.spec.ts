@@ -50,3 +50,29 @@ test('the palette list keeps its height while a search resolves', async ({ page 
   expect(empty).toBeGreaterThanOrEqual(9 * rem - 1)
   expect(withResults).toBeGreaterThanOrEqual(9 * rem - 1)
 })
+
+test('the palette list never shrinks below its minimum while a slow search is in flight', async ({ page }) => {
+  // Hold the search response so "Searching…" stays on screen long enough to measure.
+  await page.route('**/api/v1/search*', async (route) => {
+    await new Promise((r) => setTimeout(r, 1500))
+    await route.continue()
+  })
+  await page.goto('/')
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+  await page.keyboard.press('ControlOrMeta+K')
+  const area = page.getByTestId('palette-server')
+  const rem = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize))
+  const min = 9 * rem - 1
+
+  await page.getByRole('combobox').fill('frontend')
+  await expect(page.getByText('Searching…')).toBeVisible()
+  const heights: number[] = [(await area.boundingBox())!.height]
+  while (await page.getByText('Searching…').isVisible()) {
+    heights.push((await area.boundingBox())!.height)
+    await page.waitForTimeout(100)
+  }
+  await expect(area.getByRole('option').first()).toBeVisible()
+  heights.push((await area.boundingBox())!.height)
+  expect(heights.length).toBeGreaterThan(3)
+  expect(Math.min(...heights)).toBeGreaterThanOrEqual(min)
+})

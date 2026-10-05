@@ -11,7 +11,7 @@
  */
 import type { APIRequestContext, Browser, Page } from '@playwright/test'
 import { gzipSync } from 'node:zlib'
-import { expect, getJson, recentTraces, test } from './fixtures'
+import { expect, getJson, recentTraces, test, trackProblems } from './fixtures'
 
 const RUNS = 5
 const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)]!
@@ -39,9 +39,19 @@ const INSTRUMENT = `
 })()
 `
 
+/** Problems seen by every context `fresh` opened in the current test; each test must end with none. */
+let trackers: string[][] = []
+test.beforeEach(() => {
+  trackers = []
+})
+test.afterEach(() => {
+  expect(trackers.flat(), 'console errors and failed requests in the measured pages').toEqual([])
+})
+
 async function fresh(browser: Browser, theme: 'dark' | 'light' = 'dark'): Promise<Page> {
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, baseURL: test.info().project.use.baseURL })
   const page = await ctx.newPage()
+  trackers.push(trackProblems(page))
   await page.addInitScript((t) => localStorage.setItem('tayga-theme', t), theme)
   await page.addInitScript(INSTRUMENT)
   return page

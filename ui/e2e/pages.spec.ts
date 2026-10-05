@@ -106,7 +106,7 @@ for (const route of ROUTES) {
     await page.waitForLoadState('networkidle')
     await page.waitForTimeout(900)
     // Screenshots are for review (gitignored, never compared); the reduced-motion run adds none.
-    if (info.project.name !== 'reduced-motion') {
+    if (info.project.name === 'dark' || info.project.name === 'light') {
       await page.screenshot({ path: `e2e/screenshots/${theme}/${route.name}.png`, animations: 'disabled' })
     }
   })

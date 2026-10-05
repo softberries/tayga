@@ -184,7 +184,7 @@ function Stories({ groups, since, service, nowMs }: { groups: readonly StoryGrou
           >
             <span className="flex min-w-0 items-center gap-2">
               <Badge kind={g.kind === 'error' ? 'error' : 'slow'}>{g.kind}</Badge>
-              <TruncationTooltip content={g.summary}>
+              <TruncationTooltip content={g.summary} openOnHostFocus>
                 <span className="min-w-0 truncate font-medium text-ink">{splitSummary(g.summary).title}</span>
               </TruncationTooltip>
             </span>
