@@ -102,6 +102,7 @@ scenario!(
 #[tokio::test]
 #[ignore = "end-to-end: requires `make up`"]
 async fn shipping_slowdown_produces_slow_story_blaming_shipping() -> anyhow::Result<()> {
+    ensure_checkout_baseline_detects("http://localhost:18123", 5.0).await?;
     let api = Api::new(API);
     let flipped = now_ns();
     let _flag = FlagGuard::set("intlShippingSlowdown", "5sec")?;

@@ -273,6 +273,34 @@ pub async fn wait_for_service_warmup(
     }
 }
 
+/// Fails fast when no checkout endpoint can flag a `delay_s` trace as slow: the assembler needs
+/// ≥ 50 baseline traces and a duration above max(1.5 × p99, p99 + 100 ms) over the last 60 min.
+pub async fn ensure_checkout_baseline_detects(
+    clickhouse: &str,
+    delay_s: f64,
+) -> anyhow::Result<()> {
+    let sql = format!(
+        "SELECT endpoint_name, count() AS n, quantile(0.99)(duration_ns) / 1e9 AS p99, \
+         n >= 50 AND {delay_s} > greatest(p99 * 1.5, p99 + 0.1) AS ok FROM tayga.trace_summaries FINAL \
+         WHERE ts > now() - INTERVAL 60 MINUTE AND is_error = 0 AND endpoint_service = 'load-generator' \
+         AND endpoint_name LIKE 'user_checkout%' AND trace_id NOT IN (SELECT trace_id FROM \
+         tayga.error_stories WHERE kind = 'slow' AND ts > now() - INTERVAL 70 MINUTE) \
+         GROUP BY endpoint_name FORMAT TSVWithNames"
+    );
+    let res = reqwest::Client::new()
+        .post(clickhouse)
+        .body(sql)
+        .send()
+        .await?;
+    let rows = res.error_for_status()?.text().await?;
+    anyhow::ensure!(
+        rows.lines().any(|l| l.ends_with("\t1")),
+        "checkout baselines cannot flag a {delay_s} s trace as slow (degraded stack, or recent \
+         slowdown runs in the last 60 min):\n{rows}"
+    );
+    Ok(())
+}
+
 pub fn report(name: &str, waited: Duration) {
     let verdict = if waited <= TARGET_LATENCY {
         "within"
