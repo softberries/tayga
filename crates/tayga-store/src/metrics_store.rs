@@ -36,9 +36,10 @@ impl Store {
     }
 
     /// The last finite sample of `metric` per series (job and label set) and `step_secs`
-    /// bucket in the window `(start, end]` (unix seconds), oldest first. `ts_ms` is the bucket
-    /// start; buckets start at `start`, so the series math sees one point per series and step
-    /// whatever the window; at most `MAX_METRIC_POINTS` rows. `labels` keeps only series
+    /// bucket in the window `[start, end)` (unix seconds), oldest first. `ts_ms` is the bucket
+    /// start on the epoch grid (multiples of the step; the window clips the first and last
+    /// bucket), so the series math sees one point per series and step whatever the window, and a
+    /// moving window keeps its bucket edges; at most `MAX_METRIC_POINTS` rows. `labels` keeps only series
     /// carrying every listed label with that value.
     pub async fn metric_buckets(
         &self,
@@ -54,20 +55,16 @@ impl Store {
         let sql = format!(
             "SELECT job, labels, ts_ms, last AS value FROM ( \
              SELECT toString(job) AS job, labels, \
-             (toInt64(?) + intDiv(toInt64(toUnixTimestamp(ts)) - toInt64(?), ?) * ?) * 1000 AS ts_ms, \
+             toInt64(toUnixTimestamp(toStartOfInterval(ts, toIntervalSecond(?)))) * 1000 AS ts_ms, \
              argMax(value, ts) AS last FROM metric_samples \
              WHERE metric = ? {job_clause}{label_clause}AND isFinite(value) \
-             AND ts > toDateTime(?) AND ts <= toDateTime(?) GROUP BY job, labels, ts_ms) \
+             AND ts >= toDateTime(?) AND ts < toDateTime(?) GROUP BY job, labels, ts_ms) \
              ORDER BY ts_ms LIMIT ?"
         );
-        let step = step_secs.max(1);
         let mut q = self
             .client()
             .query(&sql)
-            .bind(start)
-            .bind(start)
-            .bind(step)
-            .bind(step)
+            .bind(step_secs.max(1))
             .bind(metric);
         if let Some(job) = job {
             q = q.bind(job);

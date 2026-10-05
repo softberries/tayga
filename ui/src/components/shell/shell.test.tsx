@@ -119,8 +119,7 @@ describe('time range', () => {
     renderApp('/map?since=bogus')
     const group = await screen.findByRole('radiogroup', { name: 'Time range' })
     expect(within(group).getByRole('radio', { name: '1h' })).toHaveAttribute('data-state', 'on')
-    await waitFor(() => expect(fetch).toHaveBeenCalled())
-    expect(String(fetch.mock.calls[0]?.[0])).toBe('/api/v1/service-map?since=1h')
+    await waitFor(() => expect(fetch.mock.calls.map(([u]) => String(u))).toContain('/api/v1/service-map?since=1h'))
   })
 
   /** A custom range of two hours ending an hour ago, on whole minutes (as the fields hold them). */
@@ -162,17 +161,20 @@ describe('time range', () => {
       fireEvent.change(within(form).getByLabelText('From'), { target: { value: toLocalInput(f) } })
       fireEvent.change(within(form).getByLabelText('To'), { target: { value: toLocalInput(t) } })
     }
-    const cases: [number, number, string][] = [
-      [to, from, 'The end must be after the start.'],
-      [from, Date.now() + 3_600_000, 'The end must not be in the future.'],
-      [from - 8 * 86_400_000, to, 'A range can be at most 7 days long.'],
-      [to - 7 * 86_400_000 - 3_600_000, to - 6 * 86_400_000, 'The start must be within the last 7 days (data retention).'],
+    const cases: [number, number, string, 'From' | 'To'][] = [
+      [to, from, 'The end must be after the start.', 'To'],
+      [from, Date.now() + 3_600_000, 'The end must not be in the future.', 'To'],
+      [from - 8 * 86_400_000, to, 'A range can be at most 7 days long.', 'From'],
+      [to - 7 * 86_400_000 - 3_600_000, to - 6 * 86_400_000, 'The start must be within the last 7 days (data retention).', 'From'],
     ]
-    for (const [f, t, message] of cases) {
+    for (const [f, t, message, bad] of cases) {
       set(f, t)
       await user.click(within(form).getByRole('button', { name: 'Apply' }))
       expect(within(form).getByRole('alert')).toHaveTextContent(message)
-      expect(within(form).getByLabelText('From')).toHaveAttribute('aria-invalid', 'true')
+      // Only the field the message is about is invalid.
+      const other = bad === 'From' ? 'To' : 'From'
+      expect(within(form).getByLabelText(bad)).toHaveAttribute('aria-invalid', 'true')
+      expect(within(form).getByLabelText(other)).toHaveAttribute('aria-invalid', 'false')
     }
     // Editing clears the message; Cancel closes without touching the URL.
     set(from, to)
@@ -208,9 +210,8 @@ describe('time range', () => {
 
   it('passes since to the API', async () => {
     const fetch = stubApi({ '/service-map': { body: serviceMap } })
-    renderApp('/?since=15m')
-    await waitFor(() => expect(fetch).toHaveBeenCalled())
-    expect(String(fetch.mock.calls[0]?.[0])).toBe('/api/v1/service-map?since=15m')
+    renderApp('/?since=24h')
+    await waitFor(() => expect(fetch.mock.calls.map(([u]) => String(u))).toContain('/api/v1/service-map?since=24h'))
   })
 })
 
@@ -226,10 +227,36 @@ describe('header', () => {
     renderApp('/?since=24h')
     const badge = await screen.findByText('2 services degraded')
     expect(badge).toHaveAttribute('data-kind', 'error')
-    const link = screen.getByRole('link', { name: '2 services degraded: payment, shipping' })
+    const link = screen.getByRole('link', { name: '2 services degraded in the last 15 minutes: payment, shipping' })
     expect(link).toContainElement(badge)
-    expect(link).toHaveAttribute('href', '/map?since=24h')
-    expect(link).toHaveAttribute('title', 'payment, shipping')
+    // The badge is the current state: the last 15 min, whatever the page's range.
+    expect(link).toHaveAttribute('href', '/map?since=15m')
+    expect(link).toHaveAttribute('title', 'Last 15 minutes: payment, shipping')
+  })
+
+  it('keeps the badge live during a custom range', async () => {
+    const fetch = stubApi({ '/service-map': { body: degradedMap } })
+    const until = formatUntil(Math.floor(Date.now() / 60_000) * 60_000 - 3_600_000)
+    renderApp(`/?since=2h&until=${until}`)
+    await screen.findByText('2 services degraded')
+    expect(fetch.mock.calls.map(([u]) => String(u))).toContain('/api/v1/service-map?since=15m')
+  })
+
+  it('offers "Show last 1h" when a custom range has aged past retention', async () => {
+    const user = userEvent.setup()
+    stubApi({
+      '/service-map': {
+        status: 400,
+        body: { error: 'the window must start within the last 7 days (data retention): until minus since is older' },
+      },
+    })
+    const { router } = renderApp('/map?since=2h&until=2026-01-01T00:00:00Z')
+    const reset = await screen.findByRole('button', { name: 'Show last 1h' })
+    // Nothing changes until it is clicked.
+    expect(router.state.location.search).toEqual({ since: '2h', until: '2026-01-01T00:00:00Z' })
+    await user.click(reset)
+    await waitFor(() => expect(router.state.location.search).toEqual({}))
+    expect(router.state.location.pathname).toBe('/map')
   })
 
   it('a slow-only degradation uses the slow color', async () => {

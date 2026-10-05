@@ -30,28 +30,30 @@ export function splitSummary(summary: string): { title: string; detail: string }
 /** Most points a sparkline is given; longer series keep their newest points. */
 const MAX_POINTS = 240
 
-/** Buckets of a window: `windowSecs / bucketSecs` rounded up, capped at MAX_POINTS. */
-function bucketCount(bucketSecs: number, windowSecs: number): number {
-  const step = Math.max(1, Math.round(bucketSecs))
-  return Math.min(MAX_POINTS, Math.max(1, Math.ceil(windowSecs / step)))
-}
-
 /**
- * Start (unix s) of the first of `n` buckets shown for the window ending at `endMs`: the API
- * starts its buckets at the window's start (`end - since`), so the grid does too; capped series
- * keep the newest buckets.
+ * The sparkline grid of the window `[endMs - windowSecs, endMs)`: buckets `bucketSecs` wide on
+ * the epoch grid (multiples of the width, as the API's `toStartOfInterval`), so a live window
+ * that moves keeps its bucket edges. Every bucket that intersects the window is there, the
+ * first and last possibly partial; the last one holds `endMs - 1 ms`. Capped at MAX_POINTS, keeping
+ * the newest. `first` is the first bucket's start in unix seconds.
  */
-export function gridStart(bucketSecs: number, windowSecs: number, endMs: number, n = bucketCount(bucketSecs, windowSecs)): number {
+function grid(bucketSecs: number, windowSecs: number, endMs: number): { step: number; first: number; n: number } {
   const step = Math.max(1, Math.round(bucketSecs))
-  const start = endMs / 1000 - windowSecs
-  return start + (bucketCount(bucketSecs, windowSecs) - n) * step
+  const floor = (s: number) => Math.floor(s / step) * step
+  const last = floor((endMs - 1) / 1000)
+  const all = Math.max(1, (last - floor(endMs / 1000 - windowSecs)) / step + 1)
+  const n = Math.min(MAX_POINTS, all)
+  return { step, first: last - (n - 1) * step, n }
+}
+
+/** Start (unix s) of the first bucket `denseSeries` returns for the same arguments. */
+export function gridStart(bucketSecs: number, windowSecs: number, endMs: number): number {
+  return grid(bucketSecs, windowSecs, endMs).first
 }
 
 /**
- * Sparse `[bucket start s, value]` pairs as one value per bucket over the window ending at
- * `endMs`, missing buckets as 0. Buckets start at the window's start, as the API's do; a
- * bucket is matched to the nearest grid slot, so a live window fetched a little later than
- * `endMs` still lines up. Values outside the window are ignored.
+ * Sparse `[bucket start s, value]` pairs as one value per bucket of the window ending at
+ * `endMs` (see `grid`), missing buckets as 0. Values outside the window are ignored.
  */
 export function denseSeries(
   buckets: ReadonlyArray<readonly [number, number]>,
@@ -59,9 +61,7 @@ export function denseSeries(
   windowSecs: number,
   endMs: number,
 ): number[] {
-  const step = Math.max(1, Math.round(bucketSecs))
-  const n = bucketCount(bucketSecs, windowSecs)
-  const first = gridStart(bucketSecs, windowSecs, endMs, n)
+  const { step, first, n } = grid(bucketSecs, windowSecs, endMs)
   const out = new Array<number>(n).fill(0)
   for (const [t, v] of buckets) {
     const i = Math.round((t - first) / step)
@@ -100,9 +100,7 @@ export function alertActivity(
   windowSecs: number,
   endMs: number,
 ): number[] {
-  const step = Math.max(1, Math.round(bucketSecs))
-  const n = bucketCount(step, windowSecs)
-  const first = gridStart(step, windowSecs, endMs, n)
+  const { step, first, n } = grid(bucketSecs, windowSecs, endMs)
   const slot = (ns: number) => Math.floor((ns / 1e9 - first) / step)
   const pairs: CountBucket[] = []
   for (const a of alerts) {

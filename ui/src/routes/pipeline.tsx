@@ -6,6 +6,7 @@
 import { useQueries, useQuery } from '@tanstack/react-query'
 import { Activity } from 'lucide-react'
 import { api } from '../api/queries'
+import { useLiveInterval } from '../app/live'
 import { useAutoRefresh, useRange } from '../app/useRange'
 import { Card, PanelTitle } from '../components/ui/Card'
 import { EmptyState } from '../components/ui/EmptyState'
@@ -19,15 +20,18 @@ import { ErrorBanner } from '../features/stories/ErrorBanner'
 
 export function PipelinePage() {
   const range = useRange()
+  // The charts follow the range: no refresh for a custom (past) one.
   const refetchInterval = useAutoRefresh()
+  // Job status and consumer lag are the current state, so they stay live in any range.
+  const liveInterval = useLiveInterval()
   const up = useQueries({
     queries: JOBS.map((job) => ({
       ...api.pipelineSeries({ since: STATUS_SINCE, metric: 'up', kind: 'gauge', job }),
-      refetchInterval,
+      refetchInterval: liveInterval,
     })),
   })
   // A Kafka failure (503) is not a storage outage: keep it out of the shell banner.
-  const lag = useQuery({ ...api.pipelineLag(), refetchInterval, meta: { outage: false } })
+  const lag = useQuery({ ...api.pipelineLag(), refetchInterval: liveInterval, meta: { outage: false } })
 
   const loaded = up.every((r) => r.data !== undefined)
   // Charts wait for the job statuses, so an empty history shows one notice, not nine.

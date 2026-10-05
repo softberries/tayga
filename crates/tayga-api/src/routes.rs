@@ -400,6 +400,7 @@ mod tests {
         let w = |secs: i64| Window {
             start: end - secs,
             end,
+            live: false,
         };
         let repo = Arc::new(FakeRepo::default());
         let call = |uri: String| get_with(repo.clone(), ApiMetrics::default(), uri.leak());

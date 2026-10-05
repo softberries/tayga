@@ -2,6 +2,7 @@
 //! inserts its own rows with random ids and `now`-based timestamps, reads them back and drops
 //! the database. Runs on the empty `make it` ClickHouse and against the live stack alike.
 
+use tayga_api::model::OverviewView;
 use tayga_api::params::{
     AlertFilter, GroupFilter, SeriesKind, SeriesQuery, TemplateFilter, TraceFilter, Window,
 };
@@ -33,14 +34,17 @@ fn last(secs: i64) -> Window {
     Window {
         start: end - secs,
         end,
+        live: true,
     }
 }
 
-/// Whether every bucket start lies on the window's grid: `step` apart, starting at its start.
+/// Whether every bucket start lies on the epoch grid (a multiple of `step`) and the bucket
+/// overlaps the window `[start, upper)`.
 fn on_grid(w: Window, step: u32, buckets: impl IntoIterator<Item = u32>) -> bool {
+    let step = i64::from(step);
     buckets.into_iter().all(|b| {
-        let off = i64::from(b) - w.start;
-        off >= 0 && off % i64::from(step) == 0 && i64::from(b) < w.end
+        let b = i64::from(b);
+        b % step == 0 && b + step > w.start && b < w.upper()
     })
 }
 
@@ -1019,6 +1023,7 @@ async fn a_past_window_returns_only_the_rows_inside_it() {
     let w = Window {
         start: end - 7200,
         end,
+        live: false,
     };
     let (before, inside, late, after) = (
         (w.start - 600) * sec,
@@ -1156,13 +1161,15 @@ async fn a_past_window_returns_only_the_rows_inside_it() {
     let r = ChRepo::new(&s);
     let step = w.step();
     assert_eq!(step, 60);
+    let minute = |t: i64| t / 60 * 60;
     let gf = GroupFilter {
         window: w,
         kind: None,
         service: None,
     };
 
-    // Story groups and their detail: two stories, bucketed from the window's start.
+    // Story groups and their detail: two stories, in epoch-aligned buckets (the minutes of
+    // `inside` and `late`), although the window starts 7 s past a minute.
     let groups = r.story_groups(&gf).await.unwrap();
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].group.stories, 2);
@@ -1171,8 +1178,8 @@ async fn a_past_window_returns_only_the_rows_inside_it() {
     let starts = |b: &[(u32, u64)]| b.iter().map(|b| i64::from(b.0)).collect::<Vec<_>>();
     assert_eq!(
         starts(&groups[0].buckets),
-        [w.start + 1800, w.end - 60],
-        "buckets start at the window's start, not on the minute"
+        [minute(w.start + 1800), minute(w.end - 30)],
+        "buckets lie on the epoch grid"
     );
     let detail = r
         .story_group(&fingerprint.to_string(), w)
@@ -1187,6 +1194,7 @@ async fn a_past_window_returns_only_the_rows_inside_it() {
     let earlier = Window {
         start: w.start - 7200,
         end: w.start - 700,
+        live: false,
     };
     assert!(
         r.story_groups(&GroupFilter {
@@ -1207,6 +1215,17 @@ async fn a_past_window_returns_only_the_rows_inside_it() {
     assert!((spans_sum - 2.0).abs() < 1e-6, "{spans_sum}");
     assert!((o.spans_per_sec - 2.0 / 7200.0).abs() < 1e-12);
     assert!(on_grid(w, step, o.spans.iter().map(|b| b.0)));
+    // The same window 10 s later has the same bucket edges, so a live refresh does not shift
+    // its bars.
+    let later = Window {
+        start: w.start + 10,
+        end: w.end + 10,
+        live: false,
+    };
+    let o2 = r.overview(later).await.unwrap();
+    let edges = |v: &OverviewView| v.spans.iter().map(|b| b.0).collect::<Vec<_>>();
+    assert_eq!(edges(&o), edges(&o2));
+    assert_eq!(o.stories, o2.stories);
 
     // Trace search, by endpoint service and by touched service.
     let tf = TraceFilter {
@@ -1273,7 +1292,10 @@ async fn a_past_window_returns_only_the_rows_inside_it() {
     assert_eq!(ts.len(), 1);
     assert_eq!(ts[0].template.count, 2);
     assert!(ts[0].template.alerting, "an alert was firing at the end");
-    assert_eq!(starts(&ts[0].buckets), [w.start + 1800, w.end - 60]);
+    assert_eq!(
+        starts(&ts[0].buckets),
+        [minute(w.start + 1800), minute(w.end - 30)]
+    );
     let d = r.log_template(&tmpl.to_string(), w).await.unwrap().unwrap();
     assert_eq!(d.template.count, 2);
     assert_eq!(d.buckets, ts[0].buckets);
@@ -1294,7 +1316,7 @@ async fn a_past_window_returns_only_the_rows_inside_it() {
         .is_empty()
     );
 
-    // Pipeline series: the samples inside, bucketed from the window's start.
+    // Pipeline series: the samples inside, in epoch-aligned buckets.
     let pts = r
         .metric_buckets(&SeriesQuery {
             window: w,
@@ -1307,7 +1329,10 @@ async fn a_past_window_returns_only_the_rows_inside_it() {
         .unwrap();
     assert_eq!(
         pts.iter().map(|p| (p.ts_ms, p.value)).collect::<Vec<_>>(),
-        [((w.start + 1800) * 1000, 2.0), ((w.end - 60) * 1000, 3.0)]
+        [
+            (minute(w.start + 1800) * 1000, 2.0),
+            (minute(w.end - 30) * 1000, 3.0)
+        ]
     );
 
     Store::new(&s)

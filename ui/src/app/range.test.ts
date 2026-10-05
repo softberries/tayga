@@ -73,18 +73,24 @@ describe('ranges', () => {
 
 describe('custom range validation (mirrors the API)', () => {
   const err = (from: number, to: number) => customRangeError(from, to, NOW)
+  const msg = (from: number, to: number) => {
+    const e = err(from, to)
+    return e ? `${e.field}: ${e.message}` : null
+  }
   it('accepts a past range within retention', () => {
     expect(err(NOW - 3 * HOUR, NOW - HOUR)).toBeNull()
     expect(err(NOW - 7 * 86_400_000, NOW)).toBeNull()
     expect(err(NOW - HOUR, NOW + 60_000)).toBeNull()
   })
   it('rejects what the API would answer 400 to', () => {
-    expect(err(NaN, NOW)).toMatch(/both/)
-    expect(err(NOW - HOUR, NOW - 2 * HOUR)).toMatch(/after the start/)
-    expect(err(NOW - HOUR, NOW - HOUR)).toMatch(/after the start/)
-    expect(err(NOW - HOUR, NOW + 61_000)).toMatch(/future/)
-    expect(err(NOW - 8 * 86_400_000, NOW - 1000)).toMatch(/at most 7 days/)
-    expect(err(NOW - 7 * 86_400_000 - 1000, NOW - HOUR)).toMatch(/retention/)
+    // Each error names the field it is about.
+    expect(msg(NaN, NOW)).toBe('from: Enter a start.')
+    expect(msg(NOW - HOUR, NaN)).toBe('to: Enter an end.')
+    expect(msg(NOW - HOUR, NOW - 2 * HOUR)).toBe('to: The end must be after the start.')
+    expect(msg(NOW - HOUR, NOW - HOUR)).toBe('to: The end must be after the start.')
+    expect(msg(NOW - HOUR, NOW + 61_000)).toBe('to: The end must not be in the future.')
+    expect(msg(NOW - 8 * 86_400_000, NOW - 1000)).toBe('from: A range can be at most 7 days long.')
+    expect(msg(NOW - 7 * 86_400_000 - 1000, NOW - HOUR)).toBe('from: The start must be within the last 7 days (data retention).')
   })
   it('reads and writes datetime-local values in local time', () => {
     expect(toLocalInput(at(2026, 10, 4, 9, 5))).toBe('2026-10-04T09:05')

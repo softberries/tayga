@@ -734,7 +734,8 @@ async fn metric_buckets_keep_the_last_value_per_series_and_step() {
             sample(b0 + 30_000, "tayga-writer", m, &spans, 15.0),
             sample(b0 + 45_000, "tayga-writer", m, &spans, f64::NAN),
             sample(b0 + 2_000, "tayga-writer", m, &logs, 100.0),
-            // Bucket 1.
+            // Bucket 1: exactly at its start, then later (the later one wins).
+            sample(b1, "tayga-writer", m, &spans, 33.0),
             sample(b1 + 5_000, "tayga-writer", m, &spans, 40.0),
             sample(b1 + 5_000, "other-job", m, &spans, 7.0),
             // Outside a 30 min window.
@@ -743,9 +744,9 @@ async fn metric_buckets_keep_the_last_value_per_series_and_step() {
         .await
         .unwrap();
 
-    // A 30 min window ending after now whose start is a whole number of steps before `b0`, so
-    // `b0` and `b1` are bucket starts (buckets are anchored to the window's start).
-    let end = b0 / 1000 + 6 * step;
+    // A 30 min window ending after now; its start is 7 s past a minute, and the buckets still
+    // lie on the epoch grid.
+    let end = b0 / 1000 + 6 * step + 7;
     let w30 = (end - 1800, end);
     let all = store
         .metric_buckets(Some("tayga-writer"), m, &[], w30, 60)
@@ -799,12 +800,11 @@ async fn metric_buckets_keep_the_last_value_per_series_and_step() {
         "the 2h-old sample is in a 3h window"
     );
     assert!(
-        wide.iter()
-            .all(|p| (p.ts_ms - wide_start * 1000) % 3_600_000 == 0),
-        "buckets start at the window's start"
+        wide.iter().all(|p| p.ts_ms % 3_600_000 == 0),
+        "buckets lie on the epoch grid"
     );
-    // A window in the past: ends with bucket 0, so bucket 1 is outside it. Its start is not a
-    // multiple of the step, and the bucket starts follow it.
+    // A window in the past that ends exactly at `b1`: the sample at `b1` is outside it (the end
+    // is exclusive), and every point lies in bucket 0 although the window starts mid-minute.
     let past_end = b0 / 1000 + step;
     let past = store
         .metric_buckets(Some("tayga-writer"), m, &[], (past_end - 90, past_end), 60)
@@ -814,12 +814,8 @@ async fn metric_buckets_keep_the_last_value_per_series_and_step() {
     got.sort_by(|a, b| (a.ts_ms, &a.labels).cmp(&(b.ts_ms, &b.labels)));
     assert_eq!(
         got,
-        vec![
-            pt(b0 - 30_000, &logs, 100.0),
-            pt(b0 - 30_000, &spans, 10.0),
-            pt(b0 + 30_000, &spans, 15.0),
-        ],
-        "only samples up to the window's end, bucketed from its start"
+        vec![pt(b0, &logs, 100.0), pt(b0, &spans, 15.0),],
+        "only samples before the window's end, in epoch-aligned buckets"
     );
 
     drop_db(&s, &store).await;

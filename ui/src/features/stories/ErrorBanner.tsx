@@ -1,6 +1,7 @@
 import { TriangleAlert } from 'lucide-react'
 import { isApiError } from '../../api/client'
 import { Button } from '../../components/ui/Button'
+import { ExpiredRangeReset } from '../../components/ui/ExpiredRangeReset'
 
 /** One-line failure notice with a retry, for a section that could not load. */
 export function ErrorBanner({ what, error, onRetry }: { what: string; error: unknown; onRetry: () => void }) {
@@ -16,6 +17,7 @@ export function ErrorBanner({ what, error, onRetry }: { what: string; error: unk
       <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted" title={detail}>
         {detail}
       </span>
+      <ExpiredRangeReset error={error} />
       <Button size="sm" onClick={onRetry}>
         Try again
       </Button>

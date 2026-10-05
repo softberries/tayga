@@ -289,10 +289,6 @@ async fn pipeline_series<R: Repo>(
     )
     .map_err(ApiError::BadRequest)?;
     let step = w.step();
-    let grid = series::Grid {
-        step_secs: step,
-        origin_ms: w.start * 1000,
-    };
     let pts = s
         .app
         .repo
@@ -301,11 +297,11 @@ async fn pipeline_series<R: Repo>(
         .map_err(|e| s.app.unavailable(e))?;
     let some = |v: Vec<(i64, f64)>| v.into_iter().map(|(t, v)| (t, Some(v))).collect();
     let points = if let Some(quantile) = sq.kind.quantile() {
-        series::quantile(&pts, quantile, grid)
+        series::quantile(&pts, quantile, step)
     } else if sq.kind == SeriesKind::Rate {
-        some(series::rate(&pts, grid))
+        some(series::rate(&pts, step))
     } else {
-        some(series::gauge(&pts, grid))
+        some(series::gauge(&pts, step))
     };
     Ok(Json(SeriesView {
         metric: sq.metric,
@@ -657,8 +653,8 @@ mod tests {
         }
     }
 
-    /// The latest moment that is a multiple of `step`, so a window ending there whose length is
-    /// a multiple of `step` has epoch-aligned buckets, as the fixtures below assume.
+    /// The latest moment that is a multiple of `step`: a fixed `until` keeps the fixtures below
+    /// clear of the window's edges.
     fn aligned_until(step: i64) -> i64 {
         crate::params::now_ms() / 1000 / step * step
     }
@@ -742,25 +738,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pipeline_series_buckets_start_at_the_window() {
-        // A window whose start is 7 s past a minute: the buckets follow it.
-        let until = aligned_until(60) - 53;
-        let start = until - 900;
-        let pts = vec![
-            p(start + 1, &[], 4.0),
-            p(start + 59, &[], 6.0),
-            p(start + 60, &[], 9.0),
-        ];
-        let (json, q) = series(
-            pts,
-            &format!("/api/v1/pipeline/series?metric=g&kind=gauge&since=15m&until={until}"),
-        )
-        .await;
-        assert_eq!((q.window.start, q.window.end), (start, until));
-        assert_eq!(
-            json["points"],
-            serde_json::json!([[start * 1000, 6.0], [(start + 60) * 1000, 9.0]])
-        );
+    async fn pipeline_series_buckets_lie_on_the_epoch_grid() {
+        // Two windows 10 s apart, neither starting on a minute: the same bucket edges.
+        let base = aligned_until(60) - 53;
+        let mut seen = Vec::new();
+        for until in [base, base + 10] {
+            let start = until - 900;
+            let pts = vec![
+                p(start + 20, &[], 4.0),
+                p(start + 40, &[], 6.0),
+                p(start + 80, &[], 9.0),
+            ];
+            let (json, q) = series(
+                pts,
+                &format!("/api/v1/pipeline/series?metric=g&kind=gauge&since=15m&until={until}"),
+            )
+            .await;
+            assert_eq!((q.window.start, q.window.end), (start, until));
+            let edges: Vec<i64> = json["points"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|pt| pt[0].as_i64().unwrap())
+                .collect();
+            assert!(edges.iter().all(|t| t % 60_000 == 0), "{edges:?}");
+            seen.push(edges);
+        }
+        assert_eq!(seen[0], seen[1], "a moving window keeps its bucket edges");
     }
 
     #[tokio::test]
@@ -786,6 +790,7 @@ mod tests {
         let w = |secs: i64| crate::params::Window {
             start: end - secs,
             end,
+            live: false,
         };
         let ok = |uri: String| {
             let app = app.clone();

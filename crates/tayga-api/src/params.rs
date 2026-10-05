@@ -9,13 +9,18 @@ const MAX_SINCE_SECS: u32 = 7 * 24 * 3600;
 pub const RETENTION_SECS: i64 = 7 * 86_400;
 /// How far `until` may lie ahead of the API's clock (browser clock skew).
 pub const MAX_UNTIL_AHEAD_SECS: i64 = 60;
+/// A live window reads rows this far past its end, so rows stamped by a producer whose clock
+/// runs slightly ahead are not hidden.
+pub const LIVE_SLACK_SECS: i64 = 60;
 
-/// A query window `(start, end]` in unix seconds: `[until - since, until]`, where `until`
-/// defaults to now (rounded up to the next whole second).
+/// A query window `[until - since, until)` in unix seconds, where `until` defaults to now
+/// (rounded up to the next whole second; then the window is `live`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Window {
     pub start: i64,
     pub end: i64,
+    /// No `until` was given: the window ends now.
+    pub live: bool,
 }
 
 impl Window {
@@ -24,9 +29,19 @@ impl Window {
         u32::try_from(self.end - self.start).unwrap_or(MAX_SINCE_SECS)
     }
 
-    /// Bucket width for the window's series (see `bucket_secs`). Buckets start at `start`.
+    /// Bucket width for the window's series (see `bucket_secs`). Buckets lie on the epoch grid
+    /// (multiples of the width), so a live window that moves keeps its bucket edges.
     pub fn step(&self) -> u32 {
         bucket_secs(self.secs())
+    }
+
+    /// The exclusive upper bound rows are read up to: `end`, plus `LIVE_SLACK_SECS` when live.
+    pub fn upper(&self) -> i64 {
+        if self.live {
+            self.end + LIVE_SLACK_SECS
+        } else {
+            self.end
+        }
     }
 }
 
@@ -122,6 +137,7 @@ pub fn window(
 ) -> Result<Window, String> {
     let secs = i64::from(parse_since(since_or(since, default_since))?);
     let now = now_ms.div_euclid(1000);
+    let live = non_empty(until).is_none();
     let end = match non_empty(until) {
         None => (now_ms + 999).div_euclid(1000),
         Some(raw) => {
@@ -141,7 +157,7 @@ pub fn window(
             RETENTION_SECS / 86_400
         ));
     }
-    Ok(Window { start, end })
+    Ok(Window { start, end, live })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -619,6 +635,7 @@ mod tests {
         Window {
             start: NOW_S - secs,
             end: NOW_S,
+            live: false,
         }
     }
 
@@ -655,12 +672,18 @@ mod tests {
     #[test]
     fn window_defaults_to_now_and_validates_until() {
         // Live: ends at now, rounded up to the next whole second.
-        assert_eq!(window(None, None, "1h", NOW_MS), Ok(w(3600)));
+        let live = Window {
+            live: true,
+            ..w(3600)
+        };
+        assert_eq!(window(None, None, "1h", NOW_MS), Ok(live));
+        assert_eq!((live.upper(), w(3600).upper()), (NOW_S + 60, NOW_S));
         assert_eq!(
             window(Some(""), Some(" "), "24h", NOW_MS + 1),
             Ok(Window {
                 start: NOW_S + 1 - 86_400,
-                end: NOW_S + 1
+                end: NOW_S + 1,
+                live: true
             })
         );
         let past = window(Some("2h"), Some("2026-10-03T12:00:00Z"), "1h", NOW_MS).unwrap();
@@ -668,7 +691,8 @@ mod tests {
             past,
             Window {
                 start: NOW_S - 86_400 - 7200,
-                end: NOW_S - 86_400
+                end: NOW_S - 86_400,
+                live: false
             }
         );
         assert_eq!((past.secs(), past.step()), (7200, 60));

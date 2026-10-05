@@ -392,8 +392,10 @@ describe('log template page', () => {
     await waitFor(() => expect(chart).toBeDefined())
     const series = chart!.option.series as Array<{ type: string; data: unknown[] }>
     expect(series[0]!.type).toBe('bar')
-    // One bar per bucket of the 1h window, starting at its start (as the API buckets it).
-    expect(series[0]!.data).toHaveLength(Math.ceil(3600 / detail.bucket_secs))
+    // One bar per epoch-aligned bucket the 1h window touches: 60, or 61 when it does not end
+    // on a bucket edge (the first and last are partial).
+    expect(series[0]!.data.length).toBeGreaterThanOrEqual(3600 / detail.bucket_secs)
+    expect(series[0]!.data.length).toBeLessThanOrEqual(3600 / detail.bucket_secs + 1)
     const hits = within(screen.getByRole('table', { name: 'Recent hits' })).getAllByRole('row').slice(1)
     expect(hits).toHaveLength(detail.recent.length)
     const first = detail.recent[0]!

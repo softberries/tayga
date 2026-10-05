@@ -81,7 +81,7 @@ export function bucketPoints(
 ): Array<readonly [number, number]> {
   const values = denseSeries(buckets, bucketSecs, windowSecs, endMs)
   const step = Math.max(1, Math.round(bucketSecs))
-  const first = gridStart(bucketSecs, windowSecs, endMs, values.length)
+  const first = gridStart(bucketSecs, windowSecs, endMs)
   return values.map((v, i) => [(first + i * step) * 1000, v] as const)
 }
 

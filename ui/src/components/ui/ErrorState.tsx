@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { isApiError } from '../../api/client'
 import { cx } from '../../lib/cx'
 import { Button } from './Button'
+import { ExpiredRangeReset } from './ExpiredRangeReset'
 
 export interface ErrorStateProps {
   error: unknown
@@ -37,11 +38,14 @@ export function ErrorState({ error, title, onRetry, className }: ErrorStateProps
         {status ? `${status} · ` : ''}
         {message}
       </p>
-      {onRetry ? (
-        <Button size="sm" className="mt-2" onClick={onRetry}>
-          Try again
-        </Button>
-      ) : null}
+      <div className="mt-2 flex flex-wrap justify-center gap-2 empty:hidden">
+        <ExpiredRangeReset error={error} />
+        {onRetry ? (
+          <Button size="sm" onClick={onRetry}>
+            Try again
+          </Button>
+        ) : null}
+      </div>
     </div>
   )
 }

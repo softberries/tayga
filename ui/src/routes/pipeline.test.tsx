@@ -3,6 +3,8 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import lag from '../api/__fixtures__/pipeline-lag.json'
 import { clearOutage } from '../app/apiStatus'
+import { LIVE_INTERVAL_MS } from '../app/live'
+import { formatUntil } from '../app/search'
 import { renderApp } from '../test/renderApp'
 
 // ECharts needs a canvas; jsdom has none. The chart is covered by the screenshots.
@@ -97,6 +99,26 @@ describe('charts', () => {
     for (const title of ['Ingest records', 'Writer rows', 'Assembler output', 'Logminer throughput', 'Open traces', 'Buffered bytes', 'Writer batch latency', 'Logminer data lag', 'Errors']) {
       expect(screen.getByRole('heading', { name: title })).toBeInTheDocument()
     }
+  })
+
+  it('in a custom range the charts follow it and stop refreshing; status and lag stay live', async () => {
+    const until = formatUntil(minute(3_600_000))
+    const calls = stub({ up: { 'tayga-ingest': healthy(1) }, metrics: [[minute(7_000_000), 1]] })
+    const { queryClient } = renderApp(`/pipeline?since=2h&until=${until}`)
+    await waitFor(() => expect(screen.getAllByTestId('echart').length).toBe(9))
+    const q = calls.filter((u) => u.pathname.endsWith('/pipeline/series')).map((u) => Object.fromEntries(u.searchParams))
+    expect(q).toContainEqual({ since: '2h', until, metric: 'tayga_assembler_buffered_bytes', kind: 'gauge', job: 'tayga-assembler' })
+    expect(q).toContainEqual({ since: '15m', metric: 'up', kind: 'gauge', job: 'tayga-api' })
+    const interval = (match: (p: Record<string, unknown>) => boolean) =>
+      queryClient
+        .getQueryCache()
+        .findAll({ queryKey: ['pipeline-series'] })
+        .filter((c) => match(c.queryKey[2] as Record<string, unknown>))
+        .map((c) => c.observers[0]?.options.refetchInterval)
+    expect(new Set(interval((p) => p.metric !== 'up'))).toEqual(new Set([false]))
+    expect(new Set(interval((p) => p.metric === 'up'))).toEqual(new Set([LIVE_INTERVAL_MS]))
+    const lagQuery = queryClient.getQueryCache().findAll({ queryKey: ['pipeline-lag'] })[0]
+    expect(lagQuery?.observers[0]?.options.refetchInterval).toBe(LIVE_INTERVAL_MS)
   })
 
   it('says a chart is collecting when its series has no points yet', async () => {

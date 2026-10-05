@@ -123,29 +123,31 @@ pub fn merge_buckets(
         .collect()
 }
 
-/// Rows in a window `(start, end]`: binds `start`, `end` (unix seconds). `{col}` names the
-/// time column.
+/// Rows in a window `[start, upper)`: binds `start`, `upper` (unix seconds, see `bind_window`).
+/// Half-open, so a row exactly at the end never starts a bucket past the window. `{col}` names
+/// the time column.
 fn in_window(col: &str) -> String {
-    format!("{col} > toDateTime(?) AND {col} <= toDateTime(?)")
+    format!("{col} >= toDateTime(?) AND {col} < toDateTime(?)")
 }
 
-/// The window bucket (unix seconds) a time column falls in: buckets are `step` wide and start at
-/// the window's start. Binds `start`, `start`, `step`, `step` (see `bind_bucket`).
+/// The bucket (unix seconds) a time column falls in: `step` wide on the epoch grid, so a live
+/// window that moves keeps its bucket edges (the window clips the first and last bucket).
+/// Binds `step` (see `bind_bucket`).
 fn bucket_of(col: &str) -> String {
-    format!("toUInt32(toInt64(?) + intDiv(toInt64(toUnixTimestamp({col})) - toInt64(?), ?) * ?)")
+    format!("toUInt32(toStartOfInterval({col}, toIntervalSecond(?)))")
 }
 
 fn bind_window(q: clickhouse::query::Query, w: Window) -> clickhouse::query::Query {
-    q.bind(w.start).bind(w.end)
+    q.bind(w.start).bind(w.upper())
 }
 
-fn bind_bucket(q: clickhouse::query::Query, w: Window, step: u32) -> clickhouse::query::Query {
-    q.bind(w.start).bind(w.start).bind(step).bind(step)
+fn bind_bucket(q: clickhouse::query::Query, step: u32) -> clickhouse::query::Query {
+    q.bind(step)
 }
 
 /// Filtered stories as a subquery so outer aliases never shadow filter columns. Binds the
 /// window, then kind, service and fingerprint twice each.
-const FILTERED: &str = "SELECT * FROM error_stories FINAL WHERE ts > toDateTime(?) AND ts <= toDateTime(?) \
+const FILTERED: &str = "SELECT * FROM error_stories FINAL WHERE ts >= toDateTime(?) AND ts < toDateTime(?) \
      AND (? = '' OR toString(kind) = ?) AND (? = '' OR rc_service = ?) AND (? = '' OR toString(fingerprint) = ?)";
 
 const GROUP_COLUMNS: &str = "toString(fingerprint) AS fingerprint, toString(any(kind)) AS kind, \
@@ -170,7 +172,7 @@ const DATA_LAG_METRIC: &str = "tayga_logminer_data_lag_seconds";
 /// Trace search over `trace_summaries` in the window; `{SERVICE}` is the service clause.
 const TRACE_SEARCH: &str = "SELECT trace_id, toUnixTimestamp64Nano(ts) AS ts_ns, endpoint_service, endpoint_name, \
      duration_ns, is_error, span_count FROM trace_summaries FINAL \
-     WHERE ts > toDateTime(?) AND ts <= toDateTime(?) AND {SERVICE} \
+     WHERE ts >= toDateTime(?) AND ts < toDateTime(?) AND {SERVICE} \
      AND (? = '' OR endpoint_name = ?) AND duration_ns >= ? AND duration_ns <= ? \
      AND (? = 0 OR is_error = 1) ORDER BY ts DESC LIMIT ?";
 /// The trace's endpoint service matches.
@@ -178,7 +180,7 @@ const SERVICE_IS_ENDPOINT: &str = "(? = '' OR endpoint_service = ?)";
 /// The trace has a span of the service since the window's start. No upper bound: a trace that
 /// starts inside the window may reach the service after its end.
 const SERVICE_TOUCHED: &str = "trace_id IN (SELECT trace_id FROM spans \
-     WHERE service_name = ? AND start_ts > toDateTime(?))";
+     WHERE service_name = ? AND start_ts >= toDateTime(?))";
 
 impl ChRepo {
     pub fn new(s: &ClickHouseSettings) -> Self {
@@ -200,7 +202,7 @@ impl ChRepo {
              GROUP BY bucket, kind ORDER BY bucket",
             bucket_of("ts")
         ));
-        let rows: Vec<KindBucketRow> = bind_window(bind_bucket(q, f.window, step), f.window)
+        let rows: Vec<KindBucketRow> = bind_window(bind_bucket(q, step), f.window)
             .bind(kind)
             .bind(kind)
             .bind(service)
@@ -241,7 +243,7 @@ impl ChRepo {
              FROM ({FILTERED} AND has(?, toString(fingerprint))) GROUP BY fingerprint, bucket ORDER BY bucket",
             bucket_of("ts")
         ));
-        let query = bind_bucket(query, f.window, step);
+        let query = bind_bucket(query, step);
         let rows: Vec<GroupBucketRow> = bind(query).bind(&top).fetch_all().await?;
         Ok(merge_buckets(groups, rows, step))
     }
@@ -309,13 +311,13 @@ impl ChRepo {
                  toUnixTimestamp64Nano(started_at) AS started_at_ns, toUnixTimestamp64Nano(last_at) AS last_at_ns, \
                  window_count, peak_count, baseline_per_window, \
                  toUInt8(last_at > toDateTime(?) - toIntervalMinute({ALERT_ACTIVE_MIN})) AS active, example_trace_ids \
-                 FROM (SELECT * FROM log_alerts FINAL WHERE last_at > toDateTime(?) AND started_at <= toDateTime(?) \
+                 FROM (SELECT * FROM log_alerts FINAL WHERE last_at >= toDateTime(?) AND started_at < toDateTime(?) \
                  AND (? = '' OR toString(kind) = ?) AND (? = '' OR service = ?) AND (? = '' OR toString(template_id) = ?)) \
                  ORDER BY last_at DESC LIMIT {limit}"
             ))
             .bind(w.end)
             .bind(w.start)
-            .bind(w.end)
+            .bind(w.upper())
             .bind(kind)
             .bind(kind)
             .bind(service)
@@ -348,7 +350,7 @@ const TEMPLATES_IN_WINDOW: &str = "SELECT toString(t.template_id) AS template_id
      toUnixTimestamp64Nano(t.last_seen) AS last_seen_ns, t.max_severity AS max_severity, \
      toUInt8(t.template_id IN ({ALERTING_AT})) AS alerting \
      FROM (SELECT template_id, uniqExact(log_id) AS hits FROM log_template_hits \
-       WHERE ts > toDateTime(?) AND ts <= toDateTime(?) AND (? = '' OR service = ?) GROUP BY template_id) AS h \
+       WHERE ts >= toDateTime(?) AND ts < toDateTime(?) AND (? = '' OR service = ?) GROUP BY template_id) AS h \
      INNER JOIN (SELECT * FROM log_templates FINAL WHERE (? = '' OR service = ?) \
        AND (? = '' OR positionCaseInsensitive(template, ?) > 0)) AS t ON t.template_id = h.template_id \
      ORDER BY count DESC LIMIT 200";
@@ -460,7 +462,7 @@ impl Repo for ChRepo {
             .bind(f.window.end)
             .bind(f.window.end)
             .bind(f.window.start)
-            .bind(f.window.end)
+            .bind(f.window.upper())
             .bind(service)
             .bind(service)
             .bind(service)
@@ -482,7 +484,7 @@ impl Repo for ChRepo {
                 bucket_of("ts"),
                 in_window("ts")
             ));
-            let q = bind_bucket(q, f.window, step).bind(ids);
+            let q = bind_bucket(q, step).bind(ids);
             let hits: Vec<TemplateListBucketRow> = bind_window(q, f.window).fetch_all().await?;
             for h in hits {
                 by_template
@@ -546,18 +548,18 @@ impl Repo for ChRepo {
             bucket_of("ts"),
             in_window("ts")
         ));
-        let q = bind_bucket(q, window, step).bind(template_id);
+        let q = bind_bucket(q, step).bind(template_id);
         let buckets: Vec<TemplateBucketRow> = bind_window(q, window).fetch_all().await?;
         // The latest hits as of the window's end, inside the window or before it.
         let hits: Vec<TemplateHitRow> = self
             .client
             .query(
                 "SELECT toUnixTimestamp64Nano(ts) AS ts_ns, trace_id, span_id, severity_number \
-                 FROM log_template_hits WHERE template_id = toUInt64(?) AND ts <= toDateTime(?) \
+                 FROM log_template_hits WHERE template_id = toUInt64(?) AND ts < toDateTime(?) \
                  ORDER BY ts DESC LIMIT 1 BY log_id LIMIT 20",
             )
             .bind(template_id)
-            .bind(window.end)
+            .bind(window.upper())
             .fetch_all()
             .await?;
         let stories = self
@@ -569,7 +571,7 @@ impl Repo for ChRepo {
             .collect();
         let alerts_window = Window {
             start: window.end - MAX_ALERT_AGE_SECS,
-            end: window.end,
+            ..window
         };
         let alerts = self.alerts(alerts_window, "", "", template_id, 20).await?;
         let mut template = LogTemplateView::from_row(row);
@@ -667,7 +669,7 @@ impl Repo for ChRepo {
             bucket_of("start_ts"),
             in_window("start_ts")
         ));
-        let spans: Vec<CountBucketRow> = bind_window(bind_bucket(q, window, step), window)
+        let spans: Vec<CountBucketRow> = bind_window(bind_bucket(q, step), window)
             .fetch_all()
             .await?;
         // The lag recorded last before the window's end, if recent enough then.
@@ -675,12 +677,12 @@ impl Repo for ChRepo {
             .client
             .query(
                 "SELECT value FROM metric_samples WHERE metric = ? AND isFinite(value) \
-                 AND ts > toDateTime(?) - toIntervalSecond(?) AND ts <= toDateTime(?) ORDER BY ts DESC LIMIT 1",
+                 AND ts > toDateTime(?) - toIntervalSecond(?) AND ts < toDateTime(?) ORDER BY ts DESC LIMIT 1",
             )
             .bind(DATA_LAG_METRIC)
             .bind(window.end)
             .bind(DATA_LAG_FRESH_SECS)
-            .bind(window.end)
+            .bind(window.upper())
             .fetch_all()
             .await?;
         let total_spans: u64 = spans.iter().map(|b| b.n).sum();
@@ -762,7 +764,7 @@ impl Repo for ChRepo {
             bucket_of("start_ts"),
             in_window("start_ts")
         ));
-        let q = bind_bucket(q, window, step).bind(name);
+        let q = bind_bucket(q, step).bind(name);
         let rows: Vec<ServiceBucketRow> = bind_window(q, window).fetch_all().await?;
         Ok(ServiceView::from_rows(name, step, rows))
     }
@@ -775,12 +777,12 @@ impl Repo for ChRepo {
             .client
             .query(
                 "SELECT toString(service_name) AS service, \
-                 countIf(start_ts > toDateTime(?)) AS calls, \
-                 countIf(start_ts > toDateTime(?) AND status_code = 'error') AS errors, \
-                 quantileIf(0.99)(duration_ns, start_ts > toDateTime(?)) AS p99_ns, \
-                 quantileIf(0.99)(duration_ns, start_ts > toDateTime(?)) AS baseline_p99_ns \
+                 countIf(start_ts >= toDateTime(?)) AS calls, \
+                 countIf(start_ts >= toDateTime(?) AND status_code = 'error') AS errors, \
+                 quantileIf(0.99)(duration_ns, start_ts >= toDateTime(?)) AS p99_ns, \
+                 quantileIf(0.99)(duration_ns, start_ts >= toDateTime(?)) AS baseline_p99_ns \
                  FROM spans WHERE kind IN ('server', 'consumer') \
-                 AND start_ts > toDateTime(?) AND start_ts <= toDateTime(?) \
+                 AND start_ts >= toDateTime(?) AND start_ts < toDateTime(?) \
                  GROUP BY service HAVING calls > 0 ORDER BY service LIMIT 500",
             )
             .bind(window.start)
@@ -788,7 +790,7 @@ impl Repo for ChRepo {
             .bind(window.start)
             .bind(baseline_start)
             .bind(window.start.min(baseline_start))
-            .bind(window.end)
+            .bind(window.upper())
             .fetch_all()
             .await?;
         Ok(ServiceMapView {
@@ -847,7 +849,7 @@ impl Repo for ChRepo {
                 q.job.as_deref(),
                 &q.metric,
                 &q.labels,
-                (q.window.start, q.window.end),
+                (q.window.start, q.window.upper()),
                 q.window.step(),
             )
             .await?)

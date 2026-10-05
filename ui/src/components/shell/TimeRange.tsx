@@ -4,7 +4,7 @@ import { useEffect, useId, useState } from 'react'
 import type { FormEvent } from 'react'
 import { setCustomRangeOpen, useCustomRangeOpen } from '../../app/customRangeDialog'
 import { MAX_UNTIL_AHEAD_SECS, RETENTION_SECS, customRange, customRangeError, fromLocalInput, rangeSearch, toLocalInput } from '../../app/range'
-import type { Range } from '../../app/range'
+import type { Range, RangeError } from '../../app/range'
 import { DEFAULT_SINCE, SINCE_VALUES } from '../../app/search'
 import { useRange } from '../../app/useRange'
 import { cx } from '../../lib/cx'
@@ -26,7 +26,9 @@ function CustomRangeForm({ range, onApply, onCancel }: { range: Range; onApply: 
   const [from, setFrom] = useState(() => toLocalInput(end - range.secs * 1000))
   const [to, setTo] = useState(() => toLocalInput(end))
   // The reason Apply was refused; cleared by the next edit.
-  const [shown, setShown] = useState<string | null>(null)
+  const [shown, setShown] = useState<RangeError | null>(null)
+  // Only the field the error is about is marked invalid.
+  const bad = (f: RangeError['field']) => shown?.field === f
   const id = useId()
 
   const submit = (e: FormEvent) => {
@@ -57,9 +59,9 @@ function CustomRangeForm({ range, onApply, onCancel }: { range: Range; onApply: 
             setFrom(e.target.value)
             setShown(null)
           }}
-          aria-invalid={shown !== null}
-          aria-describedby={shown ? `${id}-error` : `${id}-hint`}
-          className={cx(field, shown && 'border-err')}
+          aria-invalid={bad('from')}
+          aria-describedby={bad('from') ? `${id}-error` : `${id}-hint`}
+          className={cx(field, bad('from') && 'border-err')}
         />
       </div>
       <div className="flex flex-col gap-1">
@@ -76,14 +78,14 @@ function CustomRangeForm({ range, onApply, onCancel }: { range: Range; onApply: 
             setTo(e.target.value)
             setShown(null)
           }}
-          aria-invalid={shown !== null}
-          aria-describedby={shown ? `${id}-error` : `${id}-hint`}
-          className={cx(field, shown && 'border-err')}
+          aria-invalid={bad('to')}
+          aria-describedby={bad('to') ? `${id}-error` : `${id}-hint`}
+          className={cx(field, bad('to') && 'border-err')}
         />
       </div>
       {shown ? (
         <p id={`${id}-error`} role="alert" className="text-xs text-err">
-          {shown}
+          {shown.message}
         </p>
       ) : (
         <p id={`${id}-hint`} className="text-xs text-muted">

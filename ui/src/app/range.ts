@@ -115,17 +115,24 @@ export function doubledRange(r: Range, nowMs: number): Range | null {
   return { ...r, since: formatSince(secs), secs }
 }
 
+/** Why a custom range is refused, and which field it is about. */
+export interface RangeError {
+  field: 'from' | 'to'
+  message: string
+}
+
 /**
  * Why a custom range is not valid, mirroring the API's rules (so Apply never produces a 400), or
  * null when it is fine. Times are unix ms; NaN means the field is empty or unparsable.
  */
-export function customRangeError(fromMs: number, toMs: number, nowMs: number): string | null {
-  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return 'Enter both a start and an end.'
-  if (toMs <= fromMs) return 'The end must be after the start.'
-  if (toMs > nowMs + MAX_UNTIL_AHEAD_SECS * 1000) return 'The end must not be in the future.'
-  if (toMs - fromMs > MAX_SINCE_SECS * 1000) return 'A range can be at most 7 days long.'
-  if (toMs - fromMs < 1000) return 'A range must be at least 1 second long.'
-  if (fromMs < nowMs - RETENTION_SECS * 1000) return 'The start must be within the last 7 days (data retention).'
+export function customRangeError(fromMs: number, toMs: number, nowMs: number): RangeError | null {
+  if (!Number.isFinite(fromMs)) return { field: 'from', message: 'Enter a start.' }
+  if (!Number.isFinite(toMs)) return { field: 'to', message: 'Enter an end.' }
+  if (toMs <= fromMs) return { field: 'to', message: 'The end must be after the start.' }
+  if (toMs > nowMs + MAX_UNTIL_AHEAD_SECS * 1000) return { field: 'to', message: 'The end must not be in the future.' }
+  if (toMs - fromMs > MAX_SINCE_SECS * 1000) return { field: 'from', message: 'A range can be at most 7 days long.' }
+  if (toMs - fromMs < 1000) return { field: 'to', message: 'A range must be at least 1 second long.' }
+  if (fromMs < nowMs - RETENTION_SECS * 1000) return { field: 'from', message: 'The start must be within the last 7 days (data retention).' }
   return null
 }
 

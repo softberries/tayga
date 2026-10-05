@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { LogAlertView } from '../../api/types'
+import { bucketPoints } from '../logs/model'
 import {
   activeAlertsText,
   alertActivity,
   bucketWord,
   deltaText,
   denseSeries,
+  gridStart,
   endpointOf,
   previousCount,
   splitSummary,
@@ -45,11 +47,23 @@ describe('denseSeries', () => {
   it('ignores buckets outside the window and bad values', () => {
     expect(denseSeries([[0, 9], [600, Number.NaN], [540, 1]], 60, 120, now)).toEqual([0, 1])
   })
-  it('starts the grid at the window start, as the API buckets it', () => {
-    // A window of 300 s ending at 610 s starts at 310 s, not on a minute.
-    expect(denseSeries([[370, 2], [550, 4]], 60, 300, 610_000)).toEqual([0, 2, 0, 0, 4])
-    // A live window fetched a moment after the API computed its start still lines up.
-    expect(denseSeries([[370, 2]], 60, 300, 610_800)).toEqual([0, 2, 0, 0, 0])
+  it('puts buckets on the epoch grid, the first and last partial', () => {
+    // A window of 300 s ending at 610 s, [310, 610), touches the minutes 300 to 600.
+    expect(denseSeries([[360, 2], [540, 4], [600, 1]], 60, 300, 610_000)).toEqual([0, 2, 0, 0, 4, 1])
+    expect(gridStart(60, 300, 610_000)).toBe(300)
+  })
+  it('keeps the bucket edges when the window moves by 10 s', () => {
+    const at = (endMs: number) => bucketPoints([[360, 2], [540, 4]], 60, 300, endMs)
+    const a = at(600_000)
+    const b = at(610_000)
+    for (const [t] of [...a, ...b]) expect(t % 60_000).toBe(0)
+    // Shared buckets carry the same value at the same edge.
+    const inB = new Map(b)
+    for (const [t, v] of a) expect(inB.get(t)).toBe(v)
+  })
+  it('a row exactly at the end falls past the grid, as the API leaves it out', () => {
+    // [300, 600): the last bucket is 540; a bucket at 600 is not in the window.
+    expect(denseSeries([[540, 1], [600, 9]], 60, 300, 600_000)).toEqual([0, 0, 0, 0, 1])
   })
   it('keeps the newest points of a very long window', () => {
     const s = denseSeries([], 1, 10_000, now)
