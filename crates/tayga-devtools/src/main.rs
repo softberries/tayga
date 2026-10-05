@@ -61,8 +61,8 @@ enum Cmd {
         #[arg(long, default_value_t = 9)]
         severity: i32,
     },
-    /// Print the Argon2id PHC string for `auth.password_hash`. Prompts without echo, or reads
-    /// the first stdin line when piped.
+    /// Print the Argon2id PHC string for `auth.password_hash`. Prompts twice without echo, or
+    /// reads the first stdin line when piped.
     HashPassword,
 }
 

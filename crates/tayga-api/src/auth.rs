@@ -11,7 +11,7 @@ use axum::Json;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -22,7 +22,7 @@ use serde::Deserialize;
 use sha2::Sha256;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
@@ -30,8 +30,14 @@ use subtle::ConstantTimeEq;
 type HmacSha256 = Hmac<Sha256>;
 
 pub const COOKIE: &str = "tayga_session";
-/// `/api/*` paths reachable without a session.
-const OPEN_API: [&str; 3] = ["/api/v1/auth/login", "/api/v1/auth/me", "/api/v1/config"];
+/// `/api/*` routes reachable without a session, matched by method and exact path.
+const OPEN_API: [(Method, &str); 4] = [
+    (Method::POST, "/api/v1/auth/login"),
+    (Method::POST, "/api/v1/auth/logout"),
+    (Method::GET, "/api/v1/auth/me"),
+    (Method::GET, "/api/v1/config"),
+];
+const MAX_TTL: Duration = Duration::from_secs(365 * 86_400);
 const MIN_KEY_BYTES: usize = 32;
 const WINDOW: Duration = Duration::from_secs(5 * 60);
 const MAX_FAILURES: usize = 5;
@@ -117,9 +123,13 @@ impl Auth {
             hash.algorithm == ARGON2ID_IDENT,
             "auth.password_hash must be an Argon2id PHC string"
         );
-        let ttl = parse_ttl(&s.session_ttl).ok_or_else(|| {
-            anyhow::anyhow!("auth.session_ttl must be <n>s, <n>m, <n>h or <n>d with n > 0")
-        })?;
+        let ttl = parse_ttl(&s.session_ttl)
+            .filter(|ttl| *ttl <= MAX_TTL)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "auth.session_ttl must be <n>s, <n>m, <n>h or <n>d, above 0 and at most 365d"
+                )
+            })?;
         let key = if s.session_key.trim().is_empty() {
             tracing::warn!(
                 "auth.session_key is unset: a random key is used, so a restart signs everyone out"
@@ -235,16 +245,34 @@ fn parse_ttl(s: &str) -> Option<Duration> {
     Some(Duration::from_secs(secs))
 }
 
+/// The `tayga_session` value. Parsed from raw bytes, so a non-ASCII byte in another cookie
+/// does not hide it; only this value must be ASCII.
 fn session_cookie(headers: &HeaderMap) -> Option<&str> {
     headers
         .get_all(header::COOKIE)
         .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(';'))
+        .flat_map(|v| v.as_bytes().split(|b| *b == b';'))
         .find_map(|pair| {
-            let (name, value) = pair.trim().split_once('=')?;
-            (name == COOKIE).then_some(value)
+            let pair = pair.trim_ascii();
+            let eq = pair.iter().position(|b| *b == b'=')?;
+            let (name, value) = (&pair[..eq], &pair[eq + 1..]);
+            if name != COOKIE.as_bytes() || !value.is_ascii() {
+                return None;
+            }
+            std::str::from_utf8(value).ok()
         })
+}
+
+/// Requests from one IPv6 /64 share a limiter entry, since one host usually holds the whole
+/// prefix; IPv4 (and IPv4-mapped IPv6) is keyed per address.
+fn limiter_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(Ipv6Addr::from_bits(v6.to_bits() & !u128::from(u64::MAX))),
+        },
+    }
 }
 
 /// `(user, password)` from an `Authorization: Basic` value, split at the first colon.
@@ -260,9 +288,10 @@ fn basic_credentials(value: &[u8]) -> Option<(String, String)> {
     Some((user.to_string(), pass.to_string()))
 }
 
-/// Failed (and in-flight) credential checks per peer IP within the window. An attempt is
-/// recorded before the check runs, so concurrent guesses cannot overshoot the limit; a success
-/// clears the IP.
+/// Failed (and in-flight) credential checks per peer key ([`limiter_key`]) within the window.
+/// An attempt is recorded before the check runs, so concurrent guesses cannot overshoot the
+/// limit; a success clears the key. When the map is full, a new key costs one O(n) prune and
+/// eviction scan under the lock, with n capped at `MAX_IPS` (10,000 small entries).
 #[derive(Default)]
 struct Limiter {
     ips: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
@@ -271,6 +300,7 @@ struct Limiter {
 impl Limiter {
     /// Record an attempt, or `Err(retry_after_secs)` when the IP is at the limit.
     fn attempt(&self, ip: IpAddr, now: Instant) -> Result<(), u64> {
+        let ip = limiter_key(ip);
         let mut ips = self.ips.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(times) = ips.get_mut(&ip) {
             prune(times, now);
@@ -301,7 +331,7 @@ impl Limiter {
         self.ips
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(&ip);
+            .remove(&limiter_key(ip));
     }
 }
 
@@ -378,7 +408,7 @@ async fn login(
         Verdict::Ok => {
             tracing::info!(peer = %peer.ip(), "login succeeded");
             let ttl = auth.ttl.as_secs();
-            let token = auth.sign(&auth.username, now_unix() + ttl);
+            let token = auth.sign(&auth.username, now_unix().saturating_add(ttl));
             let mut res = StatusCode::NO_CONTENT.into_response();
             res.headers_mut()
                 .insert(header::SET_COOKIE, auth.cookie(&token, ttl));
@@ -406,15 +436,29 @@ async fn me(State(auth): State<Arc<Auth>>, headers: HeaderMap) -> Response {
     }
 }
 
-/// Guards `/api/*` except the open paths: a valid session cookie or Basic credentials pass.
+/// Non-API paths, and the open API routes (HEAD counts as GET). Leading slashes are collapsed
+/// first, so `//api/...` is guarded too.
+fn is_open(method: &Method, path: &str) -> bool {
+    let rel = path.trim_start_matches('/');
+    if rel != "api" && !rel.starts_with("api/") {
+        return true;
+    }
+    let method = if method == Method::HEAD {
+        &Method::GET
+    } else {
+        method
+    };
+    OPEN_API.iter().any(|(m, p)| m == method && *p == path)
+}
+
+/// Guards `/api/*` except the open routes: a valid session cookie or Basic credentials pass.
 pub async fn require(
     State(auth): State<Arc<Auth>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     req: Request,
     next: Next,
 ) -> Response {
-    let path = req.uri().path();
-    if !path.starts_with("/api/") || OPEN_API.contains(&path) {
+    if is_open(req.method(), req.uri().path()) {
         return next.run(req).await;
     }
     if auth.session_user(req.headers()).is_some() {
@@ -563,6 +607,18 @@ mod tests {
             ..settings()
         });
         assert!(e.contains("auth.session_ttl"), "{e}");
+        let e = config_err(AuthSettings {
+            session_ttl: "366d".into(),
+            ..settings()
+        });
+        assert!(e.contains("auth.session_ttl"), "{e}");
+        assert!(
+            Auth::from_settings(&AuthSettings {
+                session_ttl: "365d".into(),
+                ..settings()
+            })
+            .is_ok()
+        );
     }
 
     #[test]
@@ -609,6 +665,49 @@ mod tests {
 
     fn basic(user_pass: &str) -> String {
         format!("Basic {}", STANDARD.encode(user_pass))
+    }
+
+    #[test]
+    fn session_cookie_survives_non_ascii_neighbours() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_bytes(b"pref=caf\xe9; tayga_session=abc.def; x=1").unwrap(),
+        );
+        assert_eq!(session_cookie(&headers), Some("abc.def"));
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_bytes(b"tayga_session=ab\xe9").unwrap(),
+        );
+        assert_eq!(session_cookie(&headers), None);
+        let mut headers = HeaderMap::new();
+        headers.append(header::COOKIE, HeaderValue::from_static("a=1"));
+        headers.append(header::COOKIE, HeaderValue::from_static("tayga_session=t"));
+        assert_eq!(session_cookie(&headers), Some("t"));
+    }
+
+    #[test]
+    fn open_routes_match_method_and_exact_path() {
+        assert!(is_open(&Method::POST, "/api/v1/auth/login"));
+        assert!(is_open(&Method::POST, "/api/v1/auth/logout"));
+        assert!(is_open(&Method::GET, "/api/v1/auth/me"));
+        assert!(is_open(&Method::HEAD, "/api/v1/config"));
+        assert!(is_open(&Method::GET, "/healthz"));
+        assert!(is_open(&Method::GET, "/apiary"));
+        for (m, p) in [
+            (Method::GET, "/api/v1/auth/login"),
+            (Method::GET, "/api/v1/auth/logout"),
+            (Method::POST, "/api/v1/auth/me"),
+            (Method::POST, "/api/v1/config"),
+            (Method::GET, "/api/v1/configX"),
+            (Method::GET, "/api/v1/config/"),
+            (Method::GET, "//api/v1/config"),
+            (Method::GET, "//api/v1/story-groups"),
+            (Method::GET, "/api"),
+        ] {
+            assert!(!is_open(&m, p), "{m} {p}");
+        }
     }
 
     #[test]
@@ -678,6 +777,29 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(l.attempt(ip(1), t1), Ok(()));
         }
+    }
+
+    #[test]
+    fn ipv6_is_limited_per_64_prefix() {
+        let l = Limiter::default();
+        let t0 = Instant::now();
+        let v6 = |s: &str| s.parse::<IpAddr>().unwrap();
+        for i in 1..=5 {
+            l.attempt(v6(&format!("2001:db8:1:2::{i}")), t0).unwrap();
+        }
+        // Rotating the low 64 bits does not escape the limit.
+        assert!(l.attempt(v6("2001:db8:1:2:ffff::9"), t0).is_err());
+        // Another /64 is separate.
+        assert_eq!(l.attempt(v6("2001:db8:1:3::1"), t0), Ok(()));
+        // A success anywhere in the /64 clears it.
+        l.clear(v6("2001:db8:1:2::77"));
+        assert_eq!(l.attempt(v6("2001:db8:1:2::1"), t0), Ok(()));
+        // IPv4 stays per address, and IPv4-mapped IPv6 is the same IPv4 key.
+        for _ in 0..5 {
+            l.attempt(ip(0x0a00_0001), t0).unwrap();
+        }
+        assert!(l.attempt(v6("::ffff:10.0.0.1"), t0).is_err());
+        assert_eq!(l.attempt(ip(0x0a00_0002), t0), Ok(()));
     }
 
     #[test]
@@ -975,9 +1097,27 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body, r#"{"error":"unauthorized"}"#);
-        // Unmatched API paths are guarded too.
-        let (status, _, _) = send(&app, get_req("/api/v1/nope").body(Body::empty()).unwrap()).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // Unmatched, lookalike, encoded and dot-segment API paths are guarded too.
+        for uri in [
+            "/api/v1/nope",
+            "/api/v1/configX",
+            "/api/v1/config/",
+            "/api/v1/%61uth/me",
+            "/api/v1/auth/me/../x",
+            "/api/v1/auth/login",
+            "//api/v1/story-groups",
+        ] {
+            let (status, _, body) = send(&app, get_req(uri).body(Body::empty()).unwrap()).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
+            assert_eq!(body, r#"{"error":"unauthorized"}"#, "{uri}");
+        }
+        // HEAD on an open GET route is open.
+        let (status, _, _) = send(
+            &app,
+            Request::head("/api/v1/config").body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]
@@ -1008,6 +1148,38 @@ mod tests {
         let (_, _, body) = send(&app, get_req("/api/v1/config").body(Body::empty()).unwrap()).await;
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["auth_enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn logout_needs_no_session() {
+        // e.g. a stale cookie signed with the previous process's random key.
+        for cookie in [None, Some("tayga_session=stale.token")] {
+            let mut req = Request::post("/api/v1/auth/logout");
+            if let Some(c) = cookie {
+                req = req.header(header::COOKIE, c);
+            }
+            let (status, headers, _) = send(&app(auth()), req.body(Body::empty()).unwrap()).await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{cookie:?}");
+            let set = headers.get(header::SET_COOKIE).unwrap().to_str().unwrap();
+            assert!(set.contains("Max-Age=0"), "{set}");
+        }
+        let secure = Auth::from_settings(&AuthSettings {
+            secure_cookie: true,
+            ..settings()
+        })
+        .unwrap();
+        let (status, headers, _) = send(
+            &app_with(secure, PEER),
+            Request::post("/api/v1/auth/logout")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            headers[header::SET_COOKIE].to_str().unwrap(),
+            "tayga_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure"
+        );
     }
 
     #[tokio::test]
