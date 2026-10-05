@@ -43,7 +43,9 @@ pub fn is_protected(tok: &str, keep_http_status: bool) -> bool {
 }
 
 /// Masked tokens; any token containing a wildcard becomes exactly `<*>`.
-/// With `keep_http_status`, a status code right after an `HTTP/x` token is kept literally.
+/// With `keep_http_status`, a status code right after an `HTTP/x` token is kept literally. The
+/// rule is positional only: a non-access-log line with `HTTP/x NNN` (e.g. a client error message
+/// `upstream replied HTTP/1.1 503`) keeps its code too.
 pub fn tokens(body: &str, keep_http_status: bool) -> Vec<String> {
     let mut out = Vec::new();
     let mut prev: Option<&str> = None;
@@ -147,6 +149,40 @@ mod tests {
         assert!(!tokens(r#""GET / HTTP/1.1" 600 x"#, true).contains(&"600".to_string()));
         assert!(!tokens("retry 503 times", true).contains(&"503".to_string()));
         assert!(!tokens(r#""GET / HTTP/1.1" 503 x"#, false).contains(&"503".to_string()));
+    }
+
+    #[test]
+    fn no_adversarial_shape_yields_a_protected_token() {
+        let shapes = [
+            r#""503""#,
+            "503,",
+            "(404)",
+            "status=500",
+            "v200",
+            ":443",
+            "10.0.0.200",
+            "port 8080",
+            "took 250 ms",
+        ];
+        for shape in shapes {
+            // Alone, after an `HTTP/x` token, and inside an access-log line.
+            for body in [
+                shape.to_string(),
+                format!("HTTP/1.1 {shape}"),
+                format!(r#""GET /x HTTP/1.1" {shape} -"#),
+                format!(r#""GET /x HTTP/2" x {shape}"#),
+            ] {
+                let t = tokens(&body, true);
+                assert!(
+                    t.iter().all(|x| !is_protected(x, true)),
+                    "{body:?} -> {t:?}"
+                );
+            }
+        }
+        // The control: a bare code right after `HTTP/x` is the one protected shape, also outside
+        // access logs.
+        let t = tokens("upstream replied HTTP/1.1 503", true);
+        assert_eq!(t.last().map(String::as_str), Some("503"), "{t:?}");
     }
 
     #[test]

@@ -152,8 +152,9 @@ impl Drain {
     }
 
     /// Leaf for `tokens` in `service`'s tree, creating nodes on the way. A protected token always
-    /// gets its own branch (at most 500 of them per node), never the `<*>` overflow branch, so a
-    /// line and every template it may match (same literal there) share a leaf.
+    /// gets its own branch, never the `<*>` overflow branch, so a line and every template it may
+    /// match (same literal there) share a leaf. Protected branches are in addition to
+    /// `max_children`: a full node can still grow up to 500 of them (one per code 100..=599).
     fn leaf<'a>(tree: &'a mut ServiceTree, cfg: &DrainConfig, tokens: &[String]) -> &'a mut Node {
         let mut node = tree.by_len.entry(tokens.len()).or_default();
         for tok in tokens.iter().take(cfg.depth.saturating_sub(2)) {
