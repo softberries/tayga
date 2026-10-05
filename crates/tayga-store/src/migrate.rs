@@ -23,6 +23,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
         include_str!("../migrations/0003_replay_safe_analysis.sql"),
     ),
     (4, include_str!("../migrations/0004_log_templates.sql")),
+    (5, include_str!("../migrations/0005_metric_samples.sql")),
 ];
 
 pub fn split_statements(sql: &str) -> Vec<String> {
@@ -86,5 +87,6 @@ mod tests {
         assert_eq!(split_statements(MIGRATIONS[1].1).len(), 3);
         assert_eq!(split_statements(MIGRATIONS[2].1).len(), 3);
         assert_eq!(split_statements(MIGRATIONS[3].1).len(), 3);
+        assert_eq!(split_statements(MIGRATIONS[4].1).len(), 1);
     }
 }

@@ -66,24 +66,38 @@ services:
       tayga-migrate:
         condition: service_completed_successfully
 
+  # Serves the web app and /api. Kafka is for consumer-group lag on the
+  # pipeline page; deploy/tayga-api.toml lists the in-network /metrics
+  # targets its recorder scrapes (a list of tables cannot be set through
+  # TAYGA__ env vars). The Jaeger link points at the demo's Jaeger and is
+  # always on; the Grafana link is opt-in (`make up-extras` sets it through
+  # deploy/compose.extras.yaml).
   tayga-api:
     image: tayga:dev
     container_name: tayga-api
     command: ["tayga-api"]
     environment:
       <<: *tayga-env
+      TAYGA__KAFKA__TOPIC: tayga.signals
+      TAYGA_CONFIG: /etc/tayga/api.toml
       TAYGA__JAEGER_URL: http://localhost:8080/jaeger/ui
-      TAYGA__GRAFANA_URL: http://localhost:3001
+    volumes:
+      - ${TAYGA_ROOT}/deploy/tayga-api.toml:/etc/tayga/api.toml:ro
     ports:
       - "127.0.0.1:8090:8090"
     restart: unless-stopped
     depends_on:
+      redpanda:
+        condition: service_healthy
       tayga-migrate:
         condition: service_completed_successfully
+
+  # Opt-in (`make up-extras`): the app's pipeline page replaces them.
 
   tayga-prometheus:
     image: quay.io/prometheus/prometheus:v3.13.3
     container_name: tayga-prometheus
+    profiles: ["extras"]
     command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d"]
     volumes:
       - ${TAYGA_ROOT}/deploy/prometheus:/etc/prometheus:ro
@@ -94,6 +108,7 @@ services:
   tayga-grafana:
     image: grafana/grafana:13.2.1
     container_name: tayga-grafana
+    profiles: ["extras"]
     environment:
       GF_PLUGINS_PREINSTALL: grafana-clickhouse-datasource@4.22.0
       GF_AUTH_ANONYMOUS_ENABLED: "true"

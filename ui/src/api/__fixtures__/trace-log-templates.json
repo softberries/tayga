@@ -1,0 +1,314 @@
+[
+  {
+    "log_id": "10427748335532326853",
+    "template_id": "1052235204628498982",
+    "template": "User <*> adding <*> of product <*> to cart",
+    "alert": null
+  },
+  {
+    "log_id": "6047980380428099092",
+    "template_id": "6470045815083748258",
+    "template": "<*> \"GET <*> <*> <*> <*> <*> - \"-\" <*> <*> <*> <*> \"-\" <*> <*> <*> <*> <*> <*> <*> <*> - -",
+    "alert": null
+  },
+  {
+    "log_id": "11800711080727156530",
+    "template_id": "17971563567275943127",
+    "template": "Product Found",
+    "alert": null
+  },
+  {
+    "log_id": "12939430840596752579",
+    "template_id": "7241903583389243500",
+    "template": "API request <*>",
+    "alert": null
+  },
+  {
+    "log_id": "11182429157379463905",
+    "template_id": "8212229106416495623",
+    "template": "<*> \"POST <*> <*> <*> - via_upstream - \"-\" <*> <*> <*> <*> \"-\" <*> <*> <*> <*> frontend <*> <*> <*> - -",
+    "alert": null
+  },
+  {
+    "log_id": "13828538276433196435",
+    "template_id": "17825433274316988729",
+    "template": "AddItemAsync called with userId={userId}, productId={productId}, quantity={quantity}",
+    "alert": null
+  },
+  {
+    "log_id": "11145894175744743849",
+    "template_id": "7241903583389243500",
+    "template": "API request <*>",
+    "alert": null
+  },
+  {
+    "log_id": "6940622267964372277",
+    "template_id": "9590405632526817734",
+    "template": "GetCartAsync called with userId={userId}",
+    "alert": null
+  },
+  {
+    "log_id": "1581597882124502146",
+    "template_id": "1052235204628498982",
+    "template": "User <*> adding <*> of product <*> to cart",
+    "alert": null
+  },
+  {
+    "log_id": "13740704988693365023",
+    "template_id": "6470045815083748258",
+    "template": "<*> \"GET <*> <*> <*> <*> <*> - \"-\" <*> <*> <*> <*> \"-\" <*> <*> <*> <*> <*> <*> <*> <*> - -",
+    "alert": null
+  },
+  {
+    "log_id": "281050336432587136",
+    "template_id": "7241903583389243500",
+    "template": "API request <*>",
+    "alert": null
+  },
+  {
+    "log_id": "12817348106102092376",
+    "template_id": "17971563567275943127",
+    "template": "Product Found",
+    "alert": null
+  },
+  {
+    "log_id": "4080711696215020786",
+    "template_id": "8212229106416495623",
+    "template": "<*> \"POST <*> <*> <*> - via_upstream - \"-\" <*> <*> <*> <*> \"-\" <*> <*> <*> <*> frontend <*> <*> <*> - -",
+    "alert": null
+  },
+  {
+    "log_id": "9876506177715383472",
+    "template_id": "17825433274316988729",
+    "template": "AddItemAsync called with userId={userId}, productId={productId}, quantity={quantity}",
+    "alert": null
+  },
+  {
+    "log_id": "14529337450196158354",
+    "template_id": "9590405632526817734",
+    "template": "GetCartAsync called with userId={userId}",
+    "alert": null
+  },
+  {
+    "log_id": "578094845140350772",
+    "template_id": "7241903583389243500",
+    "template": "API request <*>",
+    "alert": null
+  },
+  {
+    "log_id": "13119891091424574859",
+    "template_id": "1052235204628498982",
+    "template": "User <*> adding <*> of product <*> to cart",
+    "alert": null
+  },
+  {
+    "log_id": "4443477486637422026",
+    "template_id": "6470045815083748258",
+    "template": "<*> \"GET <*> <*> <*> <*> <*> - \"-\" <*> <*> <*> <*> \"-\" <*> <*> <*> <*> <*> <*> <*> <*> - -",
+    "alert": null
+  },
+  {
+    "log_id": "5726291862281499736",
+    "template_id": "7241903583389243500",
+    "template": "API request <*>",
+    "alert": null
+  },
+  {
+    "log_id": "16285643977320550011",
+    "template_id": "17971563567275943127",
+    "template": "Product Found",
+    "alert": null
+  },
+  {
+    "log_id": "6391106763899473206",
+    "template_id": "8212229106416495623",
+    "template": "<*> \"POST <*> <*> <*> - via_upstream - \"-\" <*> <*> <*> <*> \"-\" <*> <*> <*> <*> frontend <*> <*> <*> - -",
+    "alert": null
+  },
+  {
+    "log_id": "5189333189993834557",
+    "template_id": "17825433274316988729",
+    "template": "AddItemAsync called with userId={userId}, productId={productId}, quantity={quantity}",
+    "alert": null
+  },
+  {
+    "log_id": "16001366163321843882",
+    "template_id": "7241903583389243500",
+    "template": "API request <*>",
+    "alert": null
+  },
+  {
+    "log_id": "11307715093831533462",
+    "template_id": "9590405632526817734",
+    "template": "GetCartAsync called with userId={userId}",
+    "alert": null
+  },
+  {
+    "log_id": "14450840194470174605",
+    "template_id": "1052235204628498982",
+    "template": "User <*> adding <*> of product <*> to cart",
+    "alert": null
+  },
+  {
+    "log_id": "13435745973632668465",
+    "template_id": "6470045815083748258",
+    "template": "<*> \"GET <*> <*> <*> <*> <*> - \"-\" <*> <*> <*> <*> \"-\" <*> <*> <*> <*> <*> <*> <*> <*> - -",
+    "alert": null
+  },
+  {
+    "log_id": "9677953292573378397",
+    "template_id": "17971563567275943127",
+    "template": "Product Found",
+    "alert": null
+  },
+  {
+    "log_id": "6289356028968625912",
+    "template_id": "7241903583389243500",
+    "template": "API request <*>",
+    "alert": null
+  },
+  {
+    "log_id": "13018703950217421038",
+    "template_id": "8212229106416495623",
+    "template": "<*> \"POST <*> <*> <*> - via_upstream - \"-\" <*> <*> <*> <*> \"-\" <*> <*> <*> <*> frontend <*> <*> <*> - -",
+    "alert": null
+  },
+  {
+    "log_id": "11420188476486065585",
+    "template_id": "17825433274316988729",
+    "template": "AddItemAsync called with userId={userId}, productId={productId}, quantity={quantity}",
+    "alert": null
+  },
+  {
+    "log_id": "15741807701424624504",
+    "template_id": "7241903583389243500",
+    "template": "API request <*>",
+    "alert": null
+  },
+  {
+    "log_id": "9913766091143757513",
+    "template_id": "9590405632526817734",
+    "template": "GetCartAsync called with userId={userId}",
+    "alert": null
+  },
+  {
+    "log_id": "15864241190021600924",
+    "template_id": "8212229106416495623",
+    "template": "<*> \"POST <*> <*> <*> - via_upstream - \"-\" <*> <*> <*> <*> \"-\" <*> <*> <*> <*> frontend <*> <*> <*> - -",
+    "alert": null
+  },
+  {
+    "log_id": "3566251744240886377",
+    "template_id": "2843144682900925722",
+    "template": "[PlaceOrder]",
+    "alert": null
+  },
+  {
+    "log_id": "1617809956760147243",
+    "template_id": "9590405632526817734",
+    "template": "GetCartAsync called with userId={userId}",
+    "alert": null
+  },
+  {
+    "log_id": "17972591002160740304",
+    "template_id": "17971563567275943127",
+    "template": "Product Found",
+    "alert": null
+  },
+  {
+    "log_id": "7688348155209504807",
+    "template_id": "6014971583427795404",
+    "template": "conversion successful",
+    "alert": null
+  },
+  {
+    "log_id": "11602187304001994150",
+    "template_id": "17971563567275943127",
+    "template": "Product Found",
+    "alert": null
+  },
+  {
+    "log_id": "3748858540267523645",
+    "template_id": "6014971583427795404",
+    "template": "conversion successful",
+    "alert": null
+  },
+  {
+    "log_id": "8262842644951184745",
+    "template_id": "17971563567275943127",
+    "template": "Product Found",
+    "alert": null
+  },
+  {
+    "log_id": "8847871333892030989",
+    "template_id": "6014971583427795404",
+    "template": "conversion successful",
+    "alert": null
+  },
+  {
+    "log_id": "13476026662301369525",
+    "template_id": "17971563567275943127",
+    "template": "Product Found",
+    "alert": null
+  },
+  {
+    "log_id": "13387057196497709157",
+    "template_id": "6014971583427795404",
+    "template": "conversion successful",
+    "alert": null
+  },
+  {
+    "log_id": "2865022111032375547",
+    "template_id": "14226836809708614010",
+    "template": "Requesting quote",
+    "alert": null
+  },
+  {
+    "log_id": "5550445968366066837",
+    "template_id": "5503524980113437756",
+    "template": "Calculated quote",
+    "alert": null
+  },
+  {
+    "log_id": "15672105443019558778",
+    "template_id": "2137626406397000059",
+    "template": "Sending Quote",
+    "alert": null
+  },
+  {
+    "log_id": "15498043756962877488",
+    "template_id": "6014971583427795404",
+    "template": "conversion successful",
+    "alert": null
+  },
+  {
+    "log_id": "6723443994462284444",
+    "template_id": "5461860963333777332",
+    "template": "Payment request failed. Invalid token. demo.user_context.loyalty_level=gold",
+    "alert": "spike"
+  },
+  {
+    "log_id": "15367559183881126702",
+    "template_id": "15239367219367959570",
+    "template": "Charge request received.",
+    "alert": null
+  },
+  {
+    "log_id": "10640794018338661389",
+    "template_id": "7241903583389243500",
+    "template": "API request <*>",
+    "alert": null
+  },
+  {
+    "log_id": "11658431671971267476",
+    "template_id": "1066356062084821589",
+    "template": "Checkout payment declined",
+    "alert": "spike"
+  },
+  {
+    "log_id": "8233331639822324717",
+    "template_id": "5055819698916578669",
+    "template": "Multi-item checkout completed for user <*>",
+    "alert": null
+  }
+]

@@ -1,0 +1,34 @@
+# HELP tayga_writer_rows_inserted Rows inserted into ClickHouse.
+# TYPE tayga_writer_rows_inserted counter
+tayga_writer_rows_inserted_total{kind="logs"} 155428
+tayga_writer_rows_inserted_total{kind="spans"} 492277
+# HELP tayga_writer_batches_committed Batches inserted and committed.
+# TYPE tayga_writer_batches_committed counter
+tayga_writer_batches_committed_total 3621
+# HELP tayga_writer_insert_failures Failed ClickHouse insert attempts.
+# TYPE tayga_writer_insert_failures counter
+tayga_writer_insert_failures_total 0
+# HELP tayga_writer_commit_failures Failed Kafka offset commits.
+# TYPE tayga_writer_commit_failures counter
+tayga_writer_commit_failures_total 0
+# HELP tayga_writer_undecodable_records Records skipped because they could not be decoded.
+# TYPE tayga_writer_undecodable_records counter
+tayga_writer_undecodable_records_total 0
+# HELP tayga_writer_batch_seconds Duration of a successful ClickHouse batch insert.
+# TYPE tayga_writer_batch_seconds histogram
+tayga_writer_batch_seconds_sum 35.428838471999899
+tayga_writer_batch_seconds_count 3621
+tayga_writer_batch_seconds_bucket{le="0.005"} 62
+tayga_writer_batch_seconds_bucket{le="0.01"} 2268
+tayga_writer_batch_seconds_bucket{le="0.02"} 3574
+tayga_writer_batch_seconds_bucket{le="0.04"} 3598
+tayga_writer_batch_seconds_bucket{le="0.08"} 3621
+tayga_writer_batch_seconds_bucket{le="0.16"} 3621
+tayga_writer_batch_seconds_bucket{le="0.32"} 3621
+tayga_writer_batch_seconds_bucket{le="0.64"} 3621
+tayga_writer_batch_seconds_bucket{le="1.28"} 3621
+tayga_writer_batch_seconds_bucket{le="2.56"} 3621
+tayga_writer_batch_seconds_bucket{le="5.12"} 3621
+tayga_writer_batch_seconds_bucket{le="10.24"} 3621
+tayga_writer_batch_seconds_bucket{le="+Inf"} 3621
+# EOF

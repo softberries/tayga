@@ -1,0 +1,94 @@
+/* React Flow themed from the Tayga tokens (both themes follow [data-theme] through the vars). */
+.tg-map {
+  --xy-background-color: transparent;
+  --xy-background-pattern-color: var(--tg-line-soft);
+  --xy-edge-stroke: var(--tg-edge);
+  --xy-node-border-radius: var(--tg-radius-card);
+  --xy-controls-button-background-color: var(--tg-panel);
+  --xy-controls-button-background-color-hover: var(--tg-rail-active);
+  --xy-controls-button-color: var(--tg-ink-2);
+  --xy-controls-button-color-hover: var(--tg-ink);
+  --xy-controls-button-border-color: var(--tg-line);
+  --xy-controls-box-shadow: var(--tg-shadow);
+  --xy-minimap-background-color: var(--tg-panel);
+  --xy-minimap-mask-background-color: color-mix(in srgb, var(--tg-ground) 70%, transparent);
+  --xy-minimap-mask-stroke-color: var(--tg-accent);
+  --xy-minimap-mask-stroke-width: 2;
+  --xy-minimap-node-stroke-color: transparent;
+  --xy-attribution-background-color: transparent;
+  font-family: var(--tg-font-sans);
+}
+
+/* Cards bring their own look; React Flow's node wrapper stays invisible. */
+.tg-map .react-flow__node {
+  border-radius: var(--tg-radius-card);
+}
+
+/* Handles exist only so edges can attach; they are not interactive here. */
+.tg-map .tg-map-handle {
+  opacity: 0;
+  pointer-events: none;
+  min-width: 1px;
+  min-height: 1px;
+  width: 1px;
+  height: 1px;
+  border: 0;
+}
+
+.tg-map-node-err {
+  box-shadow:
+    var(--tg-shadow),
+    0 0 0 1px color-mix(in srgb, var(--tg-err) 45%, transparent),
+    0 0 22px color-mix(in srgb, var(--tg-err) 45%, transparent);
+}
+.tg-map-node-slow {
+  box-shadow:
+    var(--tg-shadow),
+    0 0 0 1px color-mix(in srgb, var(--tg-slow) 40%, transparent),
+    0 0 18px color-mix(in srgb, var(--tg-slow) 35%, transparent);
+}
+.tg-map-node-match {
+  box-shadow:
+    var(--tg-shadow),
+    0 0 0 2px var(--tg-accent),
+    0 0 22px color-mix(in srgb, var(--tg-accent) 55%, transparent);
+}
+
+.tg-map .react-flow__controls {
+  border-radius: var(--tg-radius-control);
+  overflow: hidden;
+  border: 1px solid var(--tg-panel-line);
+}
+.tg-map .react-flow__controls-button {
+  width: 30px;
+  height: 30px;
+}
+.tg-map .react-flow__controls-button:focus-visible {
+  outline: 2px solid var(--tg-accent);
+  outline-offset: -2px;
+}
+
+.tg-map .react-flow__minimap {
+  border-radius: var(--tg-radius-field);
+  border: 1px solid var(--tg-panel-line);
+  box-shadow: var(--tg-shadow);
+  overflow: hidden;
+}
+
+.tg-map .react-flow__attribution {
+  color: var(--tg-faint);
+  font-size: 10px;
+}
+.tg-map .react-flow__attribution a {
+  color: var(--tg-faint);
+}
+
+/* Controls and minimap sit above the attribution line in the bottom-right corner, the
+   controls to the left of the minimap on wide screens. */
+.tg-map .react-flow__panel.bottom.right.tg-map-controls,
+.tg-map .react-flow__panel.bottom.right.tg-map-minimap {
+  margin-bottom: 26px;
+}
+.tg-map .react-flow__panel.bottom.right.tg-map-controls-beside {
+  margin-right: calc(168px + 15px + 10px);
+}

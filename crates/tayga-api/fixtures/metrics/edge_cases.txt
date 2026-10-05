@@ -1,0 +1,16 @@
+# HELP demo_requests Hand-written edge cases (not captured from a binary).
+# TYPE demo_requests counter
+demo_requests_total{method="GET",path="/a \"quoted\" \\ path"} 3
+demo_requests_total{method="POST",path="/b"} 4 1700000000000
+demo_temperature NaN
+demo_upper +Inf
+demo_lower -Inf
+demo_spaced{ a = "x" , b="y", } 1.5e3
+demo_exemplar_bucket{le="0.1"} 2 # {trace_id="abc"} 0.05 1700000000.1
+this line is not a sample
+demo_bad_value{a="x"} twelve
+demo_unclosed{a="x" 1
+demo_no_value{a="x"}
+{a="x"} 1
+demo_extra 1 2 3
+# EOF

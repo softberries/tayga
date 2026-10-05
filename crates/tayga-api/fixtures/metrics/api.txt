@@ -1,0 +1,4 @@
+# HELP tayga_api_repo_errors Requests answered 503 because ClickHouse failed.
+# TYPE tayga_api_repo_errors counter
+tayga_api_repo_errors_total 0
+# EOF

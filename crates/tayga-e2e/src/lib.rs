@@ -98,6 +98,12 @@ impl Api {
             .unwrap_or_default())
     }
 
+    /// One group with its latest example stories (`{"group": {...}, "examples": [...]}`).
+    pub async fn group_detail(&self, fingerprint: &str, since: &str) -> anyhow::Result<Value> {
+        self.get(&format!("/api/v1/story-groups/{fingerprint}?since={since}"))
+            .await
+    }
+
     pub async fn log_alerts(&self, query: &str) -> anyhow::Result<Vec<Value>> {
         Ok(self
             .get(&format!("/api/v1/log-alerts?{query}"))
@@ -120,10 +126,11 @@ impl Api {
         self.get(&format!("/api/v1/stories/{id}")).await
     }
 
+    /// The map's edges (`{"edges": [...], "nodes": [...]}`).
     pub async fn service_map(&self, since: &str) -> anyhow::Result<Vec<Value>> {
         Ok(self
             .get(&format!("/api/v1/service-map?since={since}"))
-            .await?
+            .await?["edges"]
             .as_array()
             .cloned()
             .unwrap_or_default())
@@ -158,17 +165,7 @@ pub async fn wait_for_group(
         let query = format!("since={}&{filter}", since_flip(after_ns));
         match api.groups(&query).await {
             Ok(groups) => {
-                last_seen = groups
-                    .iter()
-                    .map(|g| {
-                        format!(
-                            "{} | {} | stories={}",
-                            g["rc_service"],
-                            g["summary"],
-                            story_count(g)
-                        )
-                    })
-                    .collect();
+                last_seen = describe_groups(&groups);
                 let found = groups.into_iter().find(|g| {
                     g["last_seen_ns"].as_i64().unwrap_or(0) > after_ns
                         && story_count(g) >= min_new
@@ -189,6 +186,144 @@ pub async fn wait_for_group(
         "no matching story group within {timeout:?} (last poll error: {last_err:?}); last groups seen:\n{}",
         last_seen.join("\n")
     )
+}
+
+/// Sums `stories` over the groups seen after `after_ns` that satisfy `pred`. Returns the sum and
+/// the matching group with the most stories; `None` when no group matches.
+pub fn sum_matching_groups(
+    groups: &[Value],
+    after_ns: i64,
+    pred: impl Fn(&Value) -> bool,
+) -> Option<(u64, Value)> {
+    let matching: Vec<&Value> = groups
+        .iter()
+        .filter(|g| g["last_seen_ns"].as_i64().unwrap_or(0) > after_ns && pred(g))
+        .collect();
+    let top = matching.iter().max_by_key(|g| story_count(g))?;
+    Some((
+        matching.iter().map(|g| story_count(g)).sum(),
+        (*top).clone(),
+    ))
+}
+
+/// Like `wait_for_group`, but for outcomes that split across several groups (one fingerprint per
+/// endpoint, identical summaries): succeeds when the matching groups together have at least
+/// `min_new` stories since the flip. Returns the matching group with the most stories.
+pub async fn wait_for_group_sum(
+    api: &Api,
+    filter: &str,
+    after_ns: i64,
+    min_new: u64,
+    timeout: Duration,
+    pred: impl Fn(&Value) -> bool,
+) -> anyhow::Result<(Value, Duration)> {
+    let start = Instant::now();
+    let mut last_seen: Vec<String> = Vec::new();
+    let mut last_err: Option<String> = None;
+    while start.elapsed() < timeout {
+        let query = format!("since={}&{filter}", since_flip(after_ns));
+        match api.groups(&query).await {
+            Ok(groups) => {
+                last_seen = describe_groups(&groups);
+                if let Some((sum, top)) = sum_matching_groups(&groups, after_ns, &pred)
+                    && sum >= min_new
+                {
+                    return Ok((top, start.elapsed()));
+                }
+            }
+            Err(e) => {
+                eprintln!("[e2e] poll error (continuing): {e}");
+                last_err = Some(e.to_string());
+            }
+        }
+        tokio::time::sleep(POLL_EVERY).await;
+    }
+    anyhow::bail!(
+        "matching story groups never reached {min_new} stories within {timeout:?} (last poll error: {last_err:?}); last groups seen:\n{}",
+        last_seen.join("\n")
+    )
+}
+
+/// The longest example story in a group detail (`GET /story-groups/{fp}`) newer than `after_ns`
+/// whose duration is at least `min_ns`, as `(story_id, duration_ns)`.
+pub fn slow_example_after(detail: &Value, after_ns: i64, min_ns: u64) -> Option<(String, u64)> {
+    detail["examples"]
+        .as_array()?
+        .iter()
+        .filter(|e| e["ts_ns"].as_i64().unwrap_or(0) > after_ns)
+        .filter_map(|e| {
+            Some((
+                e["story_id"].as_str()?.to_string(),
+                e["duration_ns"].as_u64()?,
+            ))
+        })
+        .filter(|(_, d)| *d >= min_ns)
+        .max_by_key(|(_, d)| *d)
+}
+
+/// Polls story groups matching `filter` until one satisfying `pred` has an example story after
+/// `after_ns` lasting at least `min_ns`. A group's sample story is only its latest, which can be
+/// a spontaneous short one, so the examples are checked instead. Returns the group, that story's
+/// id and the wait.
+pub async fn wait_for_slow_story(
+    api: &Api,
+    filter: &str,
+    after_ns: i64,
+    min_ns: u64,
+    timeout: Duration,
+    pred: impl Fn(&Value) -> bool,
+) -> anyhow::Result<(Value, String, Duration)> {
+    let start = Instant::now();
+    let mut last_seen: Vec<String> = Vec::new();
+    let mut last_err: Option<String> = None;
+    while start.elapsed() < timeout {
+        let since = since_flip(after_ns);
+        match api.groups(&format!("since={since}&{filter}")).await {
+            Ok(groups) => {
+                last_seen = describe_groups(&groups);
+                for g in groups
+                    .into_iter()
+                    .filter(|g| g["last_seen_ns"].as_i64().unwrap_or(0) > after_ns && pred(g))
+                {
+                    let fp = g["fingerprint"].as_str().unwrap_or_default().to_string();
+                    match api.group_detail(&fp, &since).await {
+                        Ok(d) => {
+                            if let Some((id, _)) = slow_example_after(&d, after_ns, min_ns) {
+                                return Ok((g, id, start.elapsed()));
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[e2e] poll error (continuing): {e}");
+                            last_err = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[e2e] poll error (continuing): {e}");
+                last_err = Some(e.to_string());
+            }
+        }
+        tokio::time::sleep(POLL_EVERY).await;
+    }
+    anyhow::bail!(
+        "no story lasting >= {min_ns} ns in a matching group within {timeout:?} (last poll error: {last_err:?}); last groups seen:\n{}",
+        last_seen.join("\n")
+    )
+}
+
+fn describe_groups(groups: &[Value]) -> Vec<String> {
+    groups
+        .iter()
+        .map(|g| {
+            format!(
+                "{} | {} | stories={}",
+                g["rc_service"],
+                g["summary"],
+                story_count(g)
+            )
+        })
+        .collect()
 }
 
 /// Polls log alerts matching `query` until one with `last_at_ns > after_ns` satisfies `pred`.
@@ -272,6 +407,34 @@ pub async fn wait_for_service_warmup(
     }
 }
 
+/// Fails fast when no checkout endpoint can flag a `delay_s` trace as slow: the assembler needs
+/// ≥ 50 baseline traces and a duration above max(1.5 × p99, p99 + 100 ms) over the last 60 min.
+pub async fn ensure_checkout_baseline_detects(
+    clickhouse: &str,
+    delay_s: f64,
+) -> anyhow::Result<()> {
+    let sql = format!(
+        "SELECT endpoint_name, count() AS n, quantile(0.99)(duration_ns) / 1e9 AS p99, \
+         n >= 50 AND {delay_s} > greatest(p99 * 1.5, p99 + 0.1) AS ok FROM tayga.trace_summaries FINAL \
+         WHERE ts > now() - INTERVAL 60 MINUTE AND is_error = 0 AND endpoint_service = 'load-generator' \
+         AND endpoint_name LIKE 'user_checkout%' AND trace_id NOT IN (SELECT trace_id FROM \
+         tayga.error_stories WHERE kind = 'slow' AND ts > now() - INTERVAL 70 MINUTE) \
+         GROUP BY endpoint_name FORMAT TSVWithNames"
+    );
+    let res = reqwest::Client::new()
+        .post(clickhouse)
+        .body(sql)
+        .send()
+        .await?;
+    let rows = res.error_for_status()?.text().await?;
+    anyhow::ensure!(
+        rows.lines().any(|l| l.ends_with("\t1")),
+        "checkout baselines cannot flag a {delay_s} s trace as slow (degraded stack, or recent \
+         slowdown runs in the last 60 min):\n{rows}"
+    );
+    Ok(())
+}
+
 pub fn report(name: &str, waited: Duration) {
     let verdict = if waited <= TARGET_LATENCY {
         "within"
@@ -305,5 +468,48 @@ mod tests {
         assert!(has_template_older_than(&[at(1), at(15)], now, warmup));
         assert!(!has_template_older_than(&[at(1), at(14)], now, warmup));
         assert!(!has_template_older_than(&[], now, warmup));
+    }
+
+    fn group(fp: &str, stories: u64, last_seen_ns: i64, summary: &str) -> Value {
+        serde_json::json!({
+            "fingerprint": fp, "stories": stories,
+            "last_seen_ns": last_seen_ns, "summary": summary
+        })
+    }
+
+    #[test]
+    fn sums_split_groups_and_returns_the_largest() {
+        let groups = [
+            group("1", 2, 100, "checkout could not reach A"),
+            group("2", 3, 100, "checkout could not reach A"),
+            group("3", 9, 100, "unrelated"),
+            group("4", 7, 50, "checkout could not reach A"), // before the flip
+        ];
+        let (sum, top) = sum_matching_groups(&groups, 60, |g| {
+            g["summary"].as_str().unwrap().contains("reach")
+        })
+        .unwrap();
+        assert_eq!(sum, 5);
+        assert_eq!(top["fingerprint"], "2");
+    }
+
+    #[test]
+    fn sum_is_none_without_a_match() {
+        let groups = [group("1", 2, 10, "x")];
+        assert!(sum_matching_groups(&groups, 60, |_| true).is_none());
+        assert!(sum_matching_groups(&[], 0, |_| true).is_none());
+    }
+
+    #[test]
+    fn slow_example_must_be_after_the_flip_and_long_enough() {
+        let detail = serde_json::json!({ "examples": [
+            { "story_id": "latest", "ts_ns": 300, "duration_ns": 579_000_000_u64 },
+            { "story_id": "slow", "ts_ns": 200, "duration_ns": 5_100_000_000_u64 },
+            { "story_id": "old", "ts_ns": 10, "duration_ns": 9_000_000_000_u64 },
+        ]});
+        let (id, d) = slow_example_after(&detail, 100, 4_500_000_000).unwrap();
+        assert_eq!((id.as_str(), d), ("slow", 5_100_000_000));
+        assert!(slow_example_after(&detail, 250, 4_500_000_000).is_none());
+        assert!(slow_example_after(&serde_json::json!({}), 0, 1).is_none());
     }
 }

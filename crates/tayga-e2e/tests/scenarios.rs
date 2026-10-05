@@ -57,7 +57,8 @@ async fn payment_unreachable_blames_checkout_client() -> anyhow::Result<()> {
     let api = Api::new(API);
     let flipped = now_ns();
     let _flag = FlagGuard::set("paymentUnreachable", "on")?;
-    let (g, waited) = wait_for_group(
+    // The stories split across one group per checkout endpoint, so the count is summed.
+    let (g, waited) = wait_for_group_sum(
         &api,
         "kind=error&service=checkout",
         flipped,
@@ -97,29 +98,29 @@ scenario!(
 );
 
 /// The flag only delays international orders, which are rare in the load generator's traffic,
-/// so this waits up to `SHIPPING_TIMEOUT` (600 s) rather than `SCENARIO_TIMEOUT`. The sample
-/// story must carry the injected 5 s delay, which rules out a spontaneous shipping slow story.
+/// so this waits up to `SHIPPING_TIMEOUT` (600 s) rather than `SCENARIO_TIMEOUT`. The group's
+/// sample story is its latest, which may be a spontaneous sub-second one, so the wait runs until
+/// an example story after the flip carries the injected 5 s delay.
 #[tokio::test]
 #[ignore = "end-to-end: requires `make up`"]
 async fn shipping_slowdown_produces_slow_story_blaming_shipping() -> anyhow::Result<()> {
+    ensure_checkout_baseline_detects("http://localhost:18123", 5.0).await?;
     let api = Api::new(API);
     let flipped = now_ns();
     let _flag = FlagGuard::set("intlShippingSlowdown", "5sec")?;
-    let (g, waited) = wait_for_group(
+    let (g, story_id, waited) = wait_for_slow_story(
         &api,
         "kind=slow&service=shipping",
         flipped,
-        1,
+        4_500_000_000,
         SHIPPING_TIMEOUT,
         |g| s(g, "rc_service") == "shipping",
     )
     .await?;
     report("intlShippingSlowdown", waited);
-    let story = api.story(&s(&g, "sample_story_id")).await?;
-    let duration_ns = story["duration_ns"].as_u64().unwrap_or(0);
-    assert!(
-        duration_ns >= 4_500_000_000,
-        "sample story lasted {duration_ns} ns; the flag adds 5 s"
+    println!(
+        "[e2e] intlShippingSlowdown: delayed story {story_id} in group {}",
+        s(&g, "fingerprint")
     );
     Ok(())
 }

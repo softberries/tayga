@@ -1,0 +1,54 @@
+import { TriangleAlert } from 'lucide-react'
+import type { ReactNode } from 'react'
+import { isApiError } from '../../api/client'
+import { cx } from '../../lib/cx'
+import { Button } from './Button'
+import { ExpiredRangeReset, isExpiredRange } from './ExpiredRangeReset'
+
+export interface ErrorStateProps {
+  error: unknown
+  title?: ReactNode
+  onRetry?: () => void
+  className?: string
+}
+
+/** The title for the API's 400 on a custom range older than its data retention. */
+export const EXPIRED_TITLE = 'This range is older than the 7-day data retention'
+
+function describe(error: unknown): { status?: number; message: string } {
+  if (isApiError(error)) return { status: error.status, message: error.message }
+  if (error instanceof Error) return { message: error.message }
+  return { message: 'Something went wrong.' }
+}
+
+function defaultTitle(status?: number): string {
+  if (status === 503) return 'Storage is unavailable'
+  if (status === 404) return 'Not found'
+  if (status === 400) return 'The request was not valid'
+  if (status === 0) return 'Cannot reach the Tayga API'
+  return 'Something went wrong'
+}
+
+export function ErrorState({ error, title, onRetry, className }: ErrorStateProps) {
+  const { status, message } = describe(error)
+  return (
+    <div role="alert" className={cx('flex flex-col items-center justify-center gap-2 px-6 py-10 text-center', className)}>
+      <div aria-hidden className="mb-1 flex size-10 items-center justify-center rounded-field bg-err-soft text-err">
+        <TriangleAlert size={18} />
+      </div>
+      <p className="m-0 text-[14px] font-medium text-ink">{isExpiredRange(error) ? EXPIRED_TITLE : (title ?? defaultTitle(status))}</p>
+      <p className="m-0 max-w-[60ch] break-words font-mono text-xs text-muted">
+        {status ? `${status} · ` : ''}
+        {message}
+      </p>
+      <div className="mt-2 flex flex-wrap justify-center gap-2 empty:hidden">
+        <ExpiredRangeReset error={error} />
+        {onRetry ? (
+          <Button size="sm" onClick={onRetry}>
+            Try again
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  )
+}

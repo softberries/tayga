@@ -4,16 +4,24 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Embed ui/dist into the binary. Off: the app serves the built-in placeholder.
+default = ["embed-ui"]
+embed-ui = ["dep:rust-embed"]
+
 [dependencies]
 anyhow.workspace = true
-askama.workspace = true
-askama_web.workspace = true
 axum.workspace = true
 clickhouse.workspace = true
+futures.workspace = true
 prometheus-client.workspace = true
+rdkafka.workspace = true
+reqwest.workspace = true
+rust-embed = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 tayga-common.workspace = true
+tayga-kafka.workspace = true
 tayga-store.workspace = true
 tokio.workspace = true
 tracing.workspace = true

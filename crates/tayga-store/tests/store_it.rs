@@ -48,7 +48,7 @@ fn span(id: &str) -> SpanRow {
 #[ignore = "requires ClickHouse: make it"]
 async fn migrate_is_idempotent_and_rows_roundtrip() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5]);
     assert!(migrate(&s).await.unwrap().is_empty());
 
     let store = Store::new(&s);
@@ -150,7 +150,7 @@ fn story_row(id: &str) -> StoryRow {
 #[ignore = "requires ClickHouse: run against the live stack"]
 async fn analysis_tables_roundtrip_and_baseline_queries() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5]);
     let store = Store::new(&s);
 
     let mut summaries: Vec<TraceSummaryRow> = (0..60).map(|i| summary_row(i, i % 2 == 0)).collect();
@@ -221,7 +221,7 @@ async fn analysis_tables_roundtrip_and_baseline_queries() {
 #[ignore = "requires ClickHouse: run against the live stack"]
 async fn replayed_trace_collapses_to_most_complete_row() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5]);
     let store = Store::new(&s);
 
     let full = TraceSummaryRow {
@@ -294,7 +294,7 @@ async fn replayed_trace_collapses_to_most_complete_row() {
 #[ignore = "requires ClickHouse: make it"]
 async fn slow_story_traces_are_excluded_from_baselines() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5]);
     let store = Store::new(&s);
 
     let summaries: Vec<TraceSummaryRow> = (0..60).map(|i| summary_row(i, i % 2 == 0)).collect();
@@ -594,5 +594,229 @@ async fn example_traces_are_distinct_newest_first_and_skip_empty() {
         vec!["ta".to_string(), "tb".to_string()]
     );
     assert_eq!(store.example_traces(1, 60, 1).await.unwrap().len(), 1);
+    drop_db(&s, &store).await;
+}
+
+use tayga_store::metrics_store::{MetricPointRow, MetricSampleRow};
+
+fn sample(
+    ts: i64,
+    job: &str,
+    metric: &str,
+    labels: &[(&str, &str)],
+    value: f64,
+) -> MetricSampleRow {
+    MetricSampleRow {
+        ts,
+        job: job.into(),
+        metric: metric.into(),
+        labels: labels
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect(),
+        value,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn metric_samples_roundtrip_through_metric_buckets() {
+    let (s, store) = log_store().await;
+    let now_ms = now_ns() / 1_000_000;
+    // One-second buckets: each sample below is its own point, at its second's start.
+    let sec = |ms: i64| ms / 1000 * 1000;
+    let m = "tayga_writer_rows_inserted_total";
+    let le = "tayga_writer_batch_seconds_bucket";
+    store
+        .insert_metric_samples(&[
+            sample(
+                now_ms - 2_000,
+                "tayga-writer",
+                m,
+                &[("kind", "spans")],
+                10.0,
+            ),
+            sample(
+                now_ms - 1_000,
+                "tayga-writer",
+                m,
+                &[("kind", "spans")],
+                25.0,
+            ),
+            sample(now_ms - 1_000, "other-job", m, &[("kind", "spans")], 7.0),
+            // Outside a 60 s window.
+            sample(
+                now_ms - 3_600_000,
+                "tayga-writer",
+                m,
+                &[("kind", "spans")],
+                1.0,
+            ),
+            sample(now_ms - 1_000, "tayga-writer", "up", &[], 1.0),
+            sample(now_ms - 2_000, "tayga-writer", le, &[("le", "+Inf")], 4.0),
+            // A non-finite value is stored but never read back as a point.
+            sample(
+                now_ms - 1_000,
+                "tayga-writer",
+                le,
+                &[("le", "+Inf")],
+                f64::INFINITY,
+            ),
+        ])
+        .await
+        .unwrap();
+
+    // Windows ending just after now, `secs` long.
+    let end = now_ms / 1000 + 1;
+    let last = |secs: i64| (end - secs, end);
+    let writer = store
+        .metric_buckets(Some("tayga-writer"), m, &[], last(60), 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        writer,
+        vec![
+            MetricPointRow {
+                ts_ms: sec(now_ms - 2_000),
+                job: "tayga-writer".into(),
+                labels: vec![("kind".into(), "spans".into())],
+                value: 10.0,
+            },
+            MetricPointRow {
+                ts_ms: sec(now_ms - 1_000),
+                job: "tayga-writer".into(),
+                labels: vec![("kind".into(), "spans".into())],
+                value: 25.0,
+            },
+        ]
+    );
+
+    let all = store
+        .metric_buckets(None, m, &[], last(60), 1)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 3, "both jobs, old sample excluded: {all:?}");
+    assert!(all.iter().any(|p| p.job == "other-job"));
+
+    let wide = store
+        .metric_buckets(Some("tayga-writer"), m, &[], last(7_200), 1)
+        .await
+        .unwrap();
+    assert_eq!(wide.len(), 3);
+
+    let inf = store
+        .metric_buckets(None, le, &[], last(60), 1)
+        .await
+        .unwrap();
+    assert_eq!(inf.len(), 1, "the infinite sample is dropped: {inf:?}");
+    assert_eq!(inf[0].value, 4.0);
+    assert_eq!(inf[0].labels, vec![("le".to_string(), "+Inf".to_string())]);
+
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn metric_buckets_keep_the_last_value_per_series_and_step() {
+    let (s, store) = log_store().await;
+    let step = 60_i64;
+    // The start of a bucket comfortably inside the window, so the points below share it.
+    let now_ms = now_ns() / 1_000_000;
+    let b0 = (now_ms / 1000 - 300) / step * step * 1000;
+    let b1 = b0 + step * 1000;
+    let m = "tayga_writer_rows_inserted_total";
+    let spans = [("kind", "spans")];
+    let logs = [("kind", "logs")];
+    store
+        .insert_metric_samples(&[
+            // Bucket 0: the later sample (15) wins; NaN never wins.
+            sample(b0 + 1_000, "tayga-writer", m, &spans, 10.0),
+            sample(b0 + 30_000, "tayga-writer", m, &spans, 15.0),
+            sample(b0 + 45_000, "tayga-writer", m, &spans, f64::NAN),
+            sample(b0 + 2_000, "tayga-writer", m, &logs, 100.0),
+            // Bucket 1: exactly at its start, then later (the later one wins).
+            sample(b1, "tayga-writer", m, &spans, 33.0),
+            sample(b1 + 5_000, "tayga-writer", m, &spans, 40.0),
+            sample(b1 + 5_000, "other-job", m, &spans, 7.0),
+            // Outside a 30 min window.
+            sample(now_ms - 7_200_000, "tayga-writer", m, &spans, 1.0),
+        ])
+        .await
+        .unwrap();
+
+    // A 30 min window ending after now; its start is 7 s past a minute, and the buckets still
+    // lie on the epoch grid.
+    let end = b0 / 1000 + 6 * step + 7;
+    let w30 = (end - 1800, end);
+    let all = store
+        .metric_buckets(Some("tayga-writer"), m, &[], w30, 60)
+        .await
+        .unwrap();
+    let pt = |ts_ms, labels: &[(&str, &str)], value| MetricPointRow {
+        ts_ms,
+        job: "tayga-writer".into(),
+        labels: labels
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect(),
+        value,
+    };
+    let mut got = all.clone();
+    got.sort_by(|a, b| (a.ts_ms, &a.labels).cmp(&(b.ts_ms, &b.labels)));
+    assert_eq!(
+        got,
+        vec![
+            pt(b0, &logs, 100.0),
+            pt(b0, &spans, 15.0),
+            pt(b1, &spans, 40.0)
+        ]
+    );
+    assert!(
+        all.windows(2).all(|w| w[0].ts_ms <= w[1].ts_ms),
+        "oldest first"
+    );
+
+    let filtered = store
+        .metric_buckets(None, m, &[("kind".into(), "spans".into())], w30, 60)
+        .await
+        .unwrap();
+    assert_eq!(filtered.len(), 3, "both jobs, spans only: {filtered:?}");
+    assert!(filtered.iter().any(|p| p.job == "other-job"));
+    // A label value with a quote is bound, not interpolated.
+    assert!(
+        store
+            .metric_buckets(None, m, &[("kind".into(), "' OR 1=1 --".into())], w30, 60)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let wide_start = end - 3 * 3600;
+    let wide = store
+        .metric_buckets(Some("tayga-writer"), m, &[], (wide_start, end), 3600)
+        .await
+        .unwrap();
+    assert!(
+        wide.iter().any(|p| p.value == 1.0),
+        "the 2h-old sample is in a 3h window"
+    );
+    assert!(
+        wide.iter().all(|p| p.ts_ms % 3_600_000 == 0),
+        "buckets lie on the epoch grid"
+    );
+    // A window in the past that ends exactly at `b1`: the sample at `b1` is outside it (the end
+    // is exclusive), and every point lies in bucket 0 although the window starts mid-minute.
+    let past_end = b0 / 1000 + step;
+    let past = store
+        .metric_buckets(Some("tayga-writer"), m, &[], (past_end - 90, past_end), 60)
+        .await
+        .unwrap();
+    let mut got = past.clone();
+    got.sort_by(|a, b| (a.ts_ms, &a.labels).cmp(&(b.ts_ms, &b.labels)));
+    assert_eq!(
+        got,
+        vec![pt(b0, &logs, 100.0), pt(b0, &spans, 15.0),],
+        "only samples before the window's end, in epoch-aligned buckets"
+    );
+
     drop_db(&s, &store).await;
 }
