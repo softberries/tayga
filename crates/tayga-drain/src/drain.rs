@@ -98,6 +98,17 @@ fn similarity(template: &[String], tokens: &[String], keep_http_status: bool) ->
     Some(same as f64 / tokens.len() as f64)
 }
 
+/// Similarity before status protection: the template's `<*>` matches anything, every other
+/// position must be equal.
+fn pre_epoch_similarity(template: &[String], tokens: &[String]) -> f64 {
+    let same = template
+        .iter()
+        .zip(tokens)
+        .filter(|(t, m)| t == m || *t == WILDCARD)
+        .count();
+    same as f64 / tokens.len().max(1) as f64
+}
+
 fn truncate_utf8(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
@@ -247,6 +258,49 @@ impl Drain {
             created,
             overflow,
         }
+    }
+
+    /// True when `template_tokens` (a template of `service` that contains kept status codes) would
+    /// have matched a template that existed before the masking epoch under the pre-epoch rules:
+    /// with every protected token read as `<*>`, some template of the same service and length with
+    /// `first_seen < epoch_start_ns` shares its routing tokens (the first `depth - 2`, as in the
+    /// tree) and has the pre-fix similarity (its `<*>` matching anything, plain equality otherwise)
+    /// of at least `sim_threshold`. Such a template is not new behaviour, only a status now split
+    /// out of an old `<*>` template (final review I1).
+    ///
+    /// False with no epoch (`epoch_start_ns <= 0`), without `keep_http_status`, and for a template
+    /// with no protected token, so other templates are judged exactly as before. Scans the
+    /// service's clusters instead of walking the tree (the max-children `<*>` branch is not
+    /// modelled); it runs only for `new` candidates, which are rare.
+    pub fn would_have_matched_pre_epoch(
+        &self,
+        service: &str,
+        template_tokens: &[String],
+        epoch_start_ns: i64,
+    ) -> bool {
+        let keep = self.cfg.keep_http_status;
+        if epoch_start_ns <= 0 || !template_tokens.iter().any(|t| is_protected(t, keep)) {
+            return false;
+        }
+        let old: Vec<String> = template_tokens
+            .iter()
+            .map(|t| {
+                if is_protected(t, keep) {
+                    WILDCARD.to_string()
+                } else {
+                    t.clone()
+                }
+            })
+            .collect();
+        let route = self.cfg.depth.saturating_sub(2).min(old.len());
+        self.clusters.iter().any(|c| {
+            c.service == service
+                && c.first_seen_ns < epoch_start_ns
+                && c.tokens.len() == old.len()
+                && c.tokens.first().is_none_or(|t| t != OVERFLOW)
+                && c.tokens[..route] == old[..route]
+                && pre_epoch_similarity(&c.tokens, &old) >= self.cfg.sim_threshold
+        })
     }
 
     /// Re-inserts a persisted cluster (id and template unchanged). Not marked dirty.
@@ -571,6 +625,112 @@ mod tests {
             assert_eq!((a.created, a.template_id), (false, id), "{line}");
         }
         assert!(r.add("svc", "HTTP/1.1 500 q", 0, 9).created);
+    }
+
+    fn old_cluster(service: &str, template: &str, first_seen_ns: i64) -> Cluster {
+        Cluster {
+            id: template_id(service, template),
+            service: service.into(),
+            tokens: template.split(' ').map(str::to_string).collect(),
+            count: 100,
+            first_seen_ns,
+            last_seen_ns: first_seen_ns,
+            max_severity: 9,
+            sample: String::new(),
+        }
+    }
+
+    fn toks(t: &str) -> Vec<String> {
+        t.split(' ').map(str::to_string).collect()
+    }
+
+    #[test]
+    fn a_status_split_out_of_a_pre_epoch_wildcard_template_would_have_matched() {
+        const EPOCH: i64 = 1_000;
+        let old = r#"<*> "GET <*> <*> <*> <*> upstream_reset_before_response_started{connection_termination} <*> <*> <*> - "-" "python""#;
+        let mut d = drain();
+        d.restore(old_cluster("fp", old, EPOCH - 1));
+        let line = r#"[2026-10-05T18:49:39.000Z] "GET /api/cart HTTP/1.1" 503 UC upstream_reset_before_response_started{connection_termination} 0 95 2 - "-" "python""#;
+        let a = d.add("fp", line, EPOCH + 10, 9);
+        assert!(
+            a.created,
+            "the 503 is protected, so the old template does not absorb it"
+        );
+        let new = d.cluster(a.template_id).unwrap().tokens.clone();
+        assert!(new.contains(&"503".to_string()), "{new:?}");
+        assert!(d.would_have_matched_pre_epoch("fp", &new, EPOCH));
+        // The old template must predate the epoch, belong to the service and have the length.
+        assert!(!d.would_have_matched_pre_epoch("fp", &new, EPOCH - 1));
+        assert!(!d.would_have_matched_pre_epoch("other", &new, EPOCH));
+        assert!(!d.would_have_matched_pre_epoch("fp", &new, 0), "no epoch");
+    }
+
+    #[test]
+    fn a_genuinely_new_shape_with_a_status_would_not_have_matched() {
+        const EPOCH: i64 = 1_000;
+        let mut d = drain();
+        d.restore(old_cluster(
+            "fp",
+            r#"<*> "GET <*> <*> <*> <*> <*> <*> <*> - "-" "python""#,
+            EPOCH - 1,
+        ));
+        d.restore(old_cluster(
+            "fp",
+            "connection pool exhausted after <*>",
+            EPOCH - 1,
+        ));
+        // Another length than any pre-epoch template.
+        let a = d.add(
+            "fp",
+            r#"[t] "PUT /admin/reload HTTP/2" 418 teapot brewed coffee instead of tea x y z"#,
+            EPOCH + 10,
+            9,
+        );
+        let new = d.cluster(a.template_id).unwrap().tokens.clone();
+        assert!(new.contains(&"418".to_string()), "{new:?}");
+        assert!(!d.would_have_matched_pre_epoch("fp", &new, EPOCH));
+        // The same length, and similar enough by wildcards, but another routing token ("PUT):
+        // the old tree would have sent it to another leaf.
+        let b = d.add(
+            "fp",
+            r#"[t] "PUT /admin/reload HTTP/2" 418 teapot brewed coffee instead of tea x"#,
+            EPOCH + 20,
+            9,
+        );
+        let new = d.cluster(b.template_id).unwrap().tokens.clone();
+        assert_eq!(new.len(), 12);
+        assert!(new.contains(&"418".to_string()), "{new:?}");
+        assert!(!d.would_have_matched_pre_epoch("fp", &new, EPOCH));
+        // Same routing and length, too few equal positions.
+        d.restore(old_cluster(
+            "fp",
+            "<*> \"PUT a b c d e f g h i j",
+            EPOCH - 1,
+        ));
+        assert!(!d.would_have_matched_pre_epoch("fp", &new, EPOCH));
+    }
+
+    #[test]
+    fn templates_without_a_protected_token_are_never_suppressed() {
+        const EPOCH: i64 = 1_000;
+        let mut d = drain();
+        d.restore(old_cluster(
+            "svc",
+            "Payment failed for order <*>",
+            EPOCH - 1,
+        ));
+        // Even an exact pre-epoch match does not count: only status splits are suppressed.
+        assert!(!d.would_have_matched_pre_epoch(
+            "svc",
+            &toks("Payment failed for order <*>"),
+            EPOCH
+        ));
+        let mut off = with_status(false);
+        off.restore(old_cluster("fp", "<*> <*> x", EPOCH - 1));
+        assert!(
+            !off.would_have_matched_pre_epoch("fp", &toks("<*> 503 x"), EPOCH),
+            "without keep_http_status nothing is protected"
+        );
     }
 
     const CORPUS: &[&str] = &[

@@ -18,7 +18,7 @@ use tayga_drain::detect::{
 use tayga_drain::drain::DrainConfig;
 use tayga_drain::preprocess::masking_version;
 use tayga_kafka::KafkaSettings;
-use tayga_logminer::metrics::{LogminerMetrics, ReasonLabel};
+use tayga_logminer::metrics::{LogminerMetrics, PRE_EPOCH_MATCH, ReasonLabel};
 use tayga_logminer::miner::{Miner, alert_from_row, alert_json, alert_row};
 use tayga_model::envelope::{Envelope, HEADER_KIND, Kind};
 use tayga_store::ClickHouseSettings;
@@ -387,7 +387,7 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
             }
             let mut detect_stop = stop_rx.clone();
             tokio::select! {
-                _ = detect(&store, &producer, cfg, &detect_cfg, &mut tracker, &mut clock, &metrics) => {}
+                _ = detect(&store, &producer, cfg, &miner, &mut tracker, &mut clock, &metrics) => {}
                 _ = detect_stop.wait_for(|stop| *stop) => break,
             }
         }
@@ -747,14 +747,15 @@ async fn detect(
     store: &Store,
     producer: &FutureProducer,
     cfg: &LogminerSettings,
-    detect_cfg: &DetectConfig,
+    miner: &Miner,
     tracker: &mut SpikeTracker,
     clock: &mut NewTemplateClock,
     metrics: &LogminerMetrics,
 ) {
     let started = Instant::now();
     let now = now_ns();
-    match find_alerts(store, detect_cfg, tracker, clock, now, metrics).await {
+    let detect_cfg = &cfg.detect();
+    match find_alerts(store, detect_cfg, miner, tracker, clock, now, metrics).await {
         Ok((alerts, data_now)) => {
             if publish_alerts(store, producer, &cfg.alerts_topic, &alerts, now, metrics).await {
                 clock.watermark = clock.watermark.max(data_now);
@@ -816,6 +817,7 @@ fn minutes_covering(first_seen_ns: i64, now_ns: i64, floor_min: u32) -> u32 {
 async fn find_alerts(
     store: &Store,
     cfg: &DetectConfig,
+    miner: &Miner,
     tracker: &mut SpikeTracker,
     clock: &NewTemplateClock,
     now: i64,
@@ -912,7 +914,9 @@ async fn find_alerts(
             first_seen_ns: r.first_seen_ns,
             service_oldest_ns: r.service_oldest_ns,
         };
-        if !is_new(cfg, &c, since, clock.epoch_start) {
+        if !is_new(cfg, &c, since, clock.epoch_start)
+            || suppressed_pre_epoch(miner, &c, clock.epoch_start, metrics)
+        {
             continue;
         }
         let window = minutes_covering(c.first_seen_ns, now, cfg.new_template_recent_min);
@@ -920,6 +924,31 @@ async fn find_alerts(
         out.push((new_alert(&c, examples, now), true));
     }
     Ok((out, data_now))
+}
+
+/// A `new` candidate whose kept status code merely split it out of a template that existed before
+/// the masking epoch is not new behaviour: no alert, counted as `pre_epoch_match` (final review
+/// I1). Only templates with a protected token can match; others are never suppressed.
+fn suppressed_pre_epoch(
+    miner: &Miner,
+    c: &NewCandidate,
+    epoch_start: i64,
+    metrics: &LogminerMetrics,
+) -> bool {
+    let hit = miner.would_have_matched_pre_epoch(&c.service, &c.template, epoch_start);
+    if hit {
+        metrics
+            .new_suppressed
+            .get_or_create(&ReasonLabel::new(PRE_EPOCH_MATCH))
+            .inc();
+        tracing::info!(
+            template_id = c.template_id,
+            service = %c.service,
+            template = %c.template,
+            "new template matches a pre-epoch template under the old masking: no alert"
+        );
+    }
+    hit
 }
 
 /// A failed comparator lookup must not drop the tick's alerts: log it, count it and judge by the
@@ -999,6 +1028,7 @@ async fn publish_alerts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tayga_store::logs::LogTemplateRow;
 
     #[test]
     fn settings_default_when_section_missing() {
@@ -1063,6 +1093,83 @@ mod tests {
         assert_eq!(
             startup_epoch(Some(2), Some(7), keep, now, true),
             (now, true)
+        );
+    }
+
+    fn template_row(id: u64, service: &str, template: &str, first_seen: i64) -> LogTemplateRow {
+        LogTemplateRow {
+            template_id: id,
+            service: service.into(),
+            template: template.into(),
+            first_seen,
+            last_seen: first_seen,
+            count: 13,
+            max_severity: 9,
+            sample: String::new(),
+            version: 1,
+        }
+    }
+
+    fn candidate(id: u64, service: &str, template: &str, first_seen_ns: i64) -> NewCandidate {
+        NewCandidate {
+            template_id: id,
+            service: service.into(),
+            template: template.into(),
+            first_seen_ns,
+            service_oldest_ns: 0,
+        }
+    }
+
+    #[test]
+    fn new_alerts_for_status_splits_of_pre_epoch_templates_are_suppressed() {
+        let epoch = 100 * MIN_NS;
+        let cfg = DetectConfig::default();
+        let after = epoch + 30 * MIN_NS; // past the epoch warmup
+        let since = after - MIN_NS;
+        let mut miner = Miner::new(DrainConfig::default());
+        miner.restore(vec![
+            template_row(
+                1,
+                "frontend-proxy",
+                r#"<*> "GET <*> <*> <*> <*> upstream_reset_before_response_started{connection_termination} <*> <*> <*> <*> <*> <*> <*> <*> <*> <*>"#,
+                epoch - 2 * 86_400 * 1_000_000_000,
+            ),
+            template_row(2, "payment", "Payment failed for order <*>", epoch - MIN_NS),
+        ]);
+        let m = LogminerMetrics::default();
+        let suppressed = |c: &NewCandidate| {
+            is_new(&cfg, c, since, epoch) && suppressed_pre_epoch(&miner, c, epoch, &m)
+        };
+        // The 18:49:39 alert: a `503 UC` access-log shape that existed (under `<*>`) before.
+        let split = candidate(
+            10,
+            "frontend-proxy",
+            r#"<*> "GET <*> <*> 503 UC upstream_reset_before_response_started{connection_termination} <*> <*> <*> <*> <*> <*> <*> <*> <*> <*>"#,
+            after,
+        );
+        assert!(suppressed(&split));
+        assert_eq!(
+            m.new_suppressed
+                .get_or_create(&ReasonLabel::new(PRE_EPOCH_MATCH))
+                .get(),
+            1
+        );
+        // A genuinely new shape that carries a status code still alerts.
+        let fresh = candidate(
+            11,
+            "frontend-proxy",
+            r#"<*> "DELETE <*> <*> 410 - gone"#,
+            after,
+        );
+        assert!(is_new(&cfg, &fresh, since, epoch) && !suppressed(&fresh));
+        // A non-HTTP template is judged exactly as before, even if it matches an old template.
+        let plain = candidate(12, "payment", "Payment failed for order <*>", after);
+        assert!(is_new(&cfg, &plain, since, epoch) && !suppressed(&plain));
+        assert_eq!(
+            m.new_suppressed
+                .get_or_create(&ReasonLabel::new(PRE_EPOCH_MATCH))
+                .get(),
+            1
         );
     }
 

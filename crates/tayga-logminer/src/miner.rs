@@ -56,6 +56,21 @@ impl Miner {
             .collect()
     }
 
+    /// Whether a `new` candidate `template` (a stored template string) of `service` is only a kept
+    /// status code split out of a template that existed before the masking epoch: see
+    /// [`Drain::would_have_matched_pre_epoch`]. Restored clusters carry their stored
+    /// `first_seen`, so this works across restarts.
+    pub fn would_have_matched_pre_epoch(
+        &self,
+        service: &str,
+        template: &str,
+        epoch_start_ns: i64,
+    ) -> bool {
+        let tokens: Vec<String> = template.split(' ').map(str::to_string).collect();
+        self.drain
+            .would_have_matched_pre_epoch(service, &tokens, epoch_start_ns)
+    }
+
     pub fn len(&self) -> usize {
         self.drain.len()
     }
@@ -305,6 +320,54 @@ mod tests {
         b.restore(reversed);
         let probe = log(3, "Payment failed for order 42", "t3");
         assert_eq!(a.mine(&probe).1.template_id, b.mine(&probe).1.template_id);
+    }
+
+    fn access(status: u16, flags: &str) -> String {
+        format!(
+            r#"[2026-10-05T18:49:39.000Z] "GET /api/cart HTTP/1.1" {status} {flags} upstream_reset 0 95 2 - "-" "py""#
+        )
+    }
+
+    #[test]
+    fn pre_epoch_match_survives_a_restore_and_spares_non_http_templates() {
+        const EPOCH: i64 = 10_000;
+        // Before the epoch: one `<*>`-status template (masking v1 shape), stored and restored.
+        let old_row = LogTemplateRow {
+            template_id: 1,
+            service: "payment".into(),
+            template: r#"<*> "GET <*> <*> <*> <*> upstream_reset <*> <*> <*> - "-" "py""#.into(),
+            first_seen: EPOCH - 5,
+            last_seen: EPOCH - 1,
+            count: 13,
+            max_severity: 9,
+            sample: String::new(),
+            version: 1,
+        };
+        let mut m = Miner::new(DrainConfig::default());
+        m.restore(vec![old_row]);
+        let mut l = log(1, &access(503, "UC"), "t1");
+        l.ts = EPOCH + 100;
+        let (_, a) = m.mine(&l);
+        assert!(a.created);
+        let rows = m.dirty_templates(1);
+        let new = rows
+            .iter()
+            .find(|r| r.template_id == a.template_id)
+            .unwrap();
+        assert!(new.template.contains(" 503 "), "{}", new.template);
+        assert!(m.would_have_matched_pre_epoch("payment", &new.template, EPOCH));
+
+        // A new non-HTTP template is judged as before, even with an old template of its shape.
+        let mut l = log(2, "Payment failed for order 1234", "t2");
+        l.ts = EPOCH + 200;
+        let (_, b) = m.mine(&l);
+        let rows = m.dirty_templates(2);
+        let t = &rows
+            .iter()
+            .find(|r| r.template_id == b.template_id)
+            .unwrap()
+            .template;
+        assert!(!m.would_have_matched_pre_epoch("payment", t, EPOCH));
     }
 
     #[test]

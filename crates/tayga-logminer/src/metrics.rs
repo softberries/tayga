@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicU64;
 use tayga_common::metrics::KindLabel;
 use tayga_drain::detect::AlertKind;
 
-/// `reason` label on `spike_skipped`: `coverage`.
+/// `reason` label on `spike_skipped` (`coverage`) and `new_suppressed` (`pre_epoch_match`).
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct ReasonLabel {
     pub reason: String,
@@ -21,6 +21,10 @@ impl ReasonLabel {
         }
     }
 }
+
+/// `reason` of a new-template candidate suppressed because a pre-epoch template would have
+/// matched it.
+pub const PRE_EPOCH_MATCH: &str = "pre_epoch_match";
 
 /// `kind` label on `alerts`: `new` | `spike`.
 #[derive(Clone)]
@@ -40,6 +44,8 @@ pub struct LogminerMetrics {
     pub spike_skipped: Family<ReasonLabel, Counter>,
     /// Failed seasonal comparator lookups (the tick fell back to flat).
     pub seasonal_failures: Counter,
+    /// New-template candidates not alerted, by reason.
+    pub new_suppressed: Family<ReasonLabel, Counter>,
 }
 
 impl Default for LogminerMetrics {
@@ -57,6 +63,7 @@ impl Default for LogminerMetrics {
             state_save_failures: Counter::default(),
             spike_skipped: Family::default(),
             seasonal_failures: Counter::default(),
+            new_suppressed: Family::default(),
         }
     }
 }
@@ -119,7 +126,17 @@ impl LogminerMetrics {
             "Failed seasonal comparator lookups; the pass fell back to the flat rule",
             m.seasonal_failures.clone(),
         );
+        registry.register(
+            "tayga_logminer_new_suppressed",
+            "New-template candidates not alerted, by reason (pre_epoch_match: a kept status code \
+             split out of a template that existed before the masking epoch)",
+            m.new_suppressed.clone(),
+        );
         drop(m.spike_skipped.get_or_create(&ReasonLabel::new("coverage")));
+        drop(
+            m.new_suppressed
+                .get_or_create(&ReasonLabel::new(PRE_EPOCH_MATCH)),
+        );
         // Export both series at 0 so the family is visible before the first alert.
         for kind in [AlertKind::New, AlertKind::Spike] {
             drop(m.alerts.get_or_create(&KindLabel::new(kind.as_str())));
@@ -160,6 +177,7 @@ mod tests {
             "tayga_logminer_state_save_failures_total 0",
             "tayga_logminer_seasonal_failures_total 0",
             "tayga_logminer_spike_skipped_total{reason=\"coverage\"} 1",
+            "tayga_logminer_new_suppressed_total{reason=\"pre_epoch_match\"} 0",
         ] {
             assert!(out.contains(line), "missing {line:?} in\n{out}");
         }
