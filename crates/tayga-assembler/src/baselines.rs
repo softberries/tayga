@@ -92,12 +92,18 @@ pub fn build(
     out
 }
 
-/// Duration caps from the previous refresh: each endpoint's slow limit. Untrusted previous
-/// baselines cap too (the limit is just looser for a young endpoint). Endpoints without a
-/// previous baseline get none and fall back to the query's 10 x p50 bootstrap cap.
+/// Duration caps from the previous refresh: each endpoint's slow limit, from **trusted** previous
+/// baselines only. An untrusted baseline (fewer than `min_baseline_traces`, e.g. the few fast
+/// survivors left when a carry expires mid-slowdown) does not cap: capping at its old fast
+/// limit would exclude the slow majority again, keep the endpoint untrusted and never adopt the
+/// new level. Endpoints without a trusted previous baseline get no cap here and fall back to the
+/// query's 10 x p50 bootstrap cap, which still drops single outliers.
 pub fn caps_from(previous: &HashMap<Endpoint, Baseline>, t: &Thresholds) -> EndpointCaps {
     let mut caps = EndpointCaps::default();
     for (endpoint, b) in previous {
+        if !b.trusted(t) {
+            continue;
+        }
         let limit = slow_limit_ns(b, t);
         // A NaN or non-positive limit would cap everything at 0; leave it to the bootstrap.
         if !limit.is_finite() || limit <= 0.0 {
@@ -361,6 +367,52 @@ mod tests {
         b.excluded = 2;
         let r = run(vec![a, b], &HashMap::new(), &HashMap::new(), 0);
         assert_eq!(r.excluded, 12);
+    }
+
+    #[test]
+    fn caps_skip_untrusted_baselines() {
+        let t = Thresholds::default();
+        let below = t.min_baseline_traces - 1;
+        assert_eq!(
+            caps_from(&prev(below, 100_000_000.0), &t),
+            EndpointCaps::default(),
+            "an untrusted baseline leaves the endpoint to the bootstrap"
+        );
+        assert_eq!(
+            caps_from(&prev(t.min_baseline_traces, 100_000_000.0), &t)
+                .keys
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn after_a_carry_expires_with_few_kept_the_next_refresh_adopts_the_new_level() {
+        let t = Thresholds::default();
+        let fast = prev(600, 100.0);
+        let carried = HashMap::from([(ep(), 0)]);
+        // Carry expired: 30 fast survivors (0 < kept < min) become an untrusted baseline.
+        let mut few = row(600, 30, 100.0);
+        few.excluded = 570;
+        let expired = run(vec![few], &fast, &carried, 2 * WINDOW_SECS);
+        let b = &expired.baselines[&ep()];
+        assert_eq!(b.traces, 30);
+        assert!(!b.trusted(&t));
+        assert!(expired.carried.is_empty());
+        // Next refresh: no cap from the untrusted baseline, so the query's 10 x p50 bootstrap
+        // keeps the (now unstoried) slow majority and the endpoint learns the slow level.
+        assert_eq!(caps_from(&expired.baselines, &t), EndpointCaps::default());
+        let slow = row(600, 590, 5_000.0);
+        let next = run(
+            vec![slow],
+            &expired.baselines,
+            &expired.carried,
+            2 * WINDOW_SECS + 60,
+        );
+        let b = &next.baselines[&ep()];
+        assert_eq!((b.traces, b.p99_ns), (590, 5_000.0));
+        assert!(b.trusted(&t));
+        assert!(next.carried.is_empty());
     }
 
     #[test]
