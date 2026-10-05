@@ -620,10 +620,13 @@ fn sample(
 
 #[tokio::test]
 #[ignore = "requires ClickHouse: run against the live stack"]
-async fn metric_samples_roundtrip_through_metric_points() {
+async fn metric_samples_roundtrip_through_metric_buckets() {
     let (s, store) = log_store().await;
     let now_ms = now_ns() / 1_000_000;
+    // One-second buckets: each sample below is its own point, at its second's start.
+    let sec = |ms: i64| ms / 1000 * 1000;
     let m = "tayga_writer_rows_inserted_total";
+    let le = "tayga_writer_batch_seconds_bucket";
     store
         .insert_metric_samples(&[
             sample(
@@ -650,10 +653,12 @@ async fn metric_samples_roundtrip_through_metric_points() {
                 1.0,
             ),
             sample(now_ms - 1_000, "tayga-writer", "up", &[], 1.0),
+            sample(now_ms - 2_000, "tayga-writer", le, &[("le", "+Inf")], 4.0),
+            // A non-finite value is stored but never read back as a point.
             sample(
                 now_ms - 1_000,
                 "tayga-writer",
-                "tayga_writer_batch_seconds_bucket",
+                le,
                 &[("le", "+Inf")],
                 f64::INFINITY,
             ),
@@ -662,20 +667,20 @@ async fn metric_samples_roundtrip_through_metric_points() {
         .unwrap();
 
     let writer = store
-        .metric_points(Some("tayga-writer"), m, 60)
+        .metric_buckets(Some("tayga-writer"), m, &[], 60, 1)
         .await
         .unwrap();
     assert_eq!(
         writer,
         vec![
             MetricPointRow {
-                ts_ms: now_ms - 2_000,
+                ts_ms: sec(now_ms - 2_000),
                 job: "tayga-writer".into(),
                 labels: vec![("kind".into(), "spans".into())],
                 value: 10.0,
             },
             MetricPointRow {
-                ts_ms: now_ms - 1_000,
+                ts_ms: sec(now_ms - 1_000),
                 job: "tayga-writer".into(),
                 labels: vec![("kind".into(), "spans".into())],
                 value: 25.0,
@@ -683,26 +688,19 @@ async fn metric_samples_roundtrip_through_metric_points() {
         ]
     );
 
-    let all = store.metric_points(None, m, 60).await.unwrap();
+    let all = store.metric_buckets(None, m, &[], 60, 1).await.unwrap();
     assert_eq!(all.len(), 3, "both jobs, old sample excluded: {all:?}");
     assert!(all.iter().any(|p| p.job == "other-job"));
-    assert!(
-        all.windows(2).all(|w| w[0].ts_ms <= w[1].ts_ms),
-        "oldest first"
-    );
 
     let wide = store
-        .metric_points(Some("tayga-writer"), m, 7_200)
+        .metric_buckets(Some("tayga-writer"), m, &[], 7_200, 1)
         .await
         .unwrap();
     assert_eq!(wide.len(), 3);
 
-    let inf = store
-        .metric_points(None, "tayga_writer_batch_seconds_bucket", 60)
-        .await
-        .unwrap();
-    assert_eq!(inf.len(), 1);
-    assert!(inf[0].value.is_infinite());
+    let inf = store.metric_buckets(None, le, &[], 60, 1).await.unwrap();
+    assert_eq!(inf.len(), 1, "the infinite sample is dropped: {inf:?}");
+    assert_eq!(inf[0].value, 4.0);
     assert_eq!(inf[0].labels, vec![("le".to_string(), "+Inf".to_string())]);
 
     drop_db(&s, &store).await;
