@@ -242,6 +242,14 @@ describe('header', () => {
     expect(fetch.mock.calls.map(([u]) => String(u))).toContain('/api/v1/service-map?since=15m')
   })
 
+  it('names the expired range in a section banner too', async () => {
+    const expired = { status: 400, body: { error: 'the window must start within the last 7 days (data retention): until minus since is older' } }
+    stubApi({ '/traces/search': expired, '/services': { body: [] }, '/service-map': { body: serviceMap } })
+    renderApp('/traces?since=2h&until=2026-01-01T00:00:00Z')
+    const banner = (await screen.findByText('This range is older than the 7-day data retention.')).closest('[role="alert"]') as HTMLElement
+    expect(within(banner).getByRole('button', { name: 'Show last 1h' })).toBeInTheDocument()
+  })
+
   it('offers "Show last 1h" when a custom range has aged past retention', async () => {
     const user = userEvent.setup()
     stubApi({
@@ -252,6 +260,8 @@ describe('header', () => {
     })
     const { router } = renderApp('/map?since=2h&until=2026-01-01T00:00:00Z')
     const reset = await screen.findByRole('button', { name: 'Show last 1h' })
+    expect(screen.getByText('This range is older than the 7-day data retention')).toBeInTheDocument()
+    expect(screen.queryByText('The request was not valid')).toBeNull()
     // Nothing changes until it is clicked.
     expect(router.state.location.search).toEqual({ since: '2h', until: '2026-01-01T00:00:00Z' })
     await user.click(reset)

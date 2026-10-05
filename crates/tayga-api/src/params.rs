@@ -35,7 +35,8 @@ impl Window {
         bucket_secs(self.secs())
     }
 
-    /// The exclusive upper bound rows are read up to: `end`, plus `LIVE_SLACK_SECS` when live.
+    /// The exclusive upper bound of row lists: `end`, plus `LIVE_SLACK_SECS` when live. Bucketed
+    /// and aggregated reads stop at `end`, so their totals match their buckets.
     pub fn upper(&self) -> i64 {
         if self.live {
             self.end + LIVE_SLACK_SECS

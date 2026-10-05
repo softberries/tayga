@@ -1342,3 +1342,94 @@ async fn a_past_window_returns_only_the_rows_inside_it() {
         .await
         .unwrap();
 }
+
+/// A live window lists rows stamped up to 60 s ahead (a producer clock running fast), but its
+/// bucketed and aggregated reads stop at the window's end: the overview's totals equal the sums
+/// of its buckets, and spans/s divides only what the window holds.
+#[tokio::test]
+#[ignore = "requires ClickHouse: make it, or TAYGA_IT_CLICKHOUSE against the live stack"]
+async fn a_live_window_lists_rows_ahead_but_totals_stop_at_its_end() {
+    let s = settings();
+    migrate(&s).await.unwrap();
+    let store = Store::new(&s);
+    let sec = 1_000_000_000_i64;
+    let w = last(3600);
+    assert!(w.live);
+    let (inside, ahead) = ((w.end - 120) * sec, (w.end + 30) * sec);
+    let ids = [hex32(), hex32()];
+    let spans: Vec<SpanRow> = [inside, ahead]
+        .iter()
+        .zip(&ids)
+        .map(|(t, id)| {
+            let mut sp = rspan("aheadsvc", 2, *t, 5, false);
+            sp.trace_id = id.clone();
+            sp
+        })
+        .collect();
+    store.insert_rows("spans", &spans).await.unwrap();
+    let summaries: Vec<TraceSummaryRow> = [inside, ahead]
+        .iter()
+        .zip(&ids)
+        .map(|(t, id)| summary(id, *t, "aheadsvc", "GET /ahead", 5, true))
+        .collect();
+    store
+        .insert_rows("trace_summaries", &summaries)
+        .await
+        .unwrap();
+    let stories: Vec<StoryRow> = [inside, ahead]
+        .iter()
+        .zip(&ids)
+        .map(|(t, id)| story_row(id, 1, *t, "aheadsvc", "aheadsvc Charge failed: boom"))
+        .collect();
+    store.insert_rows("error_stories", &stories).await.unwrap();
+
+    let r = ChRepo::new(&s);
+    let o = r.overview(w).await.unwrap();
+    assert_eq!(
+        o.error_stories, 1,
+        "the story ahead of the end is not counted"
+    );
+    assert_eq!(
+        o.error_stories,
+        o.stories.error.iter().map(|b| b.1).sum::<u64>(),
+        "the total equals the sum of its buckets"
+    );
+    let spans_sum: f64 = o.spans.iter().map(|b| b.1 * f64::from(o.bucket_secs)).sum();
+    assert!((spans_sum - 1.0).abs() < 1e-9, "{spans_sum}");
+    assert!((o.spans_per_sec - 1.0 / 3600.0).abs() < 1e-12);
+    assert!(o.spans.iter().all(|b| i64::from(b.0) < w.end));
+    let series = r
+        .stories_series(&GroupFilter {
+            window: w,
+            kind: None,
+            service: Some("aheadsvc".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(series.error.iter().map(|b| b.1).sum::<u64>(), 1);
+    let red = r.service("aheadsvc", w).await.unwrap().expect("has spans");
+    assert_eq!(red.calls, 1);
+
+    // The trace list, though, shows the trace stamped ahead too.
+    let hits = r
+        .traces_search(&TraceFilter {
+            window: w,
+            service: Some("aheadsvc".into()),
+            touched: false,
+            endpoint: None,
+            min_ns: 0,
+            max_ns: u64::MAX,
+            errors_only: false,
+            limit: 500,
+        })
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 2, "row lists keep the 60 s slack");
+
+    Store::new(&s)
+        .client()
+        .query(&format!("DROP DATABASE `{}`", s.database))
+        .execute()
+        .await
+        .unwrap();
+}

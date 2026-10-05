@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { isApiError } from '../../api/client'
 import { cx } from '../../lib/cx'
 import { Button } from './Button'
-import { ExpiredRangeReset } from './ExpiredRangeReset'
+import { ExpiredRangeReset, isExpiredRange } from './ExpiredRangeReset'
 
 export interface ErrorStateProps {
   error: unknown
@@ -11,6 +11,9 @@ export interface ErrorStateProps {
   onRetry?: () => void
   className?: string
 }
+
+/** The title for the API's 400 on a custom range older than its data retention. */
+export const EXPIRED_TITLE = 'This range is older than the 7-day data retention'
 
 function describe(error: unknown): { status?: number; message: string } {
   if (isApiError(error)) return { status: error.status, message: error.message }
@@ -33,7 +36,7 @@ export function ErrorState({ error, title, onRetry, className }: ErrorStateProps
       <div aria-hidden className="mb-1 flex size-10 items-center justify-center rounded-field bg-err-soft text-err">
         <TriangleAlert size={18} />
       </div>
-      <p className="m-0 text-[14px] font-medium text-ink">{title ?? defaultTitle(status)}</p>
+      <p className="m-0 text-[14px] font-medium text-ink">{isExpiredRange(error) ? EXPIRED_TITLE : (title ?? defaultTitle(status))}</p>
       <p className="m-0 max-w-[60ch] break-words font-mono text-xs text-muted">
         {status ? `${status} · ` : ''}
         {message}

@@ -123,7 +123,7 @@ pub fn merge_buckets(
         .collect()
 }
 
-/// Rows in a window `[start, upper)`: binds `start`, `upper` (unix seconds, see `bind_window`).
+/// Rows in a window: binds its two bounds (unix seconds, see `bind_rows` and `bind_capped`).
 /// Half-open, so a row exactly at the end never starts a bucket past the window. `{col}` names
 /// the time column.
 fn in_window(col: &str) -> String {
@@ -137,8 +137,18 @@ fn bucket_of(col: &str) -> String {
     format!("toUInt32(toStartOfInterval({col}, toIntervalSecond(?)))")
 }
 
-fn bind_window(q: clickhouse::query::Query, w: Window) -> clickhouse::query::Query {
+/// Binds `[start, upper)` for a row list (trace search; the alerts list and recent hits bind
+/// `upper` directly): a live window also lists
+/// rows stamped up to `LIVE_SLACK_SECS` ahead, so a producer clock running ahead hides nothing.
+fn bind_rows(q: clickhouse::query::Query, w: Window) -> clickhouse::query::Query {
     q.bind(w.start).bind(w.upper())
+}
+
+/// Binds `[start, end)` for a bucketed or aggregated read: its totals then equal the sum of the
+/// buckets the UI draws (the grid ends with the bucket holding `end - 1`), and rates divide by
+/// the window's own length.
+fn bind_capped(q: clickhouse::query::Query, w: Window) -> clickhouse::query::Query {
+    q.bind(w.start).bind(w.end)
 }
 
 fn bind_bucket(q: clickhouse::query::Query, step: u32) -> clickhouse::query::Query {
@@ -202,7 +212,7 @@ impl ChRepo {
              GROUP BY bucket, kind ORDER BY bucket",
             bucket_of("ts")
         ));
-        let rows: Vec<KindBucketRow> = bind_window(bind_bucket(q, step), f.window)
+        let rows: Vec<KindBucketRow> = bind_capped(bind_bucket(q, step), f.window)
             .bind(kind)
             .bind(kind)
             .bind(service)
@@ -218,7 +228,7 @@ impl ChRepo {
         let kind = f.kind.clone().unwrap_or_default();
         let service = f.service.clone().unwrap_or_default();
         let bind = |q: clickhouse::query::Query| {
-            bind_window(q, f.window)
+            bind_capped(q, f.window)
                 .bind(kind.as_str())
                 .bind(kind.as_str())
                 .bind(service.as_str())
@@ -339,9 +349,10 @@ impl ChRepo {
     }
 }
 
-/// Template ids with an alert active at a moment: binds that moment (the window's end) twice.
+/// Template ids with an alert active at the window's end, by the alerts list's rule (`active`
+/// as of `end`, started before the list's upper bound): binds `end`, then `upper`.
 const ALERTING_AT: &str = "SELECT template_id FROM log_alerts FINAL \
-     WHERE last_at > toDateTime(?) - toIntervalMinute({ACTIVE}) AND started_at <= toDateTime(?)";
+     WHERE last_at > toDateTime(?) - toIntervalMinute({ACTIVE}) AND started_at < toDateTime(?)";
 
 /// Templates with at least one hit in the window, as a subquery so the outer aliases never
 /// shadow the filter columns. `alerting` is as of the window's end.
@@ -460,9 +471,9 @@ impl Repo for ChRepo {
             .client
             .query(&sql)
             .bind(f.window.end)
-            .bind(f.window.end)
-            .bind(f.window.start)
             .bind(f.window.upper())
+            .bind(f.window.start)
+            .bind(f.window.end)
             .bind(service)
             .bind(service)
             .bind(service)
@@ -485,7 +496,7 @@ impl Repo for ChRepo {
                 in_window("ts")
             ));
             let q = bind_bucket(q, step).bind(ids);
-            let hits: Vec<TemplateListBucketRow> = bind_window(q, f.window).fetch_all().await?;
+            let hits: Vec<TemplateListBucketRow> = bind_capped(q, f.window).fetch_all().await?;
             for h in hits {
                 by_template
                     .entry(h.template_id)
@@ -523,7 +534,7 @@ impl Repo for ChRepo {
                  FROM (SELECT * FROM log_templates FINAL WHERE template_id = toUInt64(?) LIMIT 1) AS t"
             ))
             .bind(window.end)
-            .bind(window.end)
+            .bind(window.upper())
             .bind(template_id)
             .fetch_all()
             .await?;
@@ -549,7 +560,7 @@ impl Repo for ChRepo {
             in_window("ts")
         ));
         let q = bind_bucket(q, step).bind(template_id);
-        let buckets: Vec<TemplateBucketRow> = bind_window(q, window).fetch_all().await?;
+        let buckets: Vec<TemplateBucketRow> = bind_capped(q, window).fetch_all().await?;
         // The latest hits as of the window's end, inside the window or before it.
         let hits: Vec<TemplateHitRow> = self
             .client
@@ -640,7 +651,7 @@ impl Repo for ChRepo {
              ORDER BY calls DESC LIMIT 500",
             in_window("minute")
         ));
-        let rows: Vec<EdgeRow> = bind_window(q, window).fetch_all().await?;
+        let rows: Vec<EdgeRow> = bind_capped(q, window).fetch_all().await?;
         Ok(rows.into_iter().map(EdgeView::from_row).collect())
     }
 
@@ -658,10 +669,10 @@ impl Repo for ChRepo {
             .client
             .query(&format!(
                 "SELECT count() FROM log_alerts FINAL \
-                 WHERE last_at > toDateTime(?) - toIntervalMinute({ALERT_ACTIVE_MIN}) AND started_at <= toDateTime(?)"
+                 WHERE last_at > toDateTime(?) - toIntervalMinute({ALERT_ACTIVE_MIN}) AND started_at < toDateTime(?)"
             ))
             .bind(window.end)
-            .bind(window.end)
+            .bind(window.upper())
             .fetch_one()
             .await?;
         let q = self.client.query(&format!(
@@ -669,7 +680,7 @@ impl Repo for ChRepo {
             bucket_of("start_ts"),
             in_window("start_ts")
         ));
-        let spans: Vec<CountBucketRow> = bind_window(bind_bucket(q, step), window)
+        let spans: Vec<CountBucketRow> = bind_capped(bind_bucket(q, step), window)
             .fetch_all()
             .await?;
         // The lag recorded last before the window's end, if recent enough then.
@@ -717,7 +728,7 @@ impl Repo for ChRepo {
                 SERVICE_IS_ENDPOINT
             },
         );
-        let mut q = bind_window(self.client.query(&sql), f.window);
+        let mut q = bind_rows(self.client.query(&sql), f.window);
         q = if touched {
             q.bind(service).bind(f.window.start)
         } else {
@@ -765,7 +776,7 @@ impl Repo for ChRepo {
             in_window("start_ts")
         ));
         let q = bind_bucket(q, step).bind(name);
-        let rows: Vec<ServiceBucketRow> = bind_window(q, window).fetch_all().await?;
+        let rows: Vec<ServiceBucketRow> = bind_capped(q, window).fetch_all().await?;
         Ok(ServiceView::from_rows(name, step, rows))
     }
 
@@ -790,7 +801,7 @@ impl Repo for ChRepo {
             .bind(window.start)
             .bind(baseline_start)
             .bind(window.start.min(baseline_start))
-            .bind(window.upper())
+            .bind(window.end)
             .fetch_all()
             .await?;
         Ok(ServiceMapView {
@@ -849,7 +860,7 @@ impl Repo for ChRepo {
                 q.job.as_deref(),
                 &q.metric,
                 &q.labels,
-                (q.window.start, q.window.upper()),
+                (q.window.start, q.window.end),
                 q.window.step(),
             )
             .await?)
