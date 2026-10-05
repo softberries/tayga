@@ -1048,12 +1048,22 @@ mod tests {
     #[test]
     fn startup_epoch_tracks_the_masking_version() {
         let now = 100 * MIN_NS;
-        assert_eq!(startup_epoch(None, None, 2, now, false), (0, true));
-        assert_eq!(startup_epoch(None, None, 2, now, true), (now, true));
+        let keep = masking_version(true);
+        assert_eq!(keep, 3);
+        assert_eq!(startup_epoch(None, None, keep, now, false), (0, true));
+        assert_eq!(startup_epoch(None, None, keep, now, true), (now, true));
         assert_eq!(startup_epoch(None, None, 1, now, true), (0, true));
-        assert_eq!(startup_epoch(Some(2), Some(7), 2, now, true), (7, false));
-        assert_eq!(startup_epoch(Some(2), None, 2, now, true), (0, false));
-        assert_eq!(startup_epoch(Some(1), Some(7), 2, now, true), (now, true));
+        assert_eq!(startup_epoch(Some(3), Some(7), keep, now, true), (7, false));
+        assert_eq!(startup_epoch(Some(3), None, keep, now, true), (0, false));
+        assert_eq!(
+            startup_epoch(Some(1), Some(7), keep, now, true),
+            (now, true)
+        );
+        // The retired v2 (statuses kept but generalisable) starts a new epoch too.
+        assert_eq!(
+            startup_epoch(Some(2), Some(7), keep, now, true),
+            (now, true)
+        );
     }
 
     #[test]

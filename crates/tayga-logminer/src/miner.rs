@@ -246,6 +246,50 @@ mod tests {
     }
 
     #[test]
+    fn kept_status_codes_stay_exact_across_a_restart() {
+        let line = |status: u16, path: &str| {
+            format!(
+                r#"[2026-10-05T10:00:00.000Z] "GET {path} HTTP/1.1" {status} - 0 9 1 - "-" "py""#
+            )
+        };
+        let mut m = Miner::new(DrainConfig::default());
+        let (_, ok) = m.mine(&log(1, &line(200, "/a"), "t1"));
+        let (_, err) = m.mine(&log(2, &line(503, "/a"), "t2"));
+        m.mine(&log(3, &line(503, "/b"), "t3"));
+        assert_ne!(ok.template_id, err.template_id);
+        let rows = m.dirty_templates(5);
+        assert_eq!(rows.len(), 2);
+        let err_row = rows
+            .iter()
+            .find(|r| r.template_id == err.template_id)
+            .unwrap();
+        assert!(err_row.template.contains(" 503 "), "{}", err_row.template);
+
+        // Rebuilt from the stored strings, the 503 template is still exact-match only.
+        let mut r = Miner::new(DrainConfig::default());
+        r.restore(rows);
+        let (_, a) = r.mine(&log(4, &line(503, "/c"), "t4"));
+        assert_eq!((a.created, a.template_id), (false, err.template_id));
+        let (_, a) = r.mine(&log(5, &line(200, "/c"), "t5"));
+        assert_eq!((a.created, a.template_id), (false, ok.template_id));
+        let (_, a) = r.mine(&log(6, &line(500, "/c"), "t6"));
+        assert!(
+            a.created,
+            "a 500 is absorbed by neither the 200 nor the 503 template"
+        );
+        let after = r.dirty_templates(7);
+        let restored_err = after
+            .iter()
+            .find(|t| t.template_id == err.template_id)
+            .unwrap();
+        assert!(
+            restored_err.template.contains(" 503 "),
+            "{}",
+            restored_err.template
+        );
+    }
+
+    #[test]
     fn restore_order_does_not_depend_on_input_order() {
         let mut m = Miner::new(DrainConfig::default());
         m.mine(&log(1, "Payment failed for order 1234", "t1"));

@@ -7,9 +7,10 @@ pub const TRUNCATED: &str = "<…>";
 pub const EMPTY: &str = "<empty>";
 pub const MAX_TOKENS: usize = 64;
 
-/// Masking version stored by the logminer: 2 keeps HTTP status codes, 1 masks them.
+/// Masking version stored by the logminer: 1 masks HTTP status codes; 3 keeps them as
+/// exact-match tokens (2 kept them but let Drain generalise them away, so it is retired).
 pub fn masking_version(keep_http_status: bool) -> u32 {
-    if keep_http_status { 2 } else { 1 }
+    if keep_http_status { 3 } else { 1 }
 }
 
 /// True when `t` ends in `HTTP/<d>` or `HTTP/<d>.<d>`, optionally followed by `"`.
@@ -25,10 +26,20 @@ fn is_http_version(t: &str) -> bool {
     }
 }
 
-fn is_status(t: &str) -> bool {
+/// A three-digit HTTP status code, 100..=599.
+pub fn is_status(t: &str) -> bool {
     t.len() == 3
         && t.bytes().all(|b| b.is_ascii_digit())
         && t.parse::<u16>().is_ok_and(|n| (100..=599).contains(&n))
+}
+
+/// True when `tok` (a token from [`tokens`] or from a stored template string) is a kept status
+/// code. `mask` turns every digit run into `<*>`, so with `keep_http_status` the only tokens that
+/// can be bare digits are the kept ones: the shape alone identifies them, with no marker and no
+/// side table, and the rule re-applies unchanged to a template string read back from storage
+/// (the `HTTP/x` token before it is itself masked to `<*>` there, so it cannot be re-checked).
+pub fn is_protected(tok: &str, keep_http_status: bool) -> bool {
+    keep_http_status && is_status(tok)
 }
 
 /// Masked tokens; any token containing a wildcard becomes exactly `<*>`.
@@ -140,7 +151,36 @@ mod tests {
 
     #[test]
     fn masking_version_reflects_flag() {
-        assert_eq!(masking_version(true), 2);
+        assert_eq!(masking_version(true), 3);
         assert_eq!(masking_version(false), 1);
+    }
+
+    #[test]
+    fn only_kept_status_tokens_are_protected() {
+        let line = r#"[2026-10-05T10:00:00.000Z] "GET /api/cart HTTP/1.1" 503 UF 0 91 2 - "-" "python/3.12""#;
+        let t = tokens(line, true);
+        let protected: Vec<&str> = t
+            .iter()
+            .filter(|x| is_protected(x, true))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(protected, ["503"], "{t:?}");
+        assert!(t.iter().all(|x| !is_protected(x, false)));
+        // No masked token can look like a status code: every digit run becomes `<*>`.
+        for body in ["retry 503 times", "took 200ms", "code=404", "v1.2.3 ok 599"] {
+            assert!(
+                tokens(body, true).iter().all(|x| !is_protected(x, true)),
+                "{body}"
+            );
+        }
+        // The rule re-applies to a stored template string.
+        let template = t.join(" ");
+        assert_eq!(
+            template
+                .split(' ')
+                .filter(|x| is_protected(x, true))
+                .count(),
+            1
+        );
     }
 }
