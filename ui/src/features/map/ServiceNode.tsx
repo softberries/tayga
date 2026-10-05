@@ -81,7 +81,7 @@ function InfraPill({
       <span
         data-infra-badge={infra.failing ? 'err' : 'slow'}
         className={cx(
-          'absolute bottom-1.5 right-2 flex items-center rounded-full border bg-panel font-mono font-semibold',
+          'absolute bottom-1 right-2 flex items-center rounded-full border bg-panel font-mono font-semibold',
           tight ? 'gap-1 px-2 py-0.5 text-[15px] leading-5' : 'gap-1 px-1.5 text-[12px] leading-4',
           infra.failing ? 'border-err text-err' : 'border-slow text-slow',
         )}
@@ -191,6 +191,8 @@ function ServiceNodeImpl({ data }: NodeProps<ServiceNodeType>) {
           'tg-map-node relative flex cursor-pointer items-center rounded-card border bg-panel text-left text-ink shadow-panel',
           'transition-[opacity,box-shadow,border-color] duration-200 hover:border-accent',
           compact ? 'gap-2 px-2.5' : 'gap-2.5 px-2.5',
+          // Room under the text for the infra pill, so a name never reaches it; cards without one keep their layout.
+          infra && 'pb-[22px]',
           health === 'error' && 'tg-map-node-err border-err',
           health === 'slow' && 'tg-map-node-slow border-slow',
           health === 'ok' && 'border-panel-line',
