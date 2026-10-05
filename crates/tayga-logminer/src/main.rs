@@ -230,7 +230,9 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     else {
         return Ok(());
     };
+    // A partial wipe of log_templates needs the new_template_watermark_ns key deleted too.
     let new_watermark = stored_watermark
+        .map(|w| w.min(now))
         .unwrap_or_else(|| initial_watermark(&detect_cfg, data_clock(data_now, now), now));
     let Some(stored_version) = retry_until(
         "load masking version",
@@ -251,8 +253,13 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
         return Ok(());
     };
     let current_version = masking_version(cfg.keep_http_status);
-    let (epoch_start, must_store) =
-        startup_epoch(stored_version, stored_epoch, current_version, now);
+    let (epoch_start, must_store) = startup_epoch(
+        stored_version,
+        stored_epoch,
+        current_version,
+        now,
+        restored > 0,
+    );
     if must_store {
         // The epoch start goes first: a crash between the two writes re-detects the change.
         if retry_until(
@@ -540,17 +547,22 @@ async fn detect(
 }
 
 /// Masking epoch at startup: `(epoch start, whether to store the version and start)`.
-/// A first install has no epoch (start 0, so no extra warmup); a changed masking version
-/// starts a new epoch now; an unchanged one keeps the stored start.
+/// No stored version but existing templates means an upgrade from a pre-7a install, whose
+/// templates were mined with masking version 1. A truly fresh install has no epoch (start 0, so
+/// no extra warmup); a changed masking version starts a new epoch now; an unchanged one keeps
+/// the stored start (and stores the version if it was inferred).
 fn startup_epoch(
     stored_version: Option<i64>,
     stored_start: Option<i64>,
     current_version: u32,
     now_ns: i64,
+    has_templates: bool,
 ) -> (i64, bool) {
-    match stored_version {
+    match stored_version.or(has_templates.then_some(1)) {
         None => (0, true),
-        Some(v) if v == i64::from(current_version) => (stored_start.unwrap_or(0), false),
+        Some(v) if v == i64::from(current_version) => {
+            (stored_start.unwrap_or(0), stored_version.is_none())
+        }
         Some(_) => (now_ns, true),
     }
 }
@@ -726,10 +738,12 @@ mod tests {
     #[test]
     fn startup_epoch_tracks_the_masking_version() {
         let now = 100 * MIN_NS;
-        assert_eq!(startup_epoch(None, None, 2, now), (0, true));
-        assert_eq!(startup_epoch(Some(2), Some(7), 2, now), (7, false));
-        assert_eq!(startup_epoch(Some(2), None, 2, now), (0, false));
-        assert_eq!(startup_epoch(Some(1), Some(7), 2, now), (now, true));
+        assert_eq!(startup_epoch(None, None, 2, now, false), (0, true));
+        assert_eq!(startup_epoch(None, None, 2, now, true), (now, true));
+        assert_eq!(startup_epoch(None, None, 1, now, true), (0, true));
+        assert_eq!(startup_epoch(Some(2), Some(7), 2, now, true), (7, false));
+        assert_eq!(startup_epoch(Some(2), None, 2, now, true), (0, false));
+        assert_eq!(startup_epoch(Some(1), Some(7), 2, now, true), (now, true));
     }
 
     #[test]
