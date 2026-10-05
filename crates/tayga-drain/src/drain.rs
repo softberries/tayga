@@ -14,6 +14,7 @@ pub struct DrainConfig {
     pub sim_threshold: f64,
     pub max_children: usize,
     pub max_clusters_per_service: usize,
+    pub keep_http_status: bool,
 }
 
 impl Default for DrainConfig {
@@ -23,6 +24,7 @@ impl Default for DrainConfig {
             sim_threshold: 0.5,
             max_children: 100,
             max_clusters_per_service: 5_000,
+            keep_http_status: true,
         }
     }
 }
@@ -160,7 +162,7 @@ impl Drain {
     }
 
     pub fn add(&mut self, service: &str, body: &str, ts_ns: i64, severity: u8) -> Assignment {
-        let toks = tokens(body);
+        let toks = tokens(body, self.cfg.keep_http_status);
         let cfg = self.cfg.clone();
         let tree = self.trees.entry(service.to_string()).or_default();
         let leaf = Self::leaf(tree, &cfg, &toks);

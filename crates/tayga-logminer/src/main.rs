@@ -45,6 +45,7 @@ struct Settings {
 struct LogminerSettings {
     sim_threshold: f64,
     max_clusters_per_service: usize,
+    keep_http_status: bool,
     max_batch: usize,
     flush_ms: u64,
     detect_secs: u64,
@@ -65,6 +66,7 @@ impl Default for LogminerSettings {
         Self {
             sim_threshold: drain.sim_threshold,
             max_clusters_per_service: drain.max_clusters_per_service,
+            keep_http_status: drain.keep_http_status,
             max_batch: 5_000,
             flush_ms: 1_000,
             detect_secs: 60,
@@ -102,6 +104,7 @@ impl LogminerSettings {
         DrainConfig {
             sim_threshold: self.sim_threshold,
             max_clusters_per_service: self.max_clusters_per_service,
+            keep_http_status: self.keep_http_status,
             ..DrainConfig::default()
         }
     }
