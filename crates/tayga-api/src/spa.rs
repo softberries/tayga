@@ -76,32 +76,42 @@ pub struct Redirect308 {
     pub from: &'static str,
     /// `{name}` placeholders are filled from the `from` path params.
     pub to: &'static str,
+    /// Query params added when the old URL does not set them: the old page's
+    /// defaults, where the new one defaults differently.
+    pub defaults: &'static [(&'static str, &'static str)],
 }
 
 /// `/`, `/stories/{id}` kept their paths and are client routes (index
 /// fallback). The group detail became the home page's selected group; its id
 /// is JSON-quoted because the router parses search values as JSON and a u64
-/// fingerprint can exceed 2^53.
+/// fingerprint can exceed 2^53. The old group page showed 24 h by default and
+/// the home page shows 1 h, so an old link without `since` keeps 24 h: a group
+/// with no story in the last hour would otherwise drop out of the selection.
 pub const OLD_URL_REDIRECTS: &[Redirect308] = &[
     Redirect308 {
         from: "/groups/{fp}",
         to: "/?group=%22{fp}%22",
+        defaults: &[("since", "24h")],
     },
     Redirect308 {
         from: "/alerts",
         to: "/logs/alerts",
+        defaults: &[],
     },
     Redirect308 {
         from: "/templates",
         to: "/logs/templates",
+        defaults: &[],
     },
     Redirect308 {
         from: "/templates/{id}",
         to: "/logs/templates/{id}",
+        defaults: &[],
     },
     Redirect308 {
         from: "/service-map",
         to: "/map",
+        defaults: &[],
     },
 ];
 
@@ -117,25 +127,42 @@ pub fn router() -> Router {
 pub fn router_with(assets: Arc<dyn Assets>, redirects: &'static [Redirect308]) -> Router {
     let mut app = Router::new();
     for r in redirects {
-        let to = r.to;
+        let (to, defaults) = (r.to, r.defaults);
         app = app.route(
             r.from,
             get(move |params: RawPathParams, uri: Uri| async move {
-                redirect(to, &params, uri.query())
+                redirect(to, defaults, &params, uri.query())
             }),
         );
     }
     app.fallback(serve).with_state(assets)
 }
 
-fn redirect(template: &str, params: &RawPathParams, query: Option<&str>) -> Redirect {
+fn redirect(
+    template: &str,
+    defaults: &[(&str, &str)],
+    params: &RawPathParams,
+    query: Option<&str>,
+) -> Redirect {
     let mut out = template.to_string();
     for (key, value) in params {
         out = out.replace(&format!("{{{key}}}"), &encode(value));
     }
-    if let Some(q) = query.filter(|q| !q.is_empty()) {
+    let query = query.unwrap_or_default();
+    let mut append = |part: &str| {
         out.push(if out.contains('?') { '&' } else { '?' });
-        out.push_str(q);
+        out.push_str(part);
+    };
+    if !query.is_empty() {
+        append(query);
+    }
+    for (key, value) in defaults {
+        let set = query
+            .split('&')
+            .any(|p| p.split_once('=').map_or(p, |(k, _)| k) == *key);
+        if !set {
+            append(&format!("{key}={value}"));
+        }
     }
     Redirect::permanent(&out)
 }
@@ -419,12 +446,18 @@ mod tests {
     #[tokio::test]
     async fn every_redirect_is_308_to_the_new_path() {
         let cases = [
-            ("/groups/123", "/?group=%22123%22"),
-            ("/groups/a%2Fb", "/?group=%22a%2Fb%22"),
+            // The old group page's 24 h default travels; a set range is kept.
+            ("/groups/123", "/?group=%22123%22&since=24h"),
+            ("/groups/a%2Fb", "/?group=%22a%2Fb%22&since=24h"),
             (
-                "/groups/18446744073709551615?since=24h",
-                "/?group=%2218446744073709551615%22&since=24h",
+                "/groups/18446744073709551615?since=1h",
+                "/?group=%2218446744073709551615%22&since=1h",
             ),
+            (
+                "/groups/7?kind=error",
+                "/?group=%227%22&kind=error&since=24h",
+            ),
+            ("/groups/7?since=7d&q=x", "/?group=%227%22&since=7d&q=x"),
             ("/alerts", "/logs/alerts"),
             (
                 "/alerts?since=24h&kind=spike",
