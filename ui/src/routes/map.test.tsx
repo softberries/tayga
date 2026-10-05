@@ -131,7 +131,8 @@ describe('service map', () => {
     expect(within(callers).getByRole('link', { name: /checkout →.*38 % err/ })).toHaveAttribute('href', '/map?service=checkout')
     const callees = within(drawer).getByRole('region', { name: 'Callees' })
     expect(within(callees).getByRole('link', { name: /→ flagd/ })).toBeInTheDocument()
-    expect(within(drawer).getByRole('link', { name: /Open payment traces/ })).toHaveAttribute('href', '/traces?service=payment')
+    // Any span, not only the endpoint: payment never serves a trace's root.
+    expect(within(drawer).getByRole('link', { name: /Open payment traces/ })).toHaveAttribute('href', '/traces?service=payment&touched=true')
   })
 
   it('a failed refresh keeps the drawer sections and notes it', async () => {

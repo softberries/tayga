@@ -10,6 +10,7 @@ import { HEX32, sinceSearch } from '../../app/search'
 import type { Since, TracesSearch } from '../../app/search'
 import { Button } from '../../components/ui/Button'
 import { Combobox } from '../../components/ui/Combobox'
+import { ToggleGroup } from '../../components/ui/ToggleGroup'
 import { cx } from '../../lib/cx'
 
 const field =
@@ -74,6 +75,11 @@ export function TraceJump({ since }: { since: Since }) {
     </form>
   )
 }
+
+const SCOPE = [
+  { value: 'endpoint', label: 'As endpoint' },
+  { value: 'anywhere', label: 'Anywhere in trace' },
+] as const
 
 /** A whole-ms bound as typed: '' clears it; anything but digits is invalid (NaN). */
 function parseBound(s: string): number | undefined {
@@ -161,9 +167,19 @@ export function TraceFilters({ search, since, services, endpoints, onSearch }: T
           label="Service"
           value={search.service}
           options={services}
-          onChange={(service) => onSearch({ service, endpoint: undefined })}
+          // A picked service matches any span by default: most services never serve a
+          // trace's endpoint, so "as endpoint" alone would usually find nothing.
+          onChange={(service) => onSearch({ service, touched: service ? true : undefined, endpoint: undefined })}
           emptyText="No services"
         />
+        {search.service ? (
+          <ToggleGroup
+            label="Service match"
+            options={SCOPE}
+            value={search.touched ? 'anywhere' : 'endpoint'}
+            onValueChange={(v) => onSearch({ touched: v === 'anywhere' ? true : undefined, endpoint: undefined })}
+          />
+        ) : null}
         <Combobox
           label="Endpoint"
           value={search.endpoint}
@@ -190,7 +206,7 @@ export function TraceFilters({ search, since, services, endpoints, onSearch }: T
           <Button
             size="sm"
             variant="ghost"
-            onClick={() => onSearch({ service: undefined, endpoint: undefined, min_ms: undefined, max_ms: undefined, errors: undefined })}
+            onClick={() => onSearch({ service: undefined, touched: undefined, endpoint: undefined, min_ms: undefined, max_ms: undefined, errors: undefined })}
           >
             Clear filters
           </Button>

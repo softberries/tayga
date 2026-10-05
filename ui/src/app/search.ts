@@ -159,6 +159,11 @@ export function parseRect(v: unknown): DurationRect | undefined {
  */
 export interface TracesSearch {
   service?: string
+  /**
+   * The service matches any span of the trace (the API's `touched=1`); absent, only the
+   * trace's endpoint (root) service. Kept only with a service.
+   */
+  touched?: true
   endpoint?: string
   min_ms?: number
   max_ms?: number
@@ -171,8 +176,10 @@ export function validateTracesSearch(s: Record<string, unknown>): TracesSearch {
   const min = wholeMs(s.min_ms)
   const max = wholeMs(s.max_ms)
   const sel = parseRect(s.sel)
+  const service = str(s.service, 200)
   return {
-    service: str(s.service, 200),
+    service,
+    touched: service !== undefined ? flag(s.touched) : undefined,
     endpoint: str(s.endpoint, 400),
     min_ms: min,
     // A hand-written URL with min above max would be a 400: keep the lower bound only.

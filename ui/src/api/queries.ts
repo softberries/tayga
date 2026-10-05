@@ -49,6 +49,7 @@ export const api = {
   traceSearch: (p: {
     since: Since
     service?: string
+    touched?: 1
     endpoint?: string
     min_ms?: number
     max_ms?: number

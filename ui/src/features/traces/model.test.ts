@@ -23,6 +23,12 @@ describe('traceQuery', () => {
       '/api/v1/traces/search?since=15m&service=payment&endpoint=POST+%2Fapi%2Fcheckout&min_ms=5&max_ms=100&errors=true&limit=500',
     )
   })
+  it('sends touched=1 to match the service on any span, and only with a service', () => {
+    expect(apiUrl('/traces/search', traceQuery({ service: 'payment', touched: true }, '1h'))).toBe(
+      '/api/v1/traces/search?since=1h&service=payment&touched=1&limit=500',
+    )
+    expect(apiUrl('/traces/search', traceQuery({ touched: true }, '1h'))).toBe('/api/v1/traces/search?since=1h&limit=500')
+  })
   it('leaves unset filters out and ignores view-only params', () => {
     expect(apiUrl('/traces/search', traceQuery({ log: true, sel: '1_2_3_4' }, '1h'))).toBe(
       `/api/v1/traces/search?since=1h&limit=${TRACE_LIMIT}`,

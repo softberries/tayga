@@ -10,6 +10,8 @@ export function traceQuery(search: TracesSearch, since: Since) {
   return {
     since,
     service: search.service,
+    // The API's flag spelling; only meaningful with a service.
+    touched: search.service && search.touched ? (1 as const) : undefined,
     endpoint: search.endpoint,
     min_ms: search.min_ms,
     max_ms: search.max_ms,

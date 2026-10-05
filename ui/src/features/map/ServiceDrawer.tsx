@@ -304,7 +304,8 @@ function DrawerBody({ service, map, since }: { service: string; map: ServiceMapV
   return (
     <div className="flex flex-col gap-5">
       <Button asChild variant="primary" size="md" className="w-full">
-        <Link to="/traces" search={{ ...sinceSearch(since), service }}>
+        {/* Any span, not just the endpoint: most services never serve a trace's root. */}
+        <Link to="/traces" search={{ ...sinceSearch(since), service, touched: true }}>
           Open {service} traces <ArrowRight aria-hidden size={14} />
         </Link>
       </Button>

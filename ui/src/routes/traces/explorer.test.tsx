@@ -80,21 +80,34 @@ describe('traces explorer', () => {
     await user.click(screen.getByRole('button', { name: 'Service: any' }))
     await user.type(await screen.findByPlaceholderText('Search service'), 'paym')
     await user.click(await screen.findByRole('option', { name: 'payment' }))
-    await waitFor(() => expect(router.state.location.search).toMatchObject({ service: 'payment' }))
+    // A picked service matches any span of the trace by default.
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ service: 'payment', touched: true }))
+    const scope = screen.getByRole('radiogroup', { name: 'Service match' })
+    expect(within(scope).getByRole('radio', { name: 'Anywhere in trace' })).toHaveAttribute('data-state', 'on')
 
     await user.click(screen.getByRole('button', { name: 'Errors only' }))
     await user.type(screen.getByLabelText('Min duration (ms)'), '5')
     await user.type(screen.getByLabelText('Max duration (ms)'), '250{Enter}')
     await waitFor(() =>
-      expect(router.state.location.search).toMatchObject({ service: 'payment', errors: true, min_ms: 5, max_ms: 250 }),
+      expect(router.state.location.search).toMatchObject({ service: 'payment', touched: true, errors: true, min_ms: 5, max_ms: 250 }),
     )
     await waitFor(() =>
-      expect(searchCalls(fetch).at(-1)).toBe('/api/v1/traces/search?since=15m&service=payment&min_ms=5&max_ms=250&errors=true&limit=500'),
+      expect(searchCalls(fetch).at(-1)).toBe(
+        '/api/v1/traces/search?since=15m&service=payment&touched=1&min_ms=5&max_ms=250&errors=true&limit=500',
+      ),
     )
     expect(screen.getByRole('button', { name: 'Errors only' })).toHaveAttribute('aria-pressed', 'true')
 
+    // As endpoint: only traces whose root is the service.
+    await user.click(within(scope).getByRole('radio', { name: 'As endpoint' }))
+    await waitFor(() => expect(router.state.location.search).not.toHaveProperty('touched'))
+    await waitFor(() =>
+      expect(searchCalls(fetch).at(-1)).toBe('/api/v1/traces/search?since=15m&service=payment&min_ms=5&max_ms=250&errors=true&limit=500'),
+    )
+
     await user.click(screen.getByRole('button', { name: 'Clear service filter' }))
     await waitFor(() => expect(router.state.location.search).not.toHaveProperty('service'))
+    expect(screen.queryByRole('radiogroup', { name: 'Service match' })).toBeNull()
   })
 
   it('rejects a min above max inline without querying', async () => {
@@ -267,6 +280,15 @@ describe('traces explorer', () => {
     const clear = screen.getAllByRole('button', { name: 'Clear filters' })
     await user.click(clear.at(-1)!)
     await waitFor(() => expect(router.state.location.search).toEqual({}))
+  })
+
+  it('with only the endpoint service matched, an empty result offers to match it anywhere', async () => {
+    const user = userEvent.setup()
+    stubApi(routes({ '/traces/search': { body: [] } }))
+    const { router } = renderApp('/traces?service=payment')
+    expect(await screen.findByText(/No trace in the last 1h starts at payment with these filters/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Match payment anywhere in the trace' }))
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ service: 'payment', touched: true }))
   })
 
   it('a failed search shows the error with a retry', async () => {

@@ -28,3 +28,20 @@ test('clicking a node opens the drawer with RED charts', async ({ page }) => {
   await page.keyboard.press('Escape')
   await expect(drawer).toBeHidden()
 })
+
+// Payment and shipping never serve a trace's root (the endpoint is frontend-proxy or similar),
+// so the drawer's link must match the service anywhere in the trace to find any.
+for (const service of ['payment', 'shipping']) {
+  test(`"Open ${service} traces" from the drawer lists traces that pass through it`, async ({ page }) => {
+    await page.goto(`/map?service=${service}`)
+    const drawer = page.getByRole('dialog', { name: service })
+    await expect(drawer).toBeVisible()
+    await drawer.getByRole('link', { name: `Open ${service} traces` }).click()
+
+    await expect(page).toHaveURL(new RegExp(`/traces\\?service=${service}&touched=true$`))
+    await expect(page.getByRole('radiogroup', { name: 'Service match' }).getByRole('radio', { name: 'Anywhere in trace' })).toHaveAttribute('data-state', 'on')
+    await expect(page.getByRole('table').getByRole('row').nth(1)).toBeVisible()
+    await expect(page.getByText(/^\d+ traces?( \(limit reached\))?$/)).toBeVisible()
+    await expect(page.getByText('No traces match')).toBeHidden()
+  })
+}

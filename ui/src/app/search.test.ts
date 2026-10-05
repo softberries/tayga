@@ -96,6 +96,7 @@ describe('traces explorer search', () => {
   it('drops invalid values: fractional or negative ms, max below min, bad flags and rects', () => {
     expect(validateTracesSearch({ min_ms: 1.5, max_ms: -3, errors: 'maybe', log: 0, sel: 'a_b_c_d' })).toStrictEqual({
       service: undefined,
+      touched: undefined,
       endpoint: undefined,
       min_ms: undefined,
       max_ms: undefined,
@@ -104,6 +105,12 @@ describe('traces explorer search', () => {
       sel: undefined,
     })
     expect(validateTracesSearch({ min_ms: 100, max_ms: 5 })).toMatchObject({ min_ms: 100, max_ms: undefined })
+  })
+  it('keeps touched only with a service', () => {
+    expect(validateTracesSearch({ service: 'payment', touched: 1 }).touched).toBe(true)
+    expect(validateTracesSearch({ service: 'payment', touched: 'true' }).touched).toBe(true)
+    expect(validateTracesSearch({ service: 'payment', touched: 'yes' }).touched).toBeUndefined()
+    expect(validateTracesSearch({ touched: 1 }).touched).toBeUndefined()
   })
   it('a rect round-trips through the URL, normalized to min before max', () => {
     expect(parseRect('2000_1000_60_40')).toEqual({ t0: 1000, t1: 2000, d0: 40, d1: 60 })

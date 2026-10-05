@@ -111,7 +111,7 @@ export function TracesExplorer() {
   }, [rows])
   // The endpoint list of each service as last seen without an endpoint filter, so with one
   // endpoint picked the picker still offers the others.
-  const serviceKey = search.service ?? ''
+  const serviceKey = `${search.service ?? ''}|${search.touched ? 'any' : 'root'}`
   const [known, setKnown] = useState<ReadonlyMap<string, { data: unknown; endpoints: ReadonlyMap<string, number> }>>(new Map())
   if (!search.endpoint && traces.data && !traces.isPlaceholderData && known.get(serviceKey)?.data !== traces.data) {
     setKnown(new Map(known).set(serviceKey, { data: traces.data, endpoints }))
@@ -170,6 +170,8 @@ export function TracesExplorer() {
 
   const filtered = Boolean(search.service || search.endpoint || search.min_ms !== undefined || search.max_ms !== undefined || search.errors)
   const empty = traces.isSuccess && rows.length === 0
+  // Only the endpoint service is matched: the service may still appear deeper in traces.
+  const rootOnly = Boolean(search.service && !search.touched)
 
   return (
     <div className="flex flex-col gap-3.5">
@@ -210,15 +212,21 @@ export function TracesExplorer() {
           <EmptyState
             title="No traces match"
             description={
-              filtered
-                ? `Nothing in the last ${since} matches these filters.`
-                : `No traces in the last ${since}. A longer time range may show older ones.`
+              rootOnly
+                ? `No trace in the last ${since} starts at ${search.service} with these filters. It may still take part in others.`
+                : filtered
+                  ? `Nothing in the last ${since} matches these filters.`
+                  : `No traces in the last ${since}. A longer time range may show older ones.`
             }
             action={
-              filtered ? (
+              rootOnly ? (
+                <Button size="sm" onClick={() => onFilter({ touched: true, endpoint: undefined })}>
+                  Match {search.service} anywhere in the trace
+                </Button>
+              ) : filtered ? (
                 <Button
                   size="sm"
-                  onClick={() => onFilter({ service: undefined, endpoint: undefined, min_ms: undefined, max_ms: undefined, errors: undefined })}
+                  onClick={() => onFilter({ service: undefined, touched: undefined, endpoint: undefined, min_ms: undefined, max_ms: undefined, errors: undefined })}
                 >
                   Clear filters
                 </Button>
