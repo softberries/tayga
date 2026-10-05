@@ -4,20 +4,20 @@ use rdkafka::message::{BorrowedMessage, Headers};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::{Message, Offset, TopicPartitionList};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tayga_common::metrics::KindLabel;
 use tayga_common::retry::retry_until;
 use tayga_drain::detect::{
-    Alert, DetectConfig, NewCandidate, SpikeTracker, TemplateWindow, initial_watermark, is_new,
-    new_alert, new_template_since, spike_baseline,
+    Alert, Coverage, DetectConfig, NewCandidate, SpikeSkip, SpikeTracker, TemplateWindow,
+    initial_watermark, is_new, new_alert, new_template_since, spike_baseline,
 };
 use tayga_drain::drain::DrainConfig;
 use tayga_drain::preprocess::masking_version;
 use tayga_kafka::KafkaSettings;
-use tayga_logminer::metrics::LogminerMetrics;
+use tayga_logminer::metrics::{LogminerMetrics, ReasonLabel};
 use tayga_logminer::miner::{Miner, alert_from_row, alert_json, alert_row};
 use tayga_model::envelope::{Envelope, HEADER_KIND, Kind};
 use tayga_store::ClickHouseSettings;
@@ -34,6 +34,8 @@ const MIN_NS: i64 = 60_000_000_000;
 const KEY_WATERMARK: &str = "new_template_watermark_ns";
 const KEY_MASKING_VERSION: &str = "masking_version";
 const KEY_EPOCH_START: &str = "masking_epoch_start_ns";
+/// Timeout of one `fetch_watermarks` call per detection tick.
+const WATERMARK_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Deserialize)]
 struct Settings {
@@ -131,6 +133,8 @@ impl LogminerSettings {
 struct Pending {
     hits: Vec<LogHitRow>,
     offsets: HashMap<i32, i64>,
+    /// Newest hit `ts` mined per partition.
+    max_ts: HashMap<i32, i64>,
     since: Option<Instant>,
 }
 
@@ -139,6 +143,11 @@ impl Pending {
         let o = self.offsets.entry(partition).or_insert(offset);
         *o = (*o).max(offset);
         self.since.get_or_insert(now);
+    }
+
+    fn record_ts(&mut self, partition: i32, ts: i64) {
+        let t = self.max_ts.entry(partition).or_insert(ts);
+        *t = (*t).max(ts);
     }
 
     fn is_empty(&self) -> bool {
@@ -281,7 +290,7 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
         }
     }
 
-    let consumer = tayga_kafka::consumer(&settings.kafka, GROUP)?;
+    let consumer = Arc::new(tayga_kafka::consumer(&settings.kafka, GROUP)?);
     consumer.subscribe(&[&settings.kafka.topic])?;
 
     let metrics_addr = cfg.metrics_addr;
@@ -296,7 +305,9 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     let mut clock = NewTemplateClock {
         watermark: new_watermark,
         epoch_start,
+        partitions: BTreeMap::new(),
     };
+    let mut seen = PartitionClocks::default();
     tracing::info!(
         topic = %settings.kafka.topic,
         alerts = %cfg.alerts_topic,
@@ -346,12 +357,19 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
             || (detect_due && !pending.is_empty());
         if flush_now {
             let batch = std::mem::take(&mut pending);
-            if !flush(&ctx, &mut miner, batch, Some(&mut stop_rx)).await? {
+            if !flush(&ctx, &mut miner, batch, &mut seen, Some(&mut stop_rx)).await? {
                 interrupted = true;
                 break;
             }
         }
         if detect_due {
+            let mut detect_stop = stop_rx.clone();
+            tokio::select! {
+                snapshot = partition_snapshot(&consumer, &settings.kafka.topic, &mut seen) => {
+                    clock.partitions = snapshot;
+                }
+                _ = detect_stop.wait_for(|stop| *stop) => break,
+            }
             let mut detect_stop = stop_rx.clone();
             tokio::select! {
                 _ = detect(&store, &producer, cfg, &detect_cfg, &mut tracker, &mut clock, &metrics) => {}
@@ -361,7 +379,7 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     }
     if !interrupted && !pending.is_empty() {
         // Single attempt: on failure exit without committing.
-        flush(&ctx, &mut miner, pending, None).await?;
+        flush(&ctx, &mut miner, pending, &mut seen, None).await?;
     }
     tracing::info!("tayga-logminer stopped");
     Ok(())
@@ -389,6 +407,7 @@ fn on_message(
     let (_, logs) = rows_from_envelope(&env);
     for log in &logs {
         let (hit, a) = miner.mine(log);
+        pending.record_ts(msg.partition(), hit.ts);
         pending.hits.push(hit);
         metrics.logs_mined.inc();
         if a.created {
@@ -427,6 +446,7 @@ async fn flush(
     ctx: &Ctx<'_>,
     miner: &mut Miner,
     batch: Pending,
+    seen: &mut PartitionClocks,
     mut shutdown: Option<&mut watch::Receiver<bool>>,
 ) -> anyhow::Result<bool> {
     let templates = miner.dirty_templates(now_ns());
@@ -456,6 +476,7 @@ async fn flush(
         );
         return Ok(false);
     }
+    seen.record_flush(&batch);
     let mut tpl = TopicPartitionList::new();
     for (partition, offset) in batch.commit_offsets() {
         tpl.add_partition_offset(ctx.topic, partition, Offset::Offset(offset))?;
@@ -502,6 +523,129 @@ where
 struct NewTemplateClock {
     watermark: i64,
     epoch_start: i64,
+    /// Per assigned partition: newest flushed hit `ts` and whether the partition is caught up.
+    /// Refreshed before each detection pass.
+    partitions: BTreeMap<i32, (i64, bool)>,
+}
+
+/// What the logminer has flushed per partition: the newest hit `ts` and the next offset to
+/// consume (last flushed offset + 1).
+#[derive(Default)]
+struct PartitionClocks {
+    by_partition: BTreeMap<i32, Flushed>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Flushed {
+    /// Newest flushed hit `ts` in ns; 0 when the partition has not yielded a hit.
+    max_ts: i64,
+    next_offset: i64,
+}
+
+impl PartitionClocks {
+    /// Called once a batch's hits and templates are stored.
+    fn record_flush(&mut self, batch: &Pending) {
+        for (partition, next) in batch.commit_offsets() {
+            let f = self.by_partition.entry(partition).or_default();
+            f.next_offset = f.next_offset.max(next);
+        }
+        for (&partition, &ts) in &batch.max_ts {
+            let f = self.by_partition.entry(partition).or_default();
+            f.max_ts = f.max_ts.max(ts);
+        }
+    }
+
+    /// Drops partitions that are no longer assigned (the consumer has no rebalance callbacks).
+    fn retain_assigned(&mut self, assigned: &HashSet<i32>) {
+        self.by_partition.retain(|p, _| assigned.contains(p));
+    }
+
+    /// Partitions that yielded at least one hit: only those can hold the data clock back.
+    fn with_hits(&self) -> Vec<(i32, Flushed)> {
+        self.by_partition
+            .iter()
+            .filter(|(_, f)| f.max_ts > 0)
+            .map(|(&p, &f)| (p, f))
+            .collect()
+    }
+}
+
+/// Whether a partition is caught up: the next offset to consume (last flushed offset + 1) is at
+/// or past the high watermark, i.e. every record in the log has been mined and flushed. Pending
+/// records are flushed before detection, so the flushed offset is current. An unknown high
+/// watermark (fetch failed or timed out) counts as not caught up, which only holds the clock back.
+fn caught_up(next_offset: i64, high: Option<i64>) -> bool {
+    high.is_some_and(|h| next_offset >= h)
+}
+
+/// Builds the per-partition view for one detection pass: prunes revoked partitions using the
+/// consumer's current assignment, then fetches the high watermark of each partition that has
+/// yielded hits (blocking librdkafka calls, run on the blocking pool, `WATERMARK_TIMEOUT` each;
+/// after the first failure the remaining partitions are not asked and count as not caught up).
+async fn partition_snapshot(
+    consumer: &Arc<StreamConsumer>,
+    topic: &str,
+    seen: &mut PartitionClocks,
+) -> BTreeMap<i32, (i64, bool)> {
+    match consumer.assignment() {
+        Ok(tpl) => {
+            let assigned: HashSet<i32> = tpl
+                .elements()
+                .iter()
+                .filter(|e| e.topic() == topic)
+                .map(|e| e.partition())
+                .collect();
+            seen.retain_assigned(&assigned);
+        }
+        Err(e) => tracing::warn!(error = %e, "reading the consumer assignment failed"),
+    }
+    let parts = seen.with_hits();
+    if parts.is_empty() {
+        return BTreeMap::new();
+    }
+    let c = Arc::clone(consumer);
+    let t = topic.to_string();
+    let ids: Vec<i32> = parts.iter().map(|(p, _)| *p).collect();
+    let highs = tokio::task::spawn_blocking(move || {
+        let mut highs = HashMap::new();
+        for p in ids {
+            match c.fetch_watermarks(&t, p, WATERMARK_TIMEOUT) {
+                Ok((_, high)) => {
+                    highs.insert(p, high);
+                }
+                Err(e) => {
+                    tracing::warn!(partition = p, error = %e, "fetching watermarks failed");
+                    break;
+                }
+            }
+        }
+        highs
+    })
+    .await
+    .unwrap_or_default();
+    parts
+        .into_iter()
+        .map(|(p, f)| {
+            (
+                p,
+                (f.max_ts, caught_up(f.next_offset, highs.get(&p).copied())),
+            )
+        })
+        .collect()
+}
+
+/// Data clock for new-template detection (spec 7a §5.1): the minimum newest-hit `ts` over
+/// partitions that are not caught up, so a lagging partition holds the clock back. When every
+/// partition is caught up (an idle partition must not hold it back), the maximum over all.
+/// With no partition data (restart, nothing consumed yet), `fallback_ns`.
+fn detection_clock(per_partition: &BTreeMap<i32, (i64, bool)>, fallback_ns: i64) -> i64 {
+    per_partition
+        .values()
+        .filter(|(_, caught_up)| !caught_up)
+        .map(|(ts, _)| *ts)
+        .min()
+        .or_else(|| per_partition.values().map(|(ts, _)| *ts).max())
+        .unwrap_or(fallback_ns)
 }
 
 /// One detection pass (spec §6). Failures are logged; the loop continues. The new-template
@@ -518,17 +662,7 @@ async fn detect(
 ) {
     let started = Instant::now();
     let now = now_ns();
-    match find_alerts(
-        store,
-        detect_cfg,
-        tracker,
-        clock.watermark,
-        clock.epoch_start,
-        now,
-        metrics,
-    )
-    .await
-    {
+    match find_alerts(store, detect_cfg, tracker, clock, now, metrics).await {
         Ok((alerts, data_now)) => {
             if publish_alerts(store, producer, &cfg.alerts_topic, &alerts, now, metrics).await {
                 clock.watermark = clock.watermark.max(data_now);
@@ -591,13 +725,12 @@ async fn find_alerts(
     store: &Store,
     cfg: &DetectConfig,
     tracker: &mut SpikeTracker,
-    new_watermark: i64,
-    epoch_start: i64,
+    clock: &NewTemplateClock,
     now: i64,
     metrics: &LogminerMetrics,
 ) -> anyhow::Result<(Vec<(Alert, bool)>, i64)> {
-    let data_now = data_clock(store.data_now_ns().await?, now);
-    if let Some(lag) = data_lag_secs(data_now, now) {
+    let stored_now = store.data_now_ns().await?;
+    if let Some(lag) = data_lag_secs(data_clock(stored_now, now), now) {
         metrics.data_lag_seconds.set(lag);
         if lag > f64::from(cfg.new_template_recent_min) * 60.0 {
             tracing::warn!(
@@ -606,7 +739,14 @@ async fn find_alerts(
             );
         }
     }
+    // Never ahead of the wall clock; the store's latest hit stands in until partitions report.
+    let data_now = data_clock(detection_clock(&clock.partitions, stored_now), now);
     let mut out = Vec::new();
+    let cov = Coverage {
+        covered_min: store
+            .covered_minutes(cfg.spike_window_min, cfg.baseline_window_min)
+            .await?,
+    };
     let windows = store
         .template_windows(
             cfg.spike_window_min,
@@ -623,13 +763,21 @@ async fn find_alerts(
             current: r.current,
             baseline_total: r.baseline_total,
         };
-        let Some(baseline) = spike_baseline(cfg, &w, now) else {
-            continue;
+        let baseline = match spike_baseline(cfg, &w, cov, now) {
+            Ok(Some(b)) => b,
+            Ok(None) => continue,
+            Err(SpikeSkip::Coverage) => {
+                metrics
+                    .spike_skipped
+                    .get_or_create(&ReasonLabel::new("coverage"))
+                    .inc();
+                continue;
+            }
         };
         let examples = examples(store, w.template_id, cfg.spike_window_min).await;
         out.push(tracker.observe(cfg, &w, baseline, examples, now));
     }
-    let since = new_template_since(new_watermark);
+    let since = new_template_since(clock.watermark);
     let candidates = store.new_template_candidates(since).await?;
     for r in candidates {
         let c = NewCandidate {
@@ -639,7 +787,7 @@ async fn find_alerts(
             first_seen_ns: r.first_seen_ns,
             service_oldest_ns: r.service_oldest_ns,
         };
-        if !is_new(cfg, &c, since, epoch_start) {
+        if !is_new(cfg, &c, since, clock.epoch_start) {
             continue;
         }
         let window = minutes_covering(c.first_seen_ns, now, cfg.new_template_recent_min);
@@ -750,6 +898,60 @@ mod tests {
     fn data_clock_never_runs_ahead_of_the_wall_clock() {
         assert_eq!(data_clock(5 * MIN_NS, 10 * MIN_NS), 5 * MIN_NS);
         assert_eq!(data_clock(11 * MIN_NS, 10 * MIN_NS), 10 * MIN_NS);
+    }
+
+    fn parts(v: &[(i32, i64, bool)]) -> BTreeMap<i32, (i64, bool)> {
+        v.iter().map(|&(p, ts, c)| (p, (ts, c))).collect()
+    }
+
+    #[test]
+    fn a_lagging_partition_holds_the_detection_clock() {
+        let m = parts(&[(0, 50, false), (1, 90, true), (2, 70, false)]);
+        assert_eq!(detection_clock(&m, 999), 50);
+    }
+
+    #[test]
+    fn caught_up_partitions_do_not_hold_the_clock() {
+        let m = parts(&[(0, 10, true), (1, 90, true), (2, 70, true)]);
+        assert_eq!(detection_clock(&m, 999), 90, "idle partition 0 is ignored");
+        assert_eq!(
+            detection_clock(&parts(&[(0, 10, true), (1, 90, false)]), 999),
+            90
+        );
+    }
+
+    #[test]
+    fn no_partition_data_falls_back() {
+        assert_eq!(detection_clock(&BTreeMap::new(), 999), 999);
+    }
+
+    #[test]
+    fn caught_up_compares_the_next_offset_with_the_high_watermark() {
+        assert!(caught_up(10, Some(10)));
+        assert!(caught_up(11, Some(10)));
+        assert!(!caught_up(9, Some(10)));
+        assert!(
+            !caught_up(10, None),
+            "unknown high watermark holds the clock"
+        );
+    }
+
+    #[test]
+    fn revoked_partitions_are_pruned_and_idle_ones_ignored() {
+        let mut seen = PartitionClocks::default();
+        let mut b = Pending::default();
+        b.record(0, 4, Instant::now());
+        b.record(1, 9, Instant::now());
+        b.record(2, 1, Instant::now());
+        b.record_ts(0, 100);
+        b.record_ts(1, 200);
+        seen.record_flush(&b); // partition 2 consumed records but yielded no hit
+        let hits: Vec<_> = seen.with_hits().iter().map(|(p, _)| *p).collect();
+        assert_eq!(hits, vec![0, 1]);
+        assert_eq!(seen.by_partition[&1].next_offset, 10);
+        seen.retain_assigned(&HashSet::from([1, 2]));
+        let left: Vec<_> = seen.by_partition.keys().copied().collect();
+        assert_eq!(left, vec![1, 2]);
     }
 
     #[test]

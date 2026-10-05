@@ -87,16 +87,52 @@ fn id_hex(parts: &[&str]) -> String {
     format!("{:016x}", fingerprint(parts))
 }
 
-/// `Some(baseline per spike window)` when the template spikes now.
-pub fn spike_baseline(cfg: &DetectConfig, w: &TemplateWindow, now_ns: i64) -> Option<f64> {
-    let min_age = i64::from(cfg.baseline_window_min + cfg.spike_window_min) * MIN_NS;
-    if w.template == OVERFLOW || now_ns.saturating_sub(w.first_seen_ns) < min_age {
-        return None;
+/// Minutes of the baseline window that had any log at all (any template), from the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Coverage {
+    pub covered_min: u32,
+}
+
+/// Why a template that may have spiked was not judged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpikeSkip {
+    /// Fewer than half of the baseline window's minutes had data (pipeline gap).
+    Coverage,
+}
+
+/// `Ok(Some(baseline per spike window))` when the template spikes now, `Ok(None)` when it does
+/// not, `Err` when the baseline is too thin to judge (spec 7a §2.1, §2.2).
+///
+/// The baseline counts only minutes with data and only minutes the template existed before the
+/// spike window, so a gap or a young template cannot shrink the divisor into a false spike.
+pub fn spike_baseline(
+    cfg: &DetectConfig,
+    w: &TemplateWindow,
+    cov: Coverage,
+    now_ns: i64,
+) -> Result<Option<f64>, SpikeSkip> {
+    if w.template == OVERFLOW {
+        return Ok(None);
     }
-    let windows = f64::from((cfg.baseline_window_min / cfg.spike_window_min.max(1)).max(1));
-    let per_window = w.baseline_total as f64 / windows;
-    (w.current >= cfg.spike_min_count && w.current as f64 >= cfg.spike_factor * per_window.max(1.0))
-        .then_some(per_window)
+    if cov.covered_min.saturating_mul(2) < cfg.baseline_window_min {
+        return Err(SpikeSkip::Coverage);
+    }
+    let spike_min = i64::from(cfg.spike_window_min.max(1));
+    let age_min = now_ns.saturating_sub(w.first_seen_ns) / MIN_NS;
+    if age_min < i64::from(cfg.new_template_recent_min) {
+        return Ok(None);
+    }
+    let existed_min = age_min - spike_min;
+    if existed_min < spike_min {
+        return Ok(None);
+    }
+    let effective_min = existed_min
+        .min(i64::from(cfg.baseline_window_min))
+        .min(i64::from(cov.covered_min));
+    let per_window = w.baseline_total as f64 / (effective_min / spike_min).max(1) as f64;
+    Ok((w.current >= cfg.spike_min_count
+        && w.current as f64 >= cfg.spike_factor * per_window.max(1.0))
+    .then_some(per_window))
 }
 
 /// Slack below the previous tick's data clock, for logs that arrive slightly out of order.
@@ -231,17 +267,90 @@ mod tests {
         }
     }
 
+    fn cov(covered_min: u32) -> Coverage {
+        Coverage { covered_min }
+    }
+
     #[test]
     fn spike_needs_min_count_factor_and_age() {
         let cfg = DetectConfig::default();
-        assert_eq!(spike_baseline(&cfg, &window(10, 0, 120), NOW), Some(0.0)); // 10 ≥ 5×max(0,1)
-        assert_eq!(spike_baseline(&cfg, &window(9, 0, 120), NOW), None); // below min count
-        assert_eq!(spike_baseline(&cfg, &window(50, 120, 120), NOW), Some(10.0)); // 50 ≥ 5×10
-        assert_eq!(spike_baseline(&cfg, &window(49, 120, 120), NOW), None);
-        assert_eq!(spike_baseline(&cfg, &window(100, 0, 64), NOW), None); // younger than 65 min
+        let spike = |w: &TemplateWindow| spike_baseline(&cfg, w, cov(60), NOW);
+        assert_eq!(spike(&window(10, 0, 120)), Ok(Some(0.0))); // 10 >= 5*max(0,1)
+        assert_eq!(spike(&window(9, 0, 120)), Ok(None)); // below min count
+        assert_eq!(spike(&window(50, 120, 120)), Ok(Some(10.0))); // 50 >= 5*10
+        assert_eq!(spike(&window(49, 120, 120)), Ok(None));
         let mut o = window(100, 0, 120);
         o.template = OVERFLOW.into();
-        assert_eq!(spike_baseline(&cfg, &o, NOW), None);
+        assert_eq!(spike(&o), Ok(None));
+    }
+
+    #[test]
+    fn thin_coverage_is_skipped() {
+        let cfg = DetectConfig::default();
+        let w = window(100, 0, 120);
+        assert_eq!(
+            spike_baseline(&cfg, &w, cov(0), NOW),
+            Err(SpikeSkip::Coverage)
+        );
+        assert_eq!(
+            spike_baseline(&cfg, &w, cov(29), NOW),
+            Err(SpikeSkip::Coverage)
+        );
+        assert_eq!(spike_baseline(&cfg, &w, cov(30), NOW), Ok(Some(0.0)));
+        let mut o = window(100, 0, 120);
+        o.template = OVERFLOW.into();
+        assert_eq!(
+            spike_baseline(&cfg, &o, cov(0), NOW),
+            Ok(None),
+            "overflow is not a skip"
+        );
+    }
+
+    #[test]
+    fn coverage_shrinks_the_baseline_windows() {
+        let cfg = DetectConfig::default();
+        let w = window(60, 120, 120);
+        // 60 covered minutes: 12 windows, 10 per window; 60 >= 5*10.
+        assert_eq!(spike_baseline(&cfg, &w, cov(60), NOW), Ok(Some(10.0)));
+        // 30 covered minutes: 6 windows, 20 per window; 60 < 5*20.
+        assert_eq!(spike_baseline(&cfg, &w, cov(30), NOW), Ok(None));
+        assert_eq!(
+            spike_baseline(&cfg, &window(100, 120, 120), cov(30), NOW),
+            Ok(Some(20.0))
+        );
+    }
+
+    #[test]
+    fn young_templates_can_spike_after_ten_minutes() {
+        let cfg = DetectConfig::default();
+        assert_eq!(
+            spike_baseline(&cfg, &window(100, 0, 9), cov(60), NOW),
+            Ok(None)
+        );
+        // 10 minutes old: existed 5 = one spike window.
+        assert_eq!(
+            spike_baseline(&cfg, &window(100, 0, 10), cov(60), NOW),
+            Ok(Some(0.0))
+        );
+        // 11 minutes old with a burst: one window of baseline.
+        assert_eq!(
+            spike_baseline(&cfg, &window(100, 4, 11), cov(60), NOW),
+            Ok(Some(4.0))
+        );
+        assert_eq!(
+            spike_baseline(&cfg, &window(19, 4, 11), cov(60), NOW),
+            Ok(None)
+        );
+        // 64 minutes old: effective 59 -> 11 windows, not 12.
+        assert_eq!(
+            spike_baseline(&cfg, &window(100, 110, 64), cov(60), NOW),
+            Ok(Some(10.0))
+        );
+        // Coverage below the existed minutes wins: effective 30 -> 6 windows.
+        assert_eq!(
+            spike_baseline(&cfg, &window(100, 120, 64), cov(30), NOW),
+            Ok(Some(20.0))
+        );
     }
 
     fn candidate(first_seen_ns: i64, service_oldest_ns: i64) -> NewCandidate {

@@ -623,6 +623,36 @@ async fn template_windows_counts_current_and_baseline() {
 
 #[tokio::test]
 #[ignore = "requires ClickHouse: run against the live stack"]
+async fn covered_minutes_counts_distinct_minutes_with_any_hit() {
+    let (s, store) = log_store().await;
+    let now = now_ns();
+    assert_eq!(store.covered_minutes(5, 60).await.unwrap(), 0, "no hits");
+    let at = |m: i64| now - m * MIN_NS - MIN_NS / 2;
+    let mut hits = Vec::new();
+    let mut id = 0;
+    // Template 1 covers baseline minutes 6..=15, template 2 minutes 46..=55: a 30-minute gap.
+    for m in 6..=15 {
+        id += 1;
+        hits.push(hit(id, 1, at(m), ""));
+    }
+    for m in 46..=55 {
+        id += 1;
+        hits.push(hit(id, 2, at(m), ""));
+        id += 1;
+        hits.push(hit(id, 2, at(m) + 1_000, "")); // same minute: counted once
+    }
+    // Outside the baseline window: the spike window and before it.
+    id += 1;
+    hits.push(hit(id, 1, at(1), ""));
+    id += 1;
+    hits.push(hit(id, 1, at(70), ""));
+    store.insert_log_hits(&hits).await.unwrap();
+    assert_eq!(store.covered_minutes(5, 60).await.unwrap(), 20);
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
 async fn new_candidates_and_alerts() {
     let (s, store) = log_store().await;
     let now = now_ns();

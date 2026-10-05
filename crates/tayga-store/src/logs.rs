@@ -134,6 +134,27 @@ impl Store {
             .await
     }
 
+    /// Distinct clock minutes within the `baseline_min` minutes before the last `spike_min`
+    /// minutes that have at least one hit of any template. A minute with no logs at all means
+    /// the pipeline was down, so this is the coverage of the spike baseline.
+    pub async fn covered_minutes(
+        &self,
+        spike_min: u32,
+        baseline_min: u32,
+    ) -> clickhouse::error::Result<u32> {
+        let n: u64 = self
+            .client()
+            .query(
+                "SELECT uniqExact(toStartOfMinute(ts)) FROM log_template_hits \
+                 WHERE ts > now64(9) - toIntervalMinute(?) AND ts <= now64(9) - toIntervalMinute(?)",
+            )
+            .bind(spike_min.saturating_add(baseline_min))
+            .bind(spike_min)
+            .fetch_one()
+            .await?;
+        Ok(u32::try_from(n).unwrap_or(u32::MAX))
+    }
+
     /// Latest hit `ts` in the last 3 days (the hits TTL) in ns, or 0 when there is none. The
     /// logminer's data clock for new-template detection.
     pub async fn data_now_ns(&self) -> clickhouse::error::Result<i64> {

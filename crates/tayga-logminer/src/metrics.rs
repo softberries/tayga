@@ -1,3 +1,4 @@
+use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
@@ -6,6 +7,20 @@ use prometheus_client::registry::Registry;
 use std::sync::atomic::AtomicU64;
 use tayga_common::metrics::KindLabel;
 use tayga_drain::detect::AlertKind;
+
+/// `reason` label on `spike_skipped`: `coverage`.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct ReasonLabel {
+    pub reason: String,
+}
+
+impl ReasonLabel {
+    pub fn new(reason: &str) -> Self {
+        Self {
+            reason: reason.to_string(),
+        }
+    }
+}
 
 /// `kind` label on `alerts`: `new` | `spike`.
 #[derive(Clone)]
@@ -21,6 +36,8 @@ pub struct LogminerMetrics {
     pub data_lag_seconds: Gauge<f64, AtomicU64>,
     /// Failed saves of the new-template watermark to `logminer_state`.
     pub state_save_failures: Counter,
+    /// Template windows not judged for a spike, by reason.
+    pub spike_skipped: Family<ReasonLabel, Counter>,
 }
 
 impl Default for LogminerMetrics {
@@ -36,6 +53,7 @@ impl Default for LogminerMetrics {
             detect_seconds: Histogram::new(exponential_buckets(0.01, 2.0, 12)),
             data_lag_seconds: Gauge::default(),
             state_save_failures: Counter::default(),
+            spike_skipped: Family::default(),
         }
     }
 }
@@ -88,6 +106,12 @@ impl LogminerMetrics {
             "Failed saves of the new-template watermark to logminer_state",
             m.state_save_failures.clone(),
         );
+        registry.register(
+            "tayga_logminer_spike_skipped",
+            "Spike candidates not judged, by reason (coverage: under half the baseline minutes had logs)",
+            m.spike_skipped.clone(),
+        );
+        drop(m.spike_skipped.get_or_create(&ReasonLabel::new("coverage")));
         // Export both series at 0 so the family is visible before the first alert.
         for kind in [AlertKind::New, AlertKind::Spike] {
             drop(m.alerts.get_or_create(&KindLabel::new(kind.as_str())));
@@ -109,6 +133,9 @@ mod tests {
         m.alerts.get_or_create(&KindLabel::new("new")).inc();
         m.detect_seconds.observe(0.015);
         m.data_lag_seconds.set(2.5);
+        m.spike_skipped
+            .get_or_create(&ReasonLabel::new("coverage"))
+            .inc();
         let out = tayga_common::metrics::render(&registry);
         for line in [
             "tayga_logminer_logs_mined_total 1",
@@ -123,6 +150,7 @@ mod tests {
             "# TYPE tayga_logminer_data_lag_seconds gauge",
             "tayga_logminer_data_lag_seconds 2.5",
             "tayga_logminer_state_save_failures_total 0",
+            "tayga_logminer_spike_skipped_total{reason=\"coverage\"} 1",
         ] {
             assert!(out.contains(line), "missing {line:?} in\n{out}");
         }
