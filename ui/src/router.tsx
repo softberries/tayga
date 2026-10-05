@@ -11,10 +11,11 @@ import {
 } from '@tanstack/react-router'
 import { isApiError } from './api/client'
 import { api } from './api/queries'
-import { setSessionLostHandler, singleFlight } from './app/auth'
+import { GUARD_TIMEOUT_MS, safeNext, setSessionLostHandler, singleFlight, withTimeout } from './app/auth'
 import { HEX32, U64, validateHomeSearch, validateLogAlertsSearch, validateLogTemplatesSearch, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch, validateTracesSearch } from './app/search'
 import type { RootSearch } from './app/search'
 import { AppShell } from './components/shell/AppShell'
+import { AppPending } from './components/shell/AppPending'
 import { NotFound } from './pages/NotFound'
 import { RouteError } from './pages/RouteError'
 
@@ -40,49 +41,69 @@ function ShellNotFound() {
   )
 }
 
+/** The API's config, or undefined when it fails or is slow: the guard then lets the page load. */
+function guardConfig(queryClient: QueryClient) {
+  return withTimeout(queryClient.ensureQueryData(api.config()), GUARD_TIMEOUT_MS).catch(() => undefined)
+}
+
 /**
- * The bare root renders only its outlet. Under it sit the login page and `_shell`, a pathless
- * layout with the rail and header that owns every app page, the range search params (so
- * /login neither keeps nor shows `since`/`until`) and the session guard.
+ * Whether `auth/me` says there is a session. `unknown` (an error other than 401, or no answer
+ * within the timeout) fails open: the API still guards its data, and the first query's 401
+ * redirects then (createQueryClient).
+ */
+async function sessionState(queryClient: QueryClient): Promise<'signed-in' | 'signed-out' | 'unknown'> {
+  try {
+    await withTimeout(queryClient.ensureQueryData(api.me()), GUARD_TIMEOUT_MS)
+    return 'signed-in'
+  } catch (e) {
+    return isApiError(e) && e.status === 401 ? 'signed-out' : 'unknown'
+  }
+}
+
+/**
+ * The root renders only its outlet. Under it sit the login page and `_shell`, a pathless
+ * layout with the rail and header that owns every app page and the range search params (so
+ * /login neither keeps nor shows `since`/`until`).
+ *
+ * The session guard lives here, so it covers every path but /login, unknown ones included:
+ * with auth on and no session, it sends the user to /login with `next` set to where they were
+ * going. While it waits (over a second), a skeleton of the shell shows instead of a blank page.
  */
 const rootRoute = createRootRouteWithContext<RouterContext>()({
+  beforeLoad: async ({ context: { queryClient }, location }) => {
+    if (location.pathname === '/login') return
+    const config = await guardConfig(queryClient)
+    if (!config?.auth_enabled) return
+    if ((await sessionState(queryClient)) === 'signed-out') throw redirect({ to: '/login', search: { next: location.href } })
+  },
+  pendingComponent: AppPending,
   notFoundComponent: ShellNotFound,
   errorComponent: RouteError,
 })
 
-/**
- * With auth on, no session sends every app page to /login with `next` set to where the user
- * was going. A config or `auth/me` failure other than 401 lets the page load: the API still
- * guards its data, and a 401 from any query redirects later (createQueryClient).
- */
 const shellRoute = createRoute({
   getParentRoute: () => rootRoute,
   id: '_shell',
   validateSearch: (s: Record<string, unknown>): RootSearch => validateRootSearch(s),
   search: { middlewares: [retainSearchParams<RootSearch>(['since', 'until'])] },
-  beforeLoad: async ({ context: { queryClient }, location }) => {
-    const config = await queryClient.ensureQueryData(api.config()).catch(() => undefined)
-    if (!config?.auth_enabled) return
-    try {
-      await queryClient.ensureQueryData(api.me())
-    } catch (e) {
-      if (isApiError(e) && e.status === 401) throw redirect({ to: '/login', search: { next: location.href } })
-    }
-  },
   component: AppShell,
   // A not-found under the shell replaces the shell's own component, so it brings the shell.
   notFoundComponent: ShellNotFound,
   errorComponent: RouteError,
 })
 
-/** Outside the shell: no rail, no header. With auth off it only redirects home. */
+/**
+ * Outside the shell: no rail, no header. With auth off it only redirects home; a user who is
+ * already signed in goes on to a safe `next`.
+ */
 const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: 'login',
   validateSearch: (s: Record<string, unknown>): { next?: string } => (typeof s.next === 'string' ? { next: s.next } : {}),
-  beforeLoad: async ({ context: { queryClient } }) => {
-    const config = await queryClient.ensureQueryData(api.config()).catch(() => undefined)
+  beforeLoad: async ({ context: { queryClient }, search }) => {
+    const config = await guardConfig(queryClient)
     if (!config?.auth_enabled) throw redirect({ to: '/', replace: true })
+    if ((await sessionState(queryClient)) === 'signed-in') throw redirect({ href: safeNext(search.next), replace: true })
   },
   component: lazyRouteComponent(() => import('./routes/login'), 'LoginPage'),
 })

@@ -1,6 +1,7 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
 import { afterEach, vi } from 'vitest'
+import { AUTH_OFF, seed } from './seed'
 
 // jsdom lacks these browser APIs that Radix and Motion use.
 class ResizeObserverStub {
@@ -60,6 +61,7 @@ window.matchMedia = vi.fn((query: string) => {
 
 afterEach(() => {
   cleanup()
+  seed(AUTH_OFF)
   media.dark = false
   media.reduce = false
   media.listeners.clear()

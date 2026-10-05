@@ -52,15 +52,33 @@ export function useSession(): Session {
 }
 
 /**
- * Logs out, then leaves the shell for /login and drops every cached query. The caches are
+ * Logs out, then leaves the shell for /login and drops every cached query. The user is
+ * forgotten first, so /login does not send a still-cached user straight back; the rest is
  * cleared after the shell has gone, so no mounted query refetches without a session. If the
- * logout request fails the user stays signed in and where they are; the error propagates.
+ * logout request fails the user stays signed in and where they are; the error propagates for
+ * the caller to show.
  */
 export async function signOut(queryClient: QueryClient, navigate: UseNavigateResult<string>): Promise<void> {
   await authApi.logout()
   await queryClient.cancelQueries()
+  queryClient.removeQueries({ queryKey: api.me().queryKey })
   await navigate({ to: '/login' })
   queryClient.clear()
+}
+
+/** What the user menu and the palette say when logout fails. */
+export const SIGN_OUT_FAILED = "Couldn't sign out, try again"
+
+/** How long the session guard waits for `/config` or `auth/me` before letting the page load. */
+export const GUARD_TIMEOUT_MS = 3_000
+
+/** `p`, or a rejection once `ms` have passed. */
+export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms)
+  })
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer))
 }
 
 let sessionLostHandler: (() => void) | null = null

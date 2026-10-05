@@ -3,6 +3,9 @@ import { RouterProvider, createMemoryHistory } from '@tanstack/react-router'
 import { render } from '@testing-library/react'
 import { LazyMotion, MotionConfig, domAnimation } from 'motion/react'
 import { vi } from 'vitest'
+import { api } from '../api/queries'
+import type { ClientConfig } from '../api/types'
+import { AUTH_OFF, seed, seededConfig } from './seed'
 import { LiveProvider } from '../app/live'
 import { createQueryClient } from '../app/queryClient'
 import { TooltipProvider } from '../components/ui/Tooltip'
@@ -16,6 +19,8 @@ import { ThemeProvider } from '../theme/ThemeProvider'
 export type Routes = Record<string, { status?: number; body: unknown; headers?: Record<string, string> }>
 
 export function stubApi(routes: Routes) {
+  const config = routes['/config']
+  seed(config && (config.status ?? 200) === 200 ? (config.body as ClientConfig) : AUTH_OFF)
   const fetch = vi.fn(async (input: string, _init?: RequestInit) => {
     const url = new URL(input, 'http://test')
     const path = url.pathname.replace(/^\/api\/v1/, '')
@@ -30,24 +35,11 @@ export function stubApi(routes: Routes) {
   return fetch
 }
 
-/**
- * Every request but `/config` (auth off) stays pending, for loading states. The config answers
- * because the shell's session guard waits for it before the page renders.
- */
-export function stubPendingApi() {
-  const fetch = vi.fn((input: string, _init?: RequestInit) =>
-    new URL(input, 'http://test').pathname === '/api/v1/config'
-      ? Promise.resolve(new Response(JSON.stringify({ jaeger_url: null, grafana_url: null, auth_enabled: false })))
-      : new Promise<Response>(() => {}),
-  )
-  vi.stubGlobal('fetch', fetch)
-  return fetch
-}
-
 /** Renders the app's real router (same options as production) at `url` with the providers. */
 export function renderApp(url: string) {
   const queryClient = createQueryClient()
   queryClient.setDefaultOptions({ queries: { ...queryClient.getDefaultOptions().queries, retry: false } })
+  queryClient.setQueryData(api.config().queryKey, seededConfig())
   const history = createMemoryHistory({ initialEntries: [url] })
   const router = createAppRouter(queryClient, history)
   const utils = render(
