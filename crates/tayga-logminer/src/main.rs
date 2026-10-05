@@ -320,7 +320,7 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     let mut clock = NewTemplateClock {
         watermark: new_watermark,
         epoch_start,
-        partitions: BTreeMap::new(),
+        partitions: None,
     };
     let mut seen = PartitionClocks::default();
     tracing::info!(
@@ -544,8 +544,10 @@ struct NewTemplateClock {
     watermark: i64,
     epoch_start: i64,
     /// Per assigned partition: newest flushed hit `ts` and whether the partition is caught up.
-    /// Refreshed before each detection pass.
-    partitions: BTreeMap<i32, (i64, bool)>,
+    /// Refreshed before each detection pass. `None` when the consumer has no usable assignment
+    /// (empty during a rebalance or rejoin, or the lookup failed): the pass then holds at the
+    /// watermark.
+    partitions: Option<BTreeMap<i32, (i64, bool)>>,
 }
 
 /// A partition whose latest consumed record is older than this is replaying a backlog.
@@ -658,18 +660,16 @@ fn resolve_position(
     position.or(committed).or(low)
 }
 
-/// Builds the per-partition view for one detection pass: prunes revoked partitions using the
-/// consumer's current assignment, then fetches the watermarks of every assigned partition
-/// (blocking librdkafka calls, run on the blocking pool, `WATERMARK_TIMEOUT` each; a failed
-/// partition is skipped and the others still asked) and classifies it with [`partition_state`].
-async fn partition_snapshot(
-    consumer: &Arc<StreamConsumer>,
+/// The assigned partitions of `topic`, pruning `seen` to them; `None` (and `seen` untouched) when
+/// the assignment is empty or could not be read. An empty assignment is a rebalance or a rejoin
+/// (e.g. after `max.poll.interval.ms` during a long ClickHouse outage), not "nothing to wait
+/// for": pruning there would forget every partition's progress.
+fn assigned_partitions(
+    assignment: rdkafka::error::KafkaResult<TopicPartitionList>,
     topic: &str,
     seen: &mut PartitionClocks,
-    now_ns: i64,
-    hold_ns: i64,
-) -> BTreeMap<i32, (i64, bool)> {
-    let assigned: Vec<i32> = match consumer.assignment() {
+) -> Option<Vec<i32>> {
+    let assigned: Vec<i32> = match assignment {
         Ok(tpl) => tpl
             .elements()
             .iter()
@@ -678,13 +678,29 @@ async fn partition_snapshot(
             .collect(),
         Err(e) => {
             tracing::warn!(error = %e, "reading the consumer assignment failed");
-            return BTreeMap::new();
+            return None;
         }
     };
-    seen.retain_assigned(&assigned.iter().copied().collect());
     if assigned.is_empty() {
-        return BTreeMap::new();
+        return None;
     }
+    seen.retain_assigned(&assigned.iter().copied().collect());
+    Some(assigned)
+}
+
+/// Builds the per-partition view for one detection pass (`None`: no usable assignment, see
+/// [`assigned_partitions`]): prunes revoked partitions using the consumer's current assignment,
+/// then fetches the watermarks of every assigned partition
+/// (blocking librdkafka calls, run on the blocking pool, `WATERMARK_TIMEOUT` each; a failed
+/// partition is skipped and the others still asked) and classifies it with [`partition_state`].
+async fn partition_snapshot(
+    consumer: &Arc<StreamConsumer>,
+    topic: &str,
+    seen: &mut PartitionClocks,
+    now_ns: i64,
+    hold_ns: i64,
+) -> Option<BTreeMap<i32, (i64, bool)>> {
+    let assigned = assigned_partitions(consumer.assignment(), topic, seen)?;
     let positions = offsets_of(consumer.position(), topic);
     let c = Arc::clone(consumer);
     let t = topic.to_string();
@@ -723,13 +739,15 @@ async fn partition_snapshot(
             )
             .map(|st| (p, st))
         })
-        .collect()
+        .collect::<BTreeMap<_, _>>()
+        .into()
 }
 
 /// Data clock for new-template detection (spec 7a §5.1): the minimum newest-hit `ts` over
 /// partitions that are not caught up, so a lagging partition holds the clock back. When every
 /// partition is caught up (an idle partition must not hold it back), the maximum over all.
-/// With no partition data (restart, nothing consumed yet), `fallback_ns`.
+/// With no partition data (assigned, but every partition caught up with no hit, or restart with
+/// nothing consumed yet), `fallback_ns`.
 fn detection_clock(per_partition: &BTreeMap<i32, (i64, bool)>, fallback_ns: i64) -> i64 {
     per_partition
         .values()
@@ -738,6 +756,16 @@ fn detection_clock(per_partition: &BTreeMap<i32, (i64, bool)>, fallback_ns: i64)
         .min()
         .or_else(|| per_partition.values().map(|(ts, _)| *ts).max())
         .unwrap_or(fallback_ns)
+}
+
+/// The clock of one pass: with no usable assignment, hold at `hold_ns` (the watermark), since
+/// nothing says the backlog was read; otherwise [`detection_clock`] with `fallback_ns`.
+fn pass_clock(
+    partitions: Option<&BTreeMap<i32, (i64, bool)>>,
+    fallback_ns: i64,
+    hold_ns: i64,
+) -> i64 {
+    partitions.map_or(hold_ns, |m| detection_clock(m, fallback_ns))
 }
 
 /// One detection pass (spec §6). Failures are logged; the loop continues. The new-template
@@ -833,8 +861,12 @@ async fn find_alerts(
             );
         }
     }
-    // Never ahead of the wall clock; the store's latest hit stands in until partitions report.
-    let data_now = data_clock(detection_clock(&clock.partitions, stored_now), now);
+    // Never ahead of the wall clock; the store's latest hit stands in when every assigned
+    // partition is caught up with no hit; with no usable assignment the watermark holds.
+    let data_now = data_clock(
+        pass_clock(clock.partitions.as_ref(), stored_now, clock.watermark),
+        now,
+    );
     let mut out = Vec::new();
     // Once per pass; each template's coverage is derived from these buckets.
     let buckets = store
@@ -1313,6 +1345,37 @@ mod tests {
             7,
         );
         assert_eq!(ok, Some((100, true)));
+    }
+
+    #[test]
+    fn an_empty_or_failed_assignment_holds_at_the_watermark_and_keeps_partition_state() {
+        let mut seen = PartitionClocks::default();
+        let mut b = Pending::default();
+        b.record(0, 4, 10, Instant::now());
+        b.record(1, 9, 20, Instant::now());
+        seen.record_flush(&b);
+        let before: Vec<_> = seen.by_partition.keys().copied().collect();
+        assert_eq!(
+            assigned_partitions(Ok(TopicPartitionList::new()), "t", &mut seen),
+            None
+        );
+        let err = Err(rdkafka::error::KafkaError::ClientCreation("x".into()));
+        assert_eq!(assigned_partitions(err, "t", &mut seen), None);
+        let mut other_topic = TopicPartitionList::new();
+        other_topic.add_partition("u", 0);
+        assert_eq!(assigned_partitions(Ok(other_topic), "t", &mut seen), None);
+        let after: Vec<_> = seen.by_partition.keys().copied().collect();
+        assert_eq!(after, before, "nothing pruned");
+        // No usable assignment: the pass holds at the watermark, not the store's latest hit.
+        assert_eq!(pass_clock(None, 999, 40), 40);
+        // Assigned, every partition caught up with no hits: the store's latest hit.
+        assert_eq!(pass_clock(Some(&BTreeMap::new()), 999, 40), 999);
+        assert_eq!(pass_clock(Some(&parts(&[(0, 50, false)])), 999, 40), 50);
+        // A real assignment still prunes revoked partitions.
+        let mut tpl = TopicPartitionList::new();
+        tpl.add_partition("t", 1);
+        assert_eq!(assigned_partitions(Ok(tpl), "t", &mut seen), Some(vec![1]));
+        assert_eq!(seen.by_partition.keys().copied().collect::<Vec<_>>(), [1]);
     }
 
     #[test]
