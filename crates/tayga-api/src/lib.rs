@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod lag;
 pub mod model;
 pub mod openmetrics;

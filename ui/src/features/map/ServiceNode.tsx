@@ -4,13 +4,16 @@
  * real button that opens the service drawer, so the map is keyboard reachable.
  */
 import { Handle, Position, useStore } from '@xyflow/react'
+import { Layers } from 'lucide-react'
 import type { Node, NodeProps } from '@xyflow/react'
-import { memo } from 'react'
+import { memo, useState } from 'react'
 import type { Health, NodeView } from '../../api/types'
+import { Tooltip } from '../../components/ui/Tooltip'
 import { cx } from '../../lib/cx'
-import { duration } from '../../lib/format'
+import { compact, duration } from '../../lib/format'
 import { NODE_H, NODE_W } from './layout'
 import { HEALTH_COLOR, errText, rateText } from './model'
+import type { InfraBadge } from './model'
 
 export interface ServiceNodeData extends Record<string, unknown> {
   service: string
@@ -20,6 +23,8 @@ export interface ServiceNodeData extends Record<string, unknown> {
   match: boolean
   /** A search is active and this service does not match it. */
   dimmed: boolean
+  /** Infrastructure services this one calls that the map hides; null when it hides none. */
+  infra: InfraBadge | null
   /** Its drawer is open. */
   active: boolean
   onOpen: (service: string) => void
@@ -31,11 +36,65 @@ export type ServiceNodeType = Node<ServiceNodeData, 'service'>
 
 const HEALTH_WORD: Record<Health, string> = { ok: 'healthy', slow: 'slow', error: 'errors' }
 
-export function nodeLabel(service: string, view: NodeView | null): string {
-  if (!view) return `${service}: no server spans in this window. Open details.`
+function infraSentence(infra: InfraBadge | null): string {
+  if (!infra) return ''
+  const names = infra.services.map((s) => s.name).join(', ')
+  return ` Calls hidden infrastructure: ${names}${infra.failing ? ', failing' : ''}.`
+}
+
+export function nodeLabel(service: string, view: NodeView | null, infra: InfraBadge | null = null): string {
+  const extra = infraSentence(infra)
+  if (!view) return `${service}: no server spans in this window.${extra} Open details.`
   return (
     `${service}, ${HEALTH_WORD[view.health]}: ${rateText(view.rate)} calls, ` +
-    `${errText(view.error_ratio)} errors, p99 ${duration(view.p99_ns)}. Open details.`
+    `${errText(view.error_ratio)} errors, p99 ${duration(view.p99_ns)}.${extra} Open details.`
+  )
+}
+
+/**
+ * "+1 infra" inside the card's lower right corner, on a solid panel so no edge runs through it: red
+ * when a call into a hidden service is failing. The compact card (zoomed out) shows a layers
+ * icon and the count instead, large enough to read at fit zoom.
+ */
+function InfraPill({
+  infra,
+  tight,
+  open,
+  onOpenChange,
+}: {
+  infra: InfraBadge
+  tight: boolean
+  open: boolean
+  onOpenChange: (o: boolean) => void
+}) {
+  const tip = (
+    <span className="tabular flex flex-col gap-0.5 font-mono">
+      {infra.services.map((s) => (
+        <span key={s.name} className={cx(s.errorRate > 0 && 'text-err')}>
+          {s.name} · {compact(s.perMin)}/min · {errText(s.errorRate)} err
+        </span>
+      ))}
+    </span>
+  )
+  return (
+    <Tooltip content={tip} side="bottom" open={open} onOpenChange={onOpenChange}>
+      <span
+        data-infra-badge={infra.failing ? 'err' : 'slow'}
+        className={cx(
+          'absolute bottom-1 right-2 flex items-center rounded-full border bg-panel font-mono font-semibold',
+          tight ? 'gap-1 px-2 py-0.5 text-[15px] leading-5' : 'gap-1 px-1.5 text-[12px] leading-4',
+          infra.failing ? 'border-err text-err' : 'border-slow text-slow',
+        )}
+      >
+        {tight ? (
+          <>
+            <Layers aria-hidden size={15} />+{infra.services.length}
+          </>
+        ) : (
+          `+${infra.services.length} infra`
+        )}
+      </span>
+    </Tooltip>
   )
 }
 
@@ -95,7 +154,10 @@ function keyMetric(view: NodeView): string | null {
 }
 
 function ServiceNodeImpl({ data }: NodeProps<ServiceNodeType>) {
-  const { service, view, match, dimmed, active, onOpen, onFocusCard } = data
+  const { service, view, match, dimmed, infra, active, onOpen, onFocusCard } = data
+  // The pill is not focusable (the card is the button): the tooltip opens with the card's keyboard focus too.
+  const [hover, setHover] = useState(false)
+  const [focused, setFocused] = useState(false)
   const health: Health = view?.health ?? 'ok'
   const degraded = health !== 'ok'
   // A boolean selector: cards re-render only when the zoom crosses the threshold.
@@ -109,15 +171,28 @@ function ServiceNodeImpl({ data }: NodeProps<ServiceNodeType>) {
         data-service={service}
         data-health={health}
         data-compact={compact || undefined}
-        aria-label={nodeLabel(service, view)}
+        aria-label={nodeLabel(service, view, infra)}
         aria-current={active ? 'true' : undefined}
         onClick={() => onOpen(service)}
-        onFocus={() => onFocusCard(service)}
+        onFocus={(e) => {
+          onFocusCard(service)
+          // Keyboard focus only: a pointer press has no use for the tooltip.
+          setFocused(e.currentTarget.matches(':focus-visible'))
+        }}
+        onBlur={() => setFocused(false)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') {
+            setFocused(false)
+            setHover(false)
+          }
+        }}
         style={{ width: NODE_W, height: NODE_H }}
         className={cx(
           'tg-map-node relative flex cursor-pointer items-center rounded-card border bg-panel text-left text-ink shadow-panel',
           'transition-[opacity,box-shadow,border-color] duration-200 hover:border-accent',
           compact ? 'gap-2 px-2.5' : 'gap-2.5 px-2.5',
+          // Room under the text for the infra pill, so a name never reaches it; cards without one keep their layout.
+          infra && 'pb-[22px]',
           health === 'error' && 'tg-map-node-err border-err',
           health === 'slow' && 'tg-map-node-slow border-slow',
           health === 'ok' && 'border-panel-line',
@@ -174,6 +249,7 @@ function ServiceNodeImpl({ data }: NodeProps<ServiceNodeType>) {
             )}
           />
         ) : null}
+        {infra ? <InfraPill infra={infra} tight={compact} open={hover || focused} onOpenChange={setHover} /> : null}
       </button>
       <Handle type="source" position={Position.Right} isConnectable={false} className="tg-map-handle" />
     </>

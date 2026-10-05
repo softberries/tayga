@@ -3,14 +3,18 @@
  * glowing and failing calls as flowing dashed red edges (still under reduced motion). The
  * whole preview links to the interactive map.
  */
+import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { ArrowRight } from 'lucide-react'
 import { useId, useMemo } from 'react'
+import { DEFAULT_INFRA_SERVICES } from '../../api/schemas'
+import { api } from '../../api/queries'
 import type { ServiceMapView } from '../../api/types'
 import { rangeSearch } from '../../app/range'
 import type { Range } from '../../app/range'
 import { cx } from '../../lib/cx'
 import { NARROW_QUERY, useMediaQuery } from '../../lib/useMediaQuery'
+import { hideInfra } from '../map/model'
 import { MINI, isFailingEdge, layoutMiniMap, servicesOf } from './mapLayout'
 
 /** Label size in viewBox units: about 9 px on a desktop card. */
@@ -26,10 +30,10 @@ const LABEL_CHARS = 16
 
 const label = (s: string) => (s.length > LABEL_CHARS ? `${s.slice(0, LABEL_CHARS - 1)}…` : s)
 
-export function describeMap(map: ServiceMapView): string {
+export function describeMap(map: ServiceMapView, extra: readonly string[] = []): string {
   const bad = map.nodes.filter((n) => n.health !== 'ok')
   const failing = map.edges.filter((e) => isFailingEdge(e) && e.parent !== e.child)
-  const services = servicesOf(map)
+  const services = servicesOf(map, extra)
   const withSpans = new Set(map.nodes.map((n) => n.service))
   const callerOnly = services.filter((s) => !withSpans.has(s))
   const parts = [`${services.length} services`]
@@ -39,8 +43,15 @@ export function describeMap(map: ServiceMapView): string {
   return `Service map: ${parts.join('; ')}.`
 }
 
-export function MiniMap({ map, range }: { map: ServiceMapView; range: Range }) {
-  const layout = useMemo(() => layoutMiniMap(map), [map])
+/** The home preview never draws the infrastructure services (the full map has a toggle for them). */
+export function MiniMap({ map: full, range }: { map: ServiceMapView; range: Range }) {
+  const config = useQuery(api.config())
+  const infra = config.data?.infra_services ?? DEFAULT_INFRA_SERVICES
+  const { map, extra } = useMemo(() => {
+    const r = hideInfra(full, infra, { range })
+    return { map: r.map, extra: r.extra }
+  }, [full, infra, range])
+  const layout = useMemo(() => layoutMiniMap(map, extra), [map, extra])
   const narrow = useMediaQuery(NARROW_QUERY)
   const glowId = `${useId()}-glow`
   const slowGlowId = `${glowId}-slow`
@@ -50,7 +61,7 @@ export function MiniMap({ map, range }: { map: ServiceMapView; range: Range }) {
       to="/map"
       search={rangeSearch(range)}
       className="group -mx-1 block overflow-x-auto rounded-field px-1 focus-visible:outline-offset-0"
-      aria-label={`${describeMap(map)} Open the service map.`}
+      aria-label={`${describeMap(map, extra)} Open the service map.`}
     >
       <svg
         role="presentation"

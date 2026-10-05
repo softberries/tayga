@@ -1,10 +1,11 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { Command } from 'cmdk'
-import { Activity, CalendarClock, ChartGantt, Clock, History, Moon, ScrollText, Server, TextAlignStart, Waypoints } from 'lucide-react'
+import { Activity, CalendarClock, ChartGantt, Clock, History, LogOut, Moon, ScrollText, Server, TextAlignStart, Waypoints } from 'lucide-react'
 import type { ReactElement, ReactNode } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../api/queries'
+import { SIGN_OUT_FAILED, signOut, useSession } from '../../app/auth'
 import { DEFAULT_SINCE, HEX32, SINCE_VALUES } from '../../app/search'
 import { setCustomRangeOpen } from '../../app/customRangeDialog'
 import { rangeSearch } from '../../app/range'
@@ -129,6 +130,9 @@ function PaletteBody({ onOpenChange, runAfterClose }: { onOpenChange: (o: boolea
   const { setMode } = useTheme()
   const navigate = useNavigate()
   const openItem = useOpenItem()
+  const queryClient = useQueryClient()
+  const { authEnabled } = useSession()
+  const [signOutFailed, setSignOutFailed] = useState(false)
 
   // Focus after the dialog's focus scope has recorded the opener, so closing returns focus
   // to it (an autoFocus here would make the scope remember this input instead).
@@ -179,7 +183,8 @@ function PaletteBody({ onOpenChange, runAfterClose }: { onOpenChange: (o: boolea
 
   const pages = useMemo(() => PAGES.filter((p) => !needle || p.label.toLowerCase().includes(needle)), [needle])
   const actions = useMemo(() => {
-    const list: { id: string; label: string; icon: ReactNode; run: () => void }[] = [
+    // `keepOpen`: the action closes nothing itself (sign-out leaves the page, or says it failed here).
+    const list: { id: string; label: string; icon: ReactNode; run: () => void; keepOpen?: boolean }[] = [
       ...(['light', 'dark', 'system'] as const).map((m) => ({
         id: `theme-${m}`,
         label: `Theme: ${m[0]?.toUpperCase()}${m.slice(1)}`,
@@ -206,9 +211,23 @@ function PaletteBody({ onOpenChange, runAfterClose }: { onOpenChange: (o: boolea
         // interaction and close the popover at once.
         run: () => runAfterClose(() => setCustomRangeOpen(true)),
       },
+      ...(authEnabled
+        ? [
+            {
+              id: 'sign-out',
+              label: 'Sign out',
+              icon: <LogOut size={15} />,
+              keepOpen: true,
+              run: () => {
+                setSignOutFailed(false)
+                signOut(queryClient, navigate).catch(() => setSignOutFailed(true))
+              },
+            },
+          ]
+        : []),
     ]
     return list.filter((a) => !needle || a.label.toLowerCase().includes(needle) || 'action'.includes(needle))
-  }, [setMode, navigate, needle, runAfterClose])
+  }, [setMode, navigate, needle, runAfterClose, authEnabled, queryClient])
 
   const showRecent = !query && recent.length > 0
   return (
@@ -326,10 +345,15 @@ function PaletteBody({ onOpenChange, runAfterClose }: { onOpenChange: (o: boolea
           ) : null}
         </div>
 
+        {signOutFailed ? (
+          <div role="alert" className="px-3 py-2.5 text-err">
+            {SIGN_OUT_FAILED}
+          </div>
+        ) : null}
         {actions.length > 0 ? (
           <Command.Group heading="Actions">
             {actions.map((a) => (
-              <Command.Item key={a.id} value={`action:${a.id}`} className={itemClass} onSelect={() => act(a.run)}>
+              <Command.Item key={a.id} value={`action:${a.id}`} className={itemClass} onSelect={() => (a.keepOpen ? a.run() : act(a.run))}>
                 <Row icon={a.icon} label={a.label} />
               </Command.Item>
             ))}

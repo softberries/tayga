@@ -32,7 +32,7 @@ Redpanda topic `tayga.signals` ──► tayga-logminer (separate consumer group
                                      └─► Redpanda topic `tayga.alerts`
 ```
 
-Workspace crates (`crates/`): `tayga-ingest`, `tayga-writer`, `tayga-assembler`, `tayga-logminer`, `tayga-api` (services); `tayga-analysis`, `tayga-drain` (Drain mining and alert rules, no I/O), `tayga-model`, `tayga-kafka`, `tayga-store`, `tayga-common` (libraries); `tayga-devtools` (flag, capture, verify-raw, emit-log CLI); `tayga-e2e` (end-to-end tests).
+Workspace crates (`crates/`): `tayga-ingest`, `tayga-writer`, `tayga-assembler`, `tayga-logminer`, `tayga-api` (services); `tayga-analysis`, `tayga-drain` (Drain mining and alert rules, no I/O), `tayga-model`, `tayga-kafka`, `tayga-store`, `tayga-common` (libraries); `tayga-devtools` (flag, capture, verify-raw, emit-log, hash-password CLI); `tayga-e2e` (end-to-end tests).
 
 ## Quick start
 
@@ -70,12 +70,14 @@ The app is a single-page React app in `ui/`, built into `ui/dist` and embedded i
 | Stories | `/` | KPI tiles, the story-groups table (kind, service, endpoint filters, search), an inspector for the selected group (request path, compact waterfall, comparison with normal), a mini service map and the log alerts |
 | Story | `/stories/{id}` | One story: root cause, group trend, full waterfall, comparison with normal, logs with their templates, related alerts |
 | Traces | `/traces`, `/traces/{id}` | Trace explorer (filters, duration scatter with brush selection, results table); the trace page has the waterfall and a span drawer |
-| Service map | `/map` | Services and their calls with health, rate, error ratio and p99; a node opens a drawer with RED charts and related stories |
+| Service map | `/map` | Services and their calls with health, rate, error ratio and p99; a node opens a drawer with RED charts and related stories. Infrastructure services are hidden unless "Show infrastructure" is on (see below) |
+| Login | `/login` | Only when authentication is on (see [Authentication](#authentication)) |
 | Logs | `/logs/alerts`, `/logs/templates`, `/logs/templates/{id}` | Log alerts, templates and a template's detail (`/logs` redirects to the alerts tab) |
 | Pipeline | `/pipeline` | Component status, metric history charts and consumer lag, from the recorder below; needs no Prometheus |
 
 Header and shortcuts:
 
+- Service map: infrastructure services (`flagd` by default) are hidden unless the "Show infrastructure" switch beside the search box is on; the switch is stored in the URL as `infra=true`. A service that called a hidden one keeps a "+N infra" badge on its card, amber, or red when any of those calls is failing; its tooltip lists each hidden callee with calls per minute and error percentage. The summary line adds "· N infra hidden". A service whose calls all went to hidden services stays on the map with its badge (unless it is infrastructure itself), and `/map?service=flagd` still opens flagd's drawer while it is hidden. The mini map on the Stories page always hides them. The header's degraded-services badge still counts infrastructure services. The list is `[map] infra_services` in the config file (default `["flagd"]`); set it in the file, not with an environment variable: Tayga's settings loader does not turn on the config crate's list parsing for `TAYGA__*` variables, so a list cannot be given that way (same as `metric_targets`). With an empty list the switch is not shown.
 - Time range: 15m, 1h, 24h or 7d (default 1h), each ending now, or "Custom…": a past window picked with "from" and "to" fields in local time, up to 7 days long and starting within the last 7 days. The custom range is kept in the URL as `since` and `until` (UTC) and shows in the header as, for example, "Oct 4 12:00 – 14:00"; links between pages keep it, and choosing a preset clears it.
 - Live: refreshes every 10 s and pauses while the browser tab is hidden. It is off, and cannot be turned on, while a custom range is set. The degraded-services badge (always the last 15 minutes) and the Pipeline page's job status and consumer lag show the current state and keep refreshing in any range.
 - A custom range in an old link may have aged past the 7 days of data: the pages then show the API's error with a "Show last 1h" button, and the URL is left alone until it is clicked.
@@ -102,6 +104,53 @@ npm --prefix ui run lint
 npm --prefix ui run typecheck
 make ui-e2e                  # Playwright against the live app (see ui/playwright.config.ts)
 ```
+
+## Authentication
+
+Off by default: with no `[auth]` section the API and the app are open, as before. Turning it on adds a login page and protects every `/api/*` route except the ones listed below. The settings live in the `[auth]` section of the config file (`TAYGA_CONFIG`, for example `deploy/tayga-api.toml`) or in `TAYGA__AUTH__*` environment variables:
+
+| Key (env var) | Meaning | Default |
+|---|---|---|
+| `enabled` (`TAYGA__AUTH__ENABLED`) | Turns authentication on. When it is on, the keys below are checked at startup and a bad value stops the API | `false` |
+| `username` (`TAYGA__AUTH__USERNAME`) | The one account. It may not contain `\|` or `:` | none (required when enabled) |
+| `password_hash` (`TAYGA__AUTH__PASSWORD_HASH`) | An Argon2id hash in PHC format (see below). Plain passwords are not accepted | none (required when enabled) |
+| `session_ttl` (`TAYGA__AUTH__SESSION_TTL`) | Session length: `<n>s`, `<n>m`, `<n>h` or `<n>d`, at most `365d` | `12h` |
+| `session_key` (`TAYGA__AUTH__SESSION_KEY`) | Base64 of at least 32 bytes, used to sign session cookies. When unset, a random key is generated per process, so every restart signs everyone out | unset |
+| `secure_cookie` (`TAYGA__AUTH__SECURE_COOKIE`) | Adds `Secure` to the cookie; set it when the app is served over HTTPS | `false` |
+
+Make the hash with the devtools command. On a terminal it asks for the password twice without echo; when its input is piped it reads the first line:
+
+```sh
+cargo run -q -p tayga-devtools -- hash-password
+printf '%s' 'my password' | cargo run -q -p tayga-devtools -- hash-password
+```
+
+Put the output in the config file, in quotes. With the compose stack that file is `deploy/tayga-api.toml`, which `deploy/compose.tayga.yaml` mounts read-only at `/etc/tayga/api.toml` and points `TAYGA_CONFIG` at; add the section there and restart tayga-api:
+
+```toml
+[auth]
+enabled = true
+username = "admin"
+password_hash = "$argon2id$v=19$..."
+```
+
+`deploy/tayga-api.toml` is tracked by git, so keep your edit out of commits. Avoid putting the hash in a compose `environment:` entry as written: compose interpolates `$` in its files, so `$argon2id$v=19$...` arrives mangled and the API refuses to start. If you do set `TAYGA__AUTH__PASSWORD_HASH` in a compose file, write every `$` in the hash as `$$`. A plain shell export (`TAYGA__AUTH__PASSWORD_HASH='$argon2id$...'`, single quotes) needs no escaping.
+
+How it works:
+
+- Signing in (`POST /api/v1/auth/login` with a JSON body `{"username", "password"}`, content type `application/json`) returns 204 and an `HttpOnly`, `SameSite=Strict` cookie `tayga_session`, signed with HMAC-SHA256. The session is not sliding: it ends `session_ttl` after sign-in, whatever the activity. The cookie is a signed token and the API keeps no session state: signing out clears the browser's cookie but does not revoke a copy of it, and a restart without `session_key`, or a new `session_key`, signs everyone out.
+- Scripts can skip the cookie and send HTTP Basic credentials with each request, for example `curl -u admin:password http://localhost:8090/api/v1/story-groups`. Each Basic request costs one password check.
+- Password checks are limited to 5 attempts per client IP in 5 minutes (IPv6 clients are keyed by their /64 prefix). Every attempt counts, and it is counted before the password is checked, so more than 5 parallel checks from one client can briefly get 429; a successful check clears the client's count, so in practice the limit is reached by failures. After that, both the login page and Basic requests return 429 with `Retry-After`, even for the correct password. The two share one count per IP: a script sending wrong Basic credentials more than 5 times in 5 minutes also locks out browser sign-ins from that IP until the window passes. The limiter uses the connection's address and ignores `X-Forwarded-For`, so behind a reverse proxy all users share the proxy's one limit.
+- Signing out (`POST /api/v1/auth/logout`) clears the cookie. It needs no session, but it does need a JSON content type (`application/json`), so a cross-site form post cannot trigger it.
+- Open without a session: `GET /healthz`, `GET /metrics`, `GET /api/v1/config`, `GET /api/v1/auth/me`, `POST /api/v1/auth/login`, `POST /api/v1/auth/logout`, and the app's own files (`/`, `/assets/*` and every client route). Everything else under `/api/` returns 401 `{"error":"unauthorized"}`, including unknown `/api/` paths. `/metrics` stays open, so scrapers need no credentials. `HEAD` is treated as `GET` for these open routes.
+- `GET /api/v1/auth/me` answers from the session cookie only: it returns 401 for a Basic `Authorization` header without a cookie, even with the right credentials. Scripts using Basic can call the data routes directly and need not ask `auth/me`.
+- `GET /api/v1/config` carries `auth_enabled`; the app reads it, and when it is `true` it asks `GET /api/v1/auth/me` and shows the login page on a 401 (`/login?next=…`, where `next` is a path inside the app). A later 401 from any request (an expired session) sends the user to the login page once, and back after signing in. The header shows a user menu with "Sign out". When authentication is off, `/api/v1/auth/*` returns 404 and `/login` redirects to `/`; a 401 then (from an authenticating reverse proxy, say) only shows the page's error state, with no redirect.
+- HTTPS: tayga-api serves plain HTTP. For HTTPS, put a reverse proxy in front of it and set `secure_cookie = true`; the cookie is then only sent over HTTPS.
+- It is one account, with no roles and no per-user data.
+
+## Load generator and the missing agent service
+
+The demo's load generator has a task, `ask_agent`, that posts to an `agent` service. That service is defined only in the demo's `compose.agent.yaml`, which Tayga's Makefile does not include, so every call failed and showed up as noise. `deploy/compose.tayga.yaml` therefore mounts `deploy/locust/tayga_locustfile.py` into the `load-generator` container and points `LOCUST_LOCUSTFILE` at it. That file imports the demo's locustfile unchanged (the vendored submodule is not edited) and removes the `ask_agent` task from `WebsiteUser`. Tayga itself keeps no ignore list.
 
 ## Log templates and alerts
 
@@ -193,11 +242,14 @@ JSON API:
 | `GET /api/v1/search` | `q` | Command palette: matching services, templates and story groups; a trace id when `q` is 32 hex characters |
 | `GET /api/v1/pipeline/series` | `metric`, `kind` (required), `job`, `labels` (`k=v`), `since`, `until` | A rate, gauge or quantile series from the recorded metrics |
 | `GET /api/v1/pipeline/lag` | none | Consumer lag per group (committed, end offset, lag) |
-| `GET /api/v1/config` | none | `{jaeger_url, grafana_url}` (null when unset) |
+| `GET /api/v1/config` | none | `{jaeger_url, grafana_url, auth_enabled, infra_services}` (the two links are null when unset; `infra_services` is the `[map]` list, default `["flagd"]`) |
+| `POST /api/v1/auth/login` | JSON body `{username, password}` | 204 and the session cookie; 401 on a wrong login, 429 when limited, 415 without a JSON content type. Only exists when authentication is on (404 otherwise) |
+| `POST /api/v1/auth/logout` | JSON content type | 204 and a cookie that clears the session. Only when authentication is on |
+| `GET /api/v1/auth/me` | none | `{username}` with a valid session, else 401. Only when authentication is on |
 | `GET /healthz` | none | `ok` |
 | `GET /metrics` | none | Prometheus metrics |
 
-Errors on these routes are JSON `{"error": "..."}`. A ClickHouse failure returns 503. `GET /api/v1/traces/{trace_id}` also carries the extra fields the app uses (span attributes, resource, events, self time). `GET /api/v1/service-map` changed shape: it returns an object, not an array, so a client that read the old array must read `edges`.
+With authentication on, every `/api/*` route in this table except `config` and the three `auth` routes needs a session cookie or Basic credentials (see [Authentication](#authentication)). Errors on these routes are JSON `{"error": "..."}`. A ClickHouse failure returns 503. `GET /api/v1/traces/{trace_id}` also carries the extra fields the app uses (span attributes, resource, events, self time). `GET /api/v1/service-map` changed shape: it returns an object, not an array, so a client that read the old array must read `edges`.
 
 App routes (client-side; every path below serves `index.html`, and the app renders the page):
 
@@ -206,24 +258,18 @@ App routes (client-side; every path below serves `index.html`, and the app rende
 | `/` | `since`, `until`, `kind`, `service`, `group` | Stories |
 | `/stories/{story_id}` | `since`, `until` | Story |
 | `/traces`, `/traces/{trace_id}` | `since`, `until`, filters | Trace explorer, trace |
-| `/map` | `since`, `until` | Service map |
+| `/map` | `since`, `until`, `service` (open drawer), `q` (search), `infra=true` (show infrastructure services) | Service map |
+| `/login` | `next` (path to return to) | Login, only when authentication is on |
 | `/logs/alerts`, `/logs/templates`, `/logs/templates/{id}` | `since`, `until`, filters | Logs |
 | `/pipeline` | `since`, `until` | Pipeline health |
 
-Redirects from the removed server-rendered pages (HTTP 308, query string kept):
-
-| Old route | Now |
-|---|---|
-| `/groups/{fingerprint}` | `/?group="{fingerprint}"` (the group is selected on Stories; the id is JSON-quoted in the URL) |
-| `/service-map` | `/map` |
-| `/alerts` | `/logs/alerts` |
-| `/templates`, `/templates/{id}` | `/logs/templates`, `/logs/templates/{id}` |
+Old server-rendered URLs (`/service-map`, `/alerts`, `/templates`, `/groups/…`) are not redirected; they show the app's not-found page.
 
 Static files: `/assets/*` is served with `Cache-Control: public, max-age=31536000, immutable`; `index.html` with `no-cache`. A GET to a path the app does not know serves `index.html` with status 200 (the app shows its own not-found page). A missing `/api/*` route or `/assets/*` file returns a JSON 404.
 
 ## Verified
 
-Rows above the `Plan 4` row were checked 2026-10-03 on branch `feat/plan-3-api-ui-e2e`; rows from the `Plan 4` row on were checked 2026-10-04 on branch `feat/plan-4-log-templates`; rows from the `Plan 5` row on were checked 2026-10-05 on branch `feat/plan-5-ui`. The stack was running for all three. Rows about the removed server-rendered pages are kept as history and marked **superseded**.
+Rows above the `Plan 4` row were checked 2026-10-03 on branch `feat/plan-3-api-ui-e2e`; rows from the `Plan 4` row on were checked 2026-10-04 on branch `feat/plan-4-log-templates`; rows from the `Plan 5` row on were checked 2026-10-05 on branch `feat/plan-5-ui`; rows from the `Plan 6` row on were checked 2026-10-05 on branch `feat/plan-6-owner-decisions`. The stack was running for all of them. Rows about the removed server-rendered pages are kept as history and marked **superseded**.
 
 | Claim | How verified | Result |
 |---|---|---|
@@ -256,7 +302,7 @@ Rows above the `Plan 4` row were checked 2026-10-03 on branch `feat/plan-3-api-u
 | Flush at 5,000 logs or 1 s, detect every 60 s, topic `tayga.alerts` | `LogminerSettings::default` | verified in code |
 | TTLs 3 d (hits) / 30 d (templates) / 7 d (alerts) | `TTL` lines in `crates/tayga-store/migrations/0004*` | verified in code |
 | New routes and their defaults (`since` 24h / 1h / 24h, 200 alert and template limit, `q` at most 200 chars) | `routes.rs`, `ui.rs`, `params.rs`, `repo.rs` (limit 200 at `log_alerts` and `TEMPLATES_IN_WINDOW`) | verified in code |
-| `/alerts` and `/templates` return 200; `/api/v1/log-alerts?since=24h` | live `curl`: 200, 200; 8 alerts in the last 24 h | verified live 2026-10-04; **superseded**: `/alerts` and `/templates` now return 308 |
+| `/alerts` and `/templates` return 200; `/api/v1/log-alerts?since=24h` | live `curl`: 200, 200; 8 alerts in the last 24 h | verified live 2026-10-04; **superseded**: `/alerts` and `/templates` are no longer redirected and show the app's not-found page |
 | About 60-120 templates | live `log_templates FINAL`: 293 rows in total (all ever mined, 30-day TTL), 72 with `last_seen` in the last hour; `/api/v1/log-templates?since=1h` returned 72 | verified live; the 60-120 range is the plan's estimate, the live hourly count (72) is inside it |
 | Golden Drain test: 64 templates on the 5,000-line sample, `frontend-proxy` 5, bound is 120 and 10 | `cargo test -p tayga-drain --test '*' -- --nocapture` printed `templates: 64 {... "frontend-proxy": 5 ...}`, 3 passed | verified |
 | Restoring the first half of the golden sample and mining the rest gives every line the same template id as one pass | `restore_mid_corpus_matches_a_single_pass` in `crates/tayga-drain/tests/golden.rs`. It fails (116 of 5,000 lines differ) when the restore is skipped. It still passes when clusters are restored in reverse order, so the sample does not exercise leaf-order ties | verified 2026-10-04 |
@@ -274,12 +320,12 @@ Rows above the `Plan 4` row were checked 2026-10-03 on branch `feat/plan-3-api-u
 | Rows below checked 2026-10-05 on branch `feat/plan-5-ui` at `870bfaa`, against the stack from `make up` (5 tayga containers running; Grafana and Prometheus not running) | | |
 | App served on 8090: `/`, `/map`, `/logs`, `/logs/alerts`, `/pipeline`, `/traces` return 200 `text/html`; an unknown path (`/nope`) also returns 200 `text/html` | live `curl -D -` | verified |
 | `/api/v1/nope` and `/assets/nope.js` return 404 `application/json`; `/metrics` returns 200 | live `curl` | verified |
-| Redirects are 308 with the query kept: `/groups/1` to `/?group=%221%22`, `/service-map?since=1h` to `/map?since=1h`, `/alerts` to `/logs/alerts` | live `curl -D -` (the other two redirects, `/templates` and `/templates/{id}`, are in `OLD_URL_REDIRECTS` in `crates/tayga-api/src/spa.rs`, and the Task 13 report lists them live as 308) | verified live (3), in code and in the Task 13 report (2) |
+| Old-URL redirects (`/groups/…`, `/service-map`, `/alerts`, `/templates`) | removed in plan 6 (`3dffb27`); `old_urls_are_plain_client_routes` in `crates/tayga-api/src/spa.rs` | **superseded**: no redirects; old URLs are client routes and show the not-found page |
 | `GET /api/v1/config` returns `{"jaeger_url":"http://localhost:8080/jaeger/ui","grafana_url":null}` on a plain `make up` | live `curl` | verified |
 | New API routes `overview`, `stories/series`, `traces/search`, `search?q=`, `pipeline/series` return 200; `services` returns a list of names; `pipeline/lag` returns three groups (writer, assembler, logminer) | live `curl` (`pipeline/series?metric=up&kind=gauge&job=tayga-api&since=15m`; `services/{name}` not called) | verified live |
 | Route list, parameters and limits (`limit` 1 to 500, default 100; `touched`, `errors` flags; `kind` required for `pipeline/series`) | `crates/tayga-api/src/routes_v2.rs`, `params.rs` | verified in code |
 | Immutable cache on `/assets/*`, `no-cache` on `index.html` | `IMMUTABLE` and `NO_CACHE` in `spa.rs`; Task 13 report shows live response headers (`cache-control: public, max-age=31536000, immutable` on the asset, `no-cache` on `/`) | verified in code and in the Task 13 report; not re-fetched today |
-| Pages, paths, shortcuts (`g` then `s t m l p`, `?`, `Cmd/Ctrl+K`), theme cycle light, dark, system, time ranges 15m/1h/24h/7d, live refresh 10 s paused while hidden, palette contents | `ui/src/router.tsx`, `components/shell/{Shortcuts,CommandPalette,ThemeSwitch,TimeRange,LiveToggle}.tsx`, `app/search.ts`, `theme/theme.ts` | verified in code; not clicked through in a browser today (the Playwright suite in the Task 14 report covers pages, redirects, theme switch and palette) |
+| Pages, paths, shortcuts (`g` then `s t m l p`, `?`, `Cmd/Ctrl+K`), theme cycle light, dark, system, time ranges 15m/1h/24h/7d, live refresh 10 s paused while hidden, palette contents | `ui/src/router.tsx`, `components/shell/{Shortcuts,CommandPalette,ThemeSwitch,TimeRange,LiveToggle}.tsx`, `app/search.ts`, `theme/theme.ts` | verified in code; not clicked through in a browser today (the Playwright suite in the Task 14 report covers pages, theme switch and palette) |
 | Recorder: every 15 s, 7-day TTL, targets in `deploy/tayga-api.toml` via `TAYGA_CONFIG`, not settable by `TAYGA__` env | `default_record_secs` in `crates/tayga-api/src/main.rs`; `TTL ... INTERVAL 7 DAY` in `0005_metric_samples.sql`; Task 13 report (config 0.15.27 rejected the env form with `invalid type: map, expected a sequence`) | verified in code; the env failure is cited from the Task 13 report, not re-run |
 | Grafana and Prometheus are the compose profile `extras`; `make up-extras` starts them and sets the Grafana link; `make down` removes them | `Makefile`, `deploy/compose.tayga.yaml`, `deploy/compose.extras.yaml`; Task 13 report (live: `up-extras` gave `grafana_url` set, Prometheus ready, 4 dashboards provisioned; a second `make up` left them running) | verified in files; live results cited from the Task 13 report; `make up-extras` not run today |
 | Node 24 or newer only for UI development; Docker builds with `node:24`; `make ui-dev`, `make ui-e2e` | `engines` in `ui/package.json`; first stage of `docker/Dockerfile`; `Makefile`; `node --version` here prints v24.18.0 | verified |
@@ -290,3 +336,30 @@ Rows above the `Plan 4` row were checked 2026-10-03 on branch `feat/plan-3-api-u
 | Budgets (spec section 10), final run on 2026-10-05, unthrottled on the development machine against the live stack, medians of 5 cold-cache contexts: initial JS 185.2 KB gzip (limit 350 KB); JS fetched by a cold home load 231.1 KB (350 KB); home first render with data 146 ms (1000 ms); waterfall of the largest live trace (105 spans) 25 ms and of 5,000 synthetic spans 32 ms (200 ms); map layout 143 ms live and 181 ms for 60 synthetic nodes (300 ms); live refresh gaps 10071 and 10048 ms; 0 requests in 13 s while the tab is hidden | Playwright `perf` project output of that run | measured once on one machine, not a guarantee |
 | Last full `make e2e`, 2026-10-05, after the scenario fixes in `3d0d8a5`: 8 of 9 passed. `shipping_slowdown_produces_slow_story_blaming_shipping` stopped at its baseline pre-check: two shipping runs in the previous hour lifted checkout p99 to 1.26 s, and each checkout endpoint had 35 to 37 traces in the window, below the 50 the detector needs. Run alone about 20 minutes earlier, with a clean baseline, it passed in 160 s. The earlier Task 14 timeouts came from the demo checkout service running about 100 times slower after a Docker restart; restarting `checkout` and `load-generator` fixed it (see followups) | one full run plus single-test runs | the shipping scenario needs an hour without slowdown runs and enough checkout traffic |
 | Performance, scale, or latency claims | none beyond the cited budgets and single runs above | n/a |
+| **Plan 6 (login, infrastructure toggle, no redirects, agent noise)** | | |
+| Rows below checked 2026-10-05 on branch `feat/plan-6-owner-decisions` at `a6cf80a` (plus this docs commit). Auth rows were run against a host `tayga-api` debug build on 127.0.0.1:18090 (ClickHouse :18123, Kafka :19092), stopped afterwards; "Task N report" means the report in `.superpowers/sdd/2026-10-05-tayga-plan-6-owner-decisions/` | | |
+| `[auth]` keys `enabled`, `username`, `password_hash`, `session_ttl` (default 12h), `session_key`, `secure_cookie`, and `TAYGA__AUTH__*` env forms | `AuthSettings` and its `Default` in `crates/tayga-api/src/auth.rs`; live: the host API started with only `TAYGA__AUTH__ENABLED`, `TAYGA__AUTH__USERNAME`, `TAYGA__AUTH__PASSWORD_HASH` set accepted logins and returned `Max-Age=43200` (12 h) | verified |
+| `session_ttl` is capped at 365d; `username` may not contain `\|` or `:`; `session_key` must be at least 32 bytes base64 | live startup errors with the env forms: `auth.session_ttl must be <n>s, <n>m, <n>h or <n>d, above 0 and at most 365d` for `366d`; `auth.username must not contain '\|' or ':'` for `a\|b` and `a:b`; `auth.session_key must decode to at least 32 bytes` for 3 bytes. With `365d`, a 32-byte key and `secure_cookie=true` the login returned `Max-Age=31536000` and `Secure`, and the log had no "session_key is unset" warning | verified live |
+| Without `session_key` a random key is used and a restart logs everyone out | startup log of the host API: WARN `auth.session_key is unset: a random key is used, so a restart signs everyone out`; key generation in `Auth::from_settings` | verified live (log line); that old cookies stop working after a restart is by construction (the key changes), not re-tried today |
+| The session is not sliding | the cookie's `Max-Age` is set only at login (`crates/tayga-api/src/auth.rs`); no route re-issues it | verified in code; not tested by waiting out a session |
+| `hash-password` prints an Argon2id hash from piped stdin; asks twice on a TTY | live: `printf 'secret' \| tayga-devtools hash-password` printed a string starting `$argon2id$v=19$m=19456,t=2,p=1`, and the API accepted it; `read_password` and `confirmed` in `crates/tayga-devtools/src/password.rs`; unit test `hash_of_known_password_verifies` | piped form verified live; the two-prompt TTY path verified in code only (no TTY here) |
+| Login returns 204 with a `tayga_session` cookie `HttpOnly; SameSite=Strict; Path=/`; protected routes need it; Basic works for scripts | live on :18090: `GET /api/v1/story-groups` without credentials 401; `POST /api/v1/auth/login` with a JSON body 204 with `Set-Cookie: tayga_session=…; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`; `curl -u admin:secret …/story-groups?since=15m` 200 | verified live |
+| Open routes: `/healthz`, `/metrics`, `GET /api/v1/config`, `GET /api/v1/auth/me` (401 without a session, so reachable), `POST` login and logout, and the app's files | live on :18090 with no credentials: `/healthz` 200, `/metrics` 200, `/api/v1/config` 200 `{"jaeger_url":null,"grafana_url":null,"auth_enabled":true,"infra_services":["flagd"]}`, `/` 200, `/api/v1/auth/me` 401; `OPEN_API` in `auth.rs`; tests `open_routes_match_method_and_exact_path` and `open_routes_stay_open` (cargo test `auth::`: 28 passed) | verified live and in tests |
+| Logout needs a JSON content type and no session | live: `POST /api/v1/auth/logout` without a content type 415; with `application/json` and no cookie 204; `logout_requires_json_content_type` and `logout_needs_no_session` in `auth.rs` | verified live |
+| Limiter: 5 failed attempts per client IP per 5 minutes, the 6th is refused even with the right password | live: 5 wrong logins all 401, then the right password 429 with `retry-after: 299` and `{"error":"too many attempts"}`; `WINDOW` and `MAX_FAILURES` in `auth.rs` | verified live (IPv4); IPv6 /64 keying verified in the unit test `ipv6_is_limited_per_64_prefix` and the Task 2 report, not live |
+| `X-Forwarded-For` is ignored, so behind a proxy all users share one limit | `forwarded_for_does_not_dodge_the_limiter` in `auth.rs`; Task 2 report live run: 5 wrong logins with a different `X-Forwarded-For` each, the 6th was 429 | verified in a test and in the Task 2 report; not re-run today |
+| Parallel attempts are counted before the password check, so more than 5 in flight can get 429 | design note in the Task 2 report (concern 2) and spec section 2.2 | cited, not re-measured |
+| Login page, redirect to `/login?next=…`, wrong-password alert, sign-in, reload stays signed in, sign-out, an unsafe `next` lands on `/` | `ui/e2e/auth.spec.ts` run today against the Vite dev server (5174) proxied to the auth API (18090): `TAYGA_E2E_AUTH_USER=admin TAYGA_E2E_AUTH_PASS=… TAYGA_UI_URL=http://localhost:5174 npx playwright test auth.spec.ts --project=dark --project=light --no-deps` | verified: 8 passed (4 tests in dark and light) |
+| HTTPS goes through a reverse proxy with `secure_cookie` | `secure_cookie` adds `; Secure` (live: login with `TAYGA__AUTH__SECURE_COOKIE=true` returned a cookie ending `Secure`); tayga-api binds plain HTTP (`http_addr`, no TLS code in `main.rs`) | cookie flag verified live; no reverse proxy was set up or tried |
+| `[map] infra_services` defaults to `["flagd"]`, is in `/api/v1/config`, is settable in file config only | live: `/api/v1/config` on the rebuilt stack (`make up`) returned `"infra_services":["flagd"]`; with a TOML file `[map] infra_services=["flagd","otel-collector"]` (`TAYGA_CONFIG`) it returned both; with `TAYGA__MAP__INFRA_SERVICES=flagd,otel-collector` the API failed at startup with `invalid type: string "flagd,otel-collector", expected a sequence for key `map.infra_services`` | verified live |
+| "Show infrastructure" toggle stored in the URL as `infra=true`; flagd hidden by default and drawn with it; `?service=flagd` opens the drawer while hidden | `ui/e2e/map.spec.ts` tests `infrastructure (flagd) is hidden by default and drawn with infra=true` and `/map?service=flagd opens flagd even while infrastructure is hidden`, in the full Playwright run below; `MapSearch.infra` in `ui/src/app/search.ts` | verified |
+| Callers of hidden infrastructure keep a "+N infra" badge; the header's degraded count still includes infrastructure | `hideInfra` in `ui/src/features/map/model.ts`; unit tests in `model.test.ts` and `map.test.tsx` (the header count is 4 against the map's 3 in the fixture); Task 4 report | verified in unit tests; badge appearance reviewed from screenshots in the Task 4 report |
+| Old-URL redirects removed | `old_urls_are_plain_client_routes` in `crates/tayga-api/src/spa.rs`; Task 1 commit `3dffb27` | verified in a test (see also the superseded rows above) |
+| The load generator no longer calls the agent service: no `user_ask_agent` spans after the deploy while other spans flow | `docker exec load-generator env` shows `LOCUST_LOCUSTFILE=/usr/src/app/tayga_locustfile.py`. ClickHouse `tayga.spans`: Task 5 ledger, window 13:17:05-13:23:05 UTC, after the Docker disk was freed: `user_ask_agent` 0, other load-generator spans flowing (GET 184, POST 99, `user_browse_product` 65, checkout 16). Rechecked at 13:31:49 UTC, last 20 minutes: `user_ask_agent` 0, 521 spans named `user_%`, 105,313 spans in all. The last `user_ask_agent` span was 2026-10-05 11:41:59, before the 11:48 deploy | verified live; the 20-minute window is short and the demo's other tasks are random |
+| The agent service is not part of Tayga's stack | the `agent` service exists only in the demo's `compose.agent.yaml`; the Makefile's `COMPOSE` lists `compose.yaml`, `compose.full.yaml`, `compose.observability.yaml` and Tayga's two files | verified in files |
+| `make up` on this branch builds an API with the new config fields | `make up` finished in 24 s; `curl localhost:8090/api/v1/config` returned `auth_enabled:false` and `infra_services:["flagd"]` | verified |
+| Rust unit tests: 306 pass, 29 ignored | `cargo test --workspace` run today (sum of the `test result` lines) | verified |
+| UI unit tests: 463 pass | `npm --prefix ui test` run today: `Tests 463 passed (463)`, 37 files | verified |
+| Playwright on the 8090 app with auth disabled: 131 passed, 28 skipped, 0 failed | `npx playwright test` from `ui/` run today after `make up`: `131 passed (1.6m)`. The skips: 16 for `auth.spec.ts` (needs the auth env) and 12 motion specs (reduced-motion projects only) | one full run |
+| `make e2e` on 2026-10-05 after `make up`: 8 of 9 passed in 497 s. Story times: ad 75 s, payment 55 s, unreachable 70 s, catalog 25 s; log spike 211 s; new-template probe 60 s after 0 s warmup (the probe service was already warm). `shipping_slowdown_produces_slow_story_blaming_shipping` stopped at its baseline pre-check: `checkout baselines cannot flag a 5 s trace as slow` with an empty endpoint table | `make e2e` output; `make flags-reset` run after | single run, not a latency guarantee. The test itself marked ad (75 s) and unreachable (70 s) as over its 60 s target; both passed |
+| Performance, scale, or latency claims | none beyond the single runs above | n/a |

@@ -45,7 +45,7 @@ function TableSkeleton() {
 
 export function LogAlertsPage() {
   const range = useRange()
-  const search = useSearch({ from: '/logs/alerts' })
+  const search = useSearch({ from: '/_shell/logs/alerts' })
   const navigate = useNavigate({ from: '/logs/alerts' })
   const refetchInterval = useAutoRefresh()
   const services = useQuery(api.services())

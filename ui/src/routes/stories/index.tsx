@@ -48,7 +48,7 @@ function TableSkeleton() {
 
 export function StoriesHome() {
   const range = useRange()
-  const search = useSearch({ from: '/' })
+  const search = useSearch({ from: '/_shell/' })
   const navigate = useNavigate({ from: '/' })
   const refetchInterval = useAutoRefresh()
   const wide = useMediaQuery(WIDE_QUERY)

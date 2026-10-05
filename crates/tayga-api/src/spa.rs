@@ -8,17 +8,15 @@
 //!   empty set instead of failing, and `build.rs` emits a warning. With no
 //!   `index.html` the server serves [`PLACEHOLDER`]. `cargo test` therefore
 //!   works without Node.
-//! - The router is meant to be merged last: it only has a fallback handler
-//!   plus redirect routes, so every explicit route (`/api`, `/metrics`,
-//!   `/healthz`) wins over it.
-//! - The old server-rendered UI's URLs 308 to their new client routes, query
-//!   string kept (the filter names did not change).
+//! - The router is meant to be merged last: it only has a fallback handler,
+//!   so every explicit route (`/api`, `/metrics`, `/healthz`) wins over it.
+//! - Old server-rendered UI URLs are not redirected; they are client routes
+//!   and the app shows its not-found page.
 
 use axum::Router;
-use axum::extract::{RawPathParams, State};
+use axum::extract::State;
 use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
-use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::get;
+use axum::response::{IntoResponse, Response};
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -71,113 +69,17 @@ impl Assets for NoAssets {
     }
 }
 
-/// An old server-rendered UI URL and where it moves to in the new app.
-pub struct Redirect308 {
-    pub from: &'static str,
-    /// `{name}` placeholders are filled from the `from` path params.
-    pub to: &'static str,
-    /// Query params added when the old URL does not set them: the old page's
-    /// defaults, where the new one defaults differently.
-    pub defaults: &'static [(&'static str, &'static str)],
-}
-
-/// `/`, `/stories/{id}` kept their paths and are client routes (index
-/// fallback). The group detail became the home page's selected group; its id
-/// is JSON-quoted because the router parses search values as JSON and a u64
-/// fingerprint can exceed 2^53. The old group page showed 24 h by default and
-/// the home page shows 1 h, so an old link without `since` keeps 24 h: a group
-/// with no story in the last hour would otherwise drop out of the selection.
-pub const OLD_URL_REDIRECTS: &[Redirect308] = &[
-    Redirect308 {
-        from: "/groups/{fp}",
-        to: "/?group=%22{fp}%22",
-        defaults: &[("since", "24h")],
-    },
-    Redirect308 {
-        from: "/alerts",
-        to: "/logs/alerts",
-        defaults: &[],
-    },
-    Redirect308 {
-        from: "/templates",
-        to: "/logs/templates",
-        defaults: &[],
-    },
-    Redirect308 {
-        from: "/templates/{id}",
-        to: "/logs/templates/{id}",
-        defaults: &[],
-    },
-    Redirect308 {
-        from: "/service-map",
-        to: "/map",
-        defaults: &[],
-    },
-];
-
-/// The production router: embedded assets (or placeholder) and the redirects.
+/// The production router: embedded assets (or placeholder).
 pub fn router() -> Router {
     #[cfg(feature = "embed-ui")]
     let assets: Arc<dyn Assets> = Arc::new(Embedded);
     #[cfg(not(feature = "embed-ui"))]
     let assets: Arc<dyn Assets> = Arc::new(NoAssets);
-    router_with(assets, OLD_URL_REDIRECTS)
+    router_with(assets)
 }
 
-pub fn router_with(assets: Arc<dyn Assets>, redirects: &'static [Redirect308]) -> Router {
-    let mut app = Router::new();
-    for r in redirects {
-        let (to, defaults) = (r.to, r.defaults);
-        app = app.route(
-            r.from,
-            get(move |params: RawPathParams, uri: Uri| async move {
-                redirect(to, defaults, &params, uri.query())
-            }),
-        );
-    }
-    app.fallback(serve).with_state(assets)
-}
-
-fn redirect(
-    template: &str,
-    defaults: &[(&str, &str)],
-    params: &RawPathParams,
-    query: Option<&str>,
-) -> Redirect {
-    let mut out = template.to_string();
-    for (key, value) in params {
-        out = out.replace(&format!("{{{key}}}"), &encode(value));
-    }
-    let query = query.unwrap_or_default();
-    let mut append = |part: &str| {
-        out.push(if out.contains('?') { '&' } else { '?' });
-        out.push_str(part);
-    };
-    if !query.is_empty() {
-        append(query);
-    }
-    for (key, value) in defaults {
-        let set = query
-            .split('&')
-            .any(|p| p.split_once('=').map_or(p, |(k, _)| k) == *key);
-        if !set {
-            append(&format!("{key}={value}"));
-        }
-    }
-    Redirect::permanent(&out)
-}
-
-/// Percent-encode everything except RFC 3986 unreserved characters.
-fn encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
+pub fn router_with(assets: Arc<dyn Assets>) -> Router {
+    Router::new().fallback(serve).with_state(assets)
 }
 
 fn is_reserved(path: &str) -> bool {
@@ -287,6 +189,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+    use axum::routing::get;
     use std::collections::HashMap;
     use tower::ServiceExt;
 
@@ -329,7 +232,7 @@ mod tests {
     }
 
     fn app() -> Router {
-        router_with(fixture(), OLD_URL_REDIRECTS)
+        router_with(fixture())
     }
 
     fn header_of(res: &Response, name: header::HeaderName) -> &str {
@@ -416,7 +319,7 @@ mod tests {
             ("assets/../secret", ("text/plain", &b"secret"[..])),
             ("assets/x.js", ("text/javascript", &b"ok"[..])),
         ])));
-        let app = router_with(mem, &[]);
+        let app = router_with(mem);
         for uri in [
             "/assets/../secret",
             "/assets/%2e%2e/secret",
@@ -434,7 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn placeholder_when_dist_missing() {
-        let app = router_with(Arc::new(NoAssets), &[]);
+        let app = router_with(Arc::new(NoAssets));
         let res = call(app, Method::GET, "/traces").await;
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(header_of(&res, header::CACHE_CONTROL), "no-cache");
@@ -444,40 +347,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_redirect_is_308_to_the_new_path() {
-        let cases = [
-            // The old group page's 24 h default travels; a set range is kept.
-            ("/groups/123", "/?group=%22123%22&since=24h"),
-            ("/groups/a%2Fb", "/?group=%22a%2Fb%22&since=24h"),
-            (
-                "/groups/18446744073709551615?since=1h",
-                "/?group=%2218446744073709551615%22&since=1h",
-            ),
-            (
-                "/groups/7?kind=error",
-                "/?group=%227%22&kind=error&since=24h",
-            ),
-            ("/groups/7?since=7d&q=x", "/?group=%227%22&since=7d&q=x"),
-            ("/alerts", "/logs/alerts"),
-            (
-                "/alerts?since=24h&kind=spike",
-                "/logs/alerts?since=24h&kind=spike",
-            ),
-            ("/templates", "/logs/templates"),
-            (
-                "/templates?service=cart&q=x",
-                "/logs/templates?service=cart&q=x",
-            ),
-            ("/templates/42", "/logs/templates/42"),
-            ("/service-map", "/map"),
-            ("/service-map?since=1h", "/map?since=1h"),
-            ("/service-map?", "/map"),
-        ];
-        assert_eq!(OLD_URL_REDIRECTS.len(), 5);
-        for (from, to) in cases {
-            let res = call(app(), Method::GET, from).await;
-            assert_eq!(res.status(), StatusCode::PERMANENT_REDIRECT, "{from}");
-            assert_eq!(header_of(&res, header::LOCATION), to, "{from}");
+    async fn old_urls_are_plain_client_routes() {
+        for path in [
+            "/service-map",
+            "/alerts",
+            "/templates",
+            "/templates/7",
+            "/groups/1",
+        ] {
+            let res = router_with(fixture())
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{path}");
+            assert!(res.headers().get(header::LOCATION).is_none(), "{path}");
         }
     }
 

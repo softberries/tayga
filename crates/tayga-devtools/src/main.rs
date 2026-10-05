@@ -61,6 +61,9 @@ enum Cmd {
         #[arg(long, default_value_t = 9)]
         severity: i32,
     },
+    /// Print the Argon2id PHC string for `auth.password_hash`. Prompts twice without echo, or
+    /// reads the first stdin line when piped.
+    HashPassword,
 }
 
 #[tokio::main]
@@ -128,6 +131,10 @@ async fn main() -> anyhow::Result<()> {
                 "{}",
                 id.iter().map(|b| format!("{b:02x}")).collect::<String>()
             );
+        }
+        Cmd::HashPassword => {
+            let password = tayga_devtools::password::read_password()?;
+            println!("{}", tayga_devtools::password::hash_password(&password)?);
         }
     }
     Ok(())

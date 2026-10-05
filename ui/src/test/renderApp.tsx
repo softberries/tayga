@@ -3,23 +3,32 @@ import { RouterProvider, createMemoryHistory } from '@tanstack/react-router'
 import { render } from '@testing-library/react'
 import { LazyMotion, MotionConfig, domAnimation } from 'motion/react'
 import { vi } from 'vitest'
+import { api } from '../api/queries'
+import type { ClientConfig } from '../api/types'
+import { AUTH_OFF, seed, seededConfig } from './seed'
 import { LiveProvider } from '../app/live'
 import { createQueryClient } from '../app/queryClient'
 import { TooltipProvider } from '../components/ui/Tooltip'
 import { createAppRouter } from '../router'
 import { ThemeProvider } from '../theme/ThemeProvider'
 
-/** Responses by API path (without /api/v1 and query); unknown paths return 404. */
-export type Routes = Record<string, { status?: number; body: unknown }>
+/**
+ * Responses by API path (without /api/v1 and query); unknown paths return 404. A route is read
+ * at request time, so a test can change it between steps. A 204 sends no body.
+ */
+export type Routes = Record<string, { status?: number; body: unknown; headers?: Record<string, string> }>
 
 export function stubApi(routes: Routes) {
-  const fetch = vi.fn(async (input: string) => {
+  const config = routes['/config']
+  seed(!config ? AUTH_OFF : (config.status ?? 200) === 200 ? (config.body as ClientConfig) : null)
+  const fetch = vi.fn(async (input: string, _init?: RequestInit) => {
     const url = new URL(input, 'http://test')
     const path = url.pathname.replace(/^\/api\/v1/, '')
     const r = routes[path] ?? { status: 404, body: { error: 'not found' } }
-    return new Response(JSON.stringify(r.body), {
-      status: r.status ?? 200,
-      headers: { 'content-type': 'application/json' },
+    const status = r.status ?? 200
+    return new Response(status === 204 ? null : JSON.stringify(r.body), {
+      status,
+      headers: { 'content-type': 'application/json', ...r.headers },
     })
   })
   vi.stubGlobal('fetch', fetch)
@@ -30,6 +39,8 @@ export function stubApi(routes: Routes) {
 export function renderApp(url: string) {
   const queryClient = createQueryClient()
   queryClient.setDefaultOptions({ queries: { ...queryClient.getDefaultOptions().queries, retry: false } })
+  const config = seededConfig()
+  if (config) queryClient.setQueryData(api.config().queryKey, config)
   const history = createMemoryHistory({ initialEntries: [url] })
   const router = createAppRouter(queryClient, history)
   const utils = render(

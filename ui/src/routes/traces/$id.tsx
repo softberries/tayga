@@ -118,8 +118,8 @@ function useTraceSearchUpdater() {
 }
 
 export function TracePage() {
-  const { traceId } = useParams({ from: '/traces/$traceId' })
-  const search = useSearch({ from: '/traces/$traceId' })
+  const { traceId } = useParams({ from: '/_shell/traces/$traceId' })
+  const search = useSearch({ from: '/_shell/traces/$traceId' })
   const onSearch = useTraceSearchUpdater()
   const trace = useQuery(api.trace(traceId))
   const storyId = trace.data?.story_id ?? null

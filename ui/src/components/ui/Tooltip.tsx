@@ -10,13 +10,16 @@ const CONTENT =
 export interface TooltipProps {
   content: ReactNode
   side?: 'top' | 'right' | 'bottom' | 'left'
+  /** Controlled open state, for a trigger that is not itself focusable (see `onOpenChange`). */
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
   /** One focusable element; it becomes the trigger. */
   children: ReactElement
 }
 
-export function Tooltip({ content, side = 'bottom', children }: TooltipProps) {
+export function Tooltip({ content, side = 'bottom', open, onOpenChange, children }: TooltipProps) {
   return (
-    <T.Root>
+    <T.Root open={open} onOpenChange={onOpenChange}>
       <T.Trigger asChild>{children}</T.Trigger>
       <T.Portal>
         <T.Content side={side} sideOffset={6} className={CONTENT}>

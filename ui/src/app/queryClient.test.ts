@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client'
 import { api } from '../api/queries'
 import { getOutage } from './apiStatus'
+import { setSessionLostHandler, singleFlight } from './auth'
 import { createQueryClient, shouldRetry } from './queryClient'
 
 describe('query client', () => {
@@ -50,9 +51,53 @@ describe('query client', () => {
   it('a /config success does not clear the banner: it never touches ClickHouse', async () => {
     const qc = createQueryClient()
     await qc.fetchQuery({ queryKey: ['h'], queryFn: () => Promise.reject(new ApiError(503, 'clickhouse down')), retry: false }).catch(() => {})
-    await qc.fetchQuery({ ...api.config(), queryFn: () => Promise.resolve({ jaeger_url: null, grafana_url: null }) })
+    await qc.fetchQuery({ ...api.config(), queryFn: () => Promise.resolve({ jaeger_url: null, grafana_url: null, auth_enabled: false, infra_services: ['flagd'] }) })
     expect(getOutage()?.message).toBe('clickhouse down')
     await qc.fetchQuery({ queryKey: ['i'], queryFn: () => Promise.resolve(1) })
     expect(getOutage()).toBeNull()
+  })
+
+  describe('a 401', () => {
+    afterEach(() => setSessionLostHandler(null))
+
+    const fail401 = () => Promise.reject(new ApiError(401, 'unauthorized'))
+
+    it('with auth off or the config unknown, is only a failed query', async () => {
+      const lost = vi.fn()
+      setSessionLostHandler(lost)
+      const qc = createQueryClient()
+      await qc.fetchQuery({ queryKey: ['k'], queryFn: fail401, retry: false }).catch(() => {})
+      qc.setQueryData(api.config().queryKey, { jaeger_url: null, grafana_url: null, auth_enabled: false, infra_services: [] })
+      await qc.fetchQuery({ queryKey: ['l'], queryFn: fail401, retry: false }).catch(() => {})
+      expect(lost).not.toHaveBeenCalled()
+      expect(getOutage()).toBeNull()
+    })
+
+    it('with auth on, reports a lost session, not an outage, and the auth/me probe does not', async () => {
+      const lost = vi.fn()
+      setSessionLostHandler(lost)
+      const qc = createQueryClient()
+      qc.setQueryData(api.config().queryKey, { jaeger_url: null, grafana_url: null, auth_enabled: true, infra_services: [] })
+      await qc.fetchQuery({ queryKey: ['j'], queryFn: () => Promise.reject(new ApiError(401, 'unauthorized')), retry: false }).catch(() => {})
+      expect(lost).toHaveBeenCalledTimes(1)
+      expect(getOutage()).toBeNull()
+      await qc.fetchQuery({ ...api.me(), queryFn: () => Promise.reject(new ApiError(401, 'unauthorized')), retry: false }).catch(() => {})
+      expect(lost).toHaveBeenCalledTimes(1)
+    })
+
+    it('a burst of 401s redirects once while the first redirect is pending', async () => {
+      let finish = () => {}
+      const redirect = vi.fn(() => new Promise<void>((r) => (finish = r)))
+      const handler = singleFlight(redirect)
+      handler()
+      handler()
+      handler()
+      expect(redirect).toHaveBeenCalledTimes(1)
+      finish()
+      await Promise.resolve()
+      await Promise.resolve()
+      handler()
+      expect(redirect).toHaveBeenCalledTimes(2)
+    })
   })
 })

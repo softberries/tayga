@@ -81,19 +81,30 @@ impl LagCache {
     }
 }
 
-/// External links the web app may show; empty settings are `null`.
+/// What the web app needs before signing in: external links (empty settings are `null`) and
+/// whether the login page is shown.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ClientConfig {
     pub jaeger_url: Option<String>,
     pub grafana_url: Option<String>,
+    pub auth_enabled: bool,
+    /// Services the service map hides unless asked (`map.infra_services`).
+    pub infra_services: Vec<String>,
 }
 
 impl ClientConfig {
-    pub fn new(jaeger_url: &str, grafana_url: &str) -> Self {
+    pub fn new(
+        jaeger_url: &str,
+        grafana_url: &str,
+        auth_enabled: bool,
+        infra_services: Vec<String>,
+    ) -> Self {
         let opt = |s: &str| Some(s.trim().to_string()).filter(|s| !s.is_empty());
         Self {
             jaeger_url: opt(jaeger_url),
             grafana_url: opt(grafana_url),
+            auth_enabled,
+            infra_services,
         }
     }
 }
@@ -394,7 +405,7 @@ mod tests {
                 self.repo,
                 self.metrics,
                 lag,
-                ClientConfig::new("http://jaeger", " "),
+                ClientConfig::new("http://jaeger", " ", false, vec!["flagd".into()]),
             ))
         }
     }
@@ -922,13 +933,20 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             json,
-            serde_json::json!({"jaeger_url": "http://jaeger", "grafana_url": null})
+            serde_json::json!({
+                "jaeger_url": "http://jaeger",
+                "grafana_url": null,
+                "auth_enabled": false,
+                "infra_services": ["flagd"]
+            })
         );
         assert_eq!(
-            ClientConfig::new("", " http://g "),
+            ClientConfig::new("", " http://g ", true, vec![]),
             ClientConfig {
                 jaeger_url: None,
-                grafana_url: Some("http://g".into())
+                grafana_url: Some("http://g".into()),
+                auth_enabled: true,
+                infra_services: vec![],
             }
         );
     }

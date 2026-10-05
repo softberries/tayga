@@ -8,6 +8,7 @@ import type {
   AlertKindSchema,
   BaselineDiffSchema,
   ClientConfigSchema,
+  MeSchema,
   ConsumerLagSchema,
   ContributorSchema,
   CriticalPathSchema,
@@ -97,3 +98,4 @@ export type SearchView = z.infer<typeof SearchViewSchema>
 export type SeriesView = z.infer<typeof SeriesViewSchema>
 export type ConsumerLag = z.infer<typeof ConsumerLagSchema>
 export type ClientConfig = z.infer<typeof ClientConfigSchema>
+export type Me = z.infer<typeof MeSchema>

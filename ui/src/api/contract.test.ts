@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ZodType } from 'zod'
 import { z } from 'zod'
+import authMe from './__fixtures__/auth-me.json'
 import clientConfig from './__fixtures__/config.json'
 import error400 from './__fixtures__/error-400.json'
 import logAlerts from './__fixtures__/log-alerts.json'
@@ -56,6 +57,7 @@ const cases: Array<[string, ZodType, unknown]> = [
   ['pipeline/series (q99, empty)', S.SeriesViewSchema, pipelineSeriesQ99],
   ['pipeline/lag', z.array(S.ConsumerLagSchema), pipelineLag],
   ['config', S.ClientConfigSchema, clientConfig],
+  ['auth/me', S.MeSchema, authMe],
   ['error body (400)', S.ErrorBodySchema, error400],
 ]
 
@@ -76,5 +78,11 @@ describe('API contract (live fixtures)', () => {
   it('schemas are strict: an unknown field fails', () => {
     expect(S.ClientConfigSchema.safeParse({ ...clientConfig, extra: 1 }).success).toBe(false)
     expect(S.ClientConfigSchema.safeParse({ jaeger_url: null }).success).toBe(false)
+  })
+
+  it('a config without infra_services (an older API) means flagd', () => {
+    const older: Record<string, unknown> = { ...clientConfig }
+    delete older.infra_services
+    expect(S.ClientConfigSchema.parse(older).infra_services).toEqual(['flagd'])
   })
 })
