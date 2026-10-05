@@ -172,6 +172,31 @@ describe('TruncationTooltip keyboard', () => {
   })
 })
 
+describe('TruncationTooltip roving rows', () => {
+  it('follows focus from row to row, whatever the tabindex, and closes on a pointer press', async () => {
+    vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockReturnValue(300)
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(100)
+    withTooltips(
+      <div role="grid">
+        {['one', 'two'].map((n, i) => (
+          <div key={n} role="row" tabIndex={i === 0 ? 0 : -1} onKeyDown={(e) => e.key === 'ArrowDown' && (e.currentTarget.nextElementSibling as HTMLElement | null)?.focus()}>
+            <TruncationTooltip content={`full ${n}`} openOnHostFocus>
+              <span className="truncate">{n}…</span>
+            </TruncationTooltip>
+          </div>
+        ))}
+      </div>,
+    )
+    const rows = screen.getAllByRole('row')
+    act(() => rows[0]!.focus())
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('full one')
+    await userEvent.keyboard('{ArrowDown}')
+    await waitFor(() => expect(screen.getByRole('tooltip')).toHaveTextContent('full two'))
+    fireEvent.pointerDown(rows[1]!)
+    await waitFor(() => expect(screen.queryByRole('tooltip')).toBeNull())
+  })
+})
+
 describe('Reveal', () => {
   it('fades in from transparent, and renders at full opacity under reduced motion', () => {
     const motion = (mode: 'never' | 'always', id: string) => (

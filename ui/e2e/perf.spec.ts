@@ -241,7 +241,9 @@ test('a 60-node service map lays out within 300 ms', async ({ browser, request }
   expect(median(runs)).toBeLessThanOrEqual(300)
 })
 
-test('live refresh runs every 10 s and pauses while the tab is hidden', async ({ browser }) => {
+test('live refresh runs every 10 s and pauses while the tab is hidden', async ({ browser, baseURL }) => {
+  // Production builds only: the Vite dev server runs React StrictMode, which fetches twice.
+  test.skip(new URL(baseURL!).port === '5173', 'dev server (StrictMode double fetch); applies to production builds')
   const page = await fresh(browser)
   const times: number[] = []
   page.on('request', (r) => {

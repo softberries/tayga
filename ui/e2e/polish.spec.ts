@@ -39,7 +39,7 @@ test('a truncated template shows its full text in a tooltip, a short one shows n
   }
 })
 
-test('tabbing to a truncated story row exposes the full text', async ({ page }) => {
+test('arrowing to a truncated story row exposes the full text', async ({ page }) => {
   await page.goto('/')
   const rows = page.locator('[data-fingerprint]')
   await expect(rows.first()).toBeVisible()
@@ -47,15 +47,20 @@ test('tabbing to a truncated story row exposes the full text', async ({ page }) 
   const cut = await rows.evaluateAll((els) =>
     els.map((r) => ({ id: r.getAttribute('data-fingerprint')!, truncated: [...r.querySelectorAll('.truncate')].some((e) => e.scrollWidth > e.clientWidth) })),
   )
-  const target = cut.find((c) => c.truncated)
-  expect(target, 'the live stories include a truncated row').toBeDefined()
-  const row = page.locator(`[data-fingerprint="${target!.id}"]`)
+  // A truncated row below the first, so the arrow keys have to move focus to it.
+  const index = cut.findIndex((c, i) => i > 0 && c.truncated)
+  expect(index, 'the live stories include a truncated row below the first').toBeGreaterThan(0)
+  const row = rows.nth(index)
 
-  // Keyboard only: Tab until that row has focus.
+  // Keyboard only: Tab to the grid's one tab stop (the selected row), then ArrowDown to the
+  // target. Rows use a roving tabindex.
+  const first = rows.first()
   for (let i = 0; i < 80; i++) {
-    if (await row.evaluate((e) => e === document.activeElement)) break
+    if (await first.evaluate((e) => e === document.activeElement)) break
     await page.keyboard.press('Tab')
   }
+  await expect(first).toBeFocused()
+  for (let i = 0; i < index; i++) await page.keyboard.press('ArrowDown')
   await expect(row).toBeFocused()
   const tip = page.getByRole('tooltip').first()
   await expect(tip).toBeVisible()

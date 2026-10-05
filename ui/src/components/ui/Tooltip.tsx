@@ -38,8 +38,10 @@ export function isTruncated(el: HTMLElement | null): boolean {
  * must accept a `ref`.
  *
  * Keyboard and touch: the cell is not itself a tab stop (big tables would get one per cell).
- * With `openOnHostFocus` the tooltip also opens while the nearest focusable ancestor (the row
- * or link the cell sits in) has focus. The text stays whole in the DOM, so screen readers
+ * With `openOnHostFocus` the tooltip also opens while the host the cell sits in has focus: the
+ * nearest row (`role=row`, whatever its tabindex, so roving-tabindex rows work), link or button.
+ * Only one tooltip per host may opt in, or they would open on top of each other. A pointer press
+ * on the host closes it. The text stays whole in the DOM, so screen readers
  * read it in full either way.
  */
 export function TruncationTooltip({
@@ -58,7 +60,7 @@ export function TruncationTooltip({
   const [open, setOpen] = useState(false)
   useEffect(() => {
     if (!openOnHostFocus) return
-    const host = ref.current?.closest<HTMLElement>('a[href], button, [tabindex]:not([tabindex="-1"])')
+    const host = ref.current?.closest<HTMLElement>('[role=row], a[href], button')
     if (!host) return
     const show = (e: FocusEvent) => {
       // Only the host's own focus, not a control inside it.
@@ -69,9 +71,11 @@ export function TruncationTooltip({
     const hide = () => setOpen(false)
     host.addEventListener('focus', show)
     host.addEventListener('blur', hide)
+    host.addEventListener('pointerdown', hide)
     return () => {
       host.removeEventListener('focus', show)
       host.removeEventListener('blur', hide)
+      host.removeEventListener('pointerdown', hide)
     }
   }, [openOnHostFocus])
   return (
