@@ -135,3 +135,9 @@ services:
   flagd-ui:
     volumes:
       - ${TAYGA_ROOT}/deploy/flagd:/app/data
+
+  load-generator:
+    volumes:
+      - ${TAYGA_ROOT}/deploy/locust/tayga_locustfile.py:/usr/src/app/tayga_locustfile.py:ro
+    environment:
+      - LOCUST_LOCUSTFILE=/usr/src/app/tayga_locustfile.py
