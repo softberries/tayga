@@ -23,6 +23,46 @@ export function mapGraph(map: ServiceMapView): MapGraph {
   return { services: servicesOf(map), links }
 }
 
+/** What a caller's card says about the infrastructure services hidden from the map. */
+export interface InfraBadge {
+  /** Hidden callees, busiest first. */
+  services: { name: string; perMin: number; errorRate: number }[]
+  /** Any call into a hidden service is failing: the badge turns red. */
+  failing: boolean
+}
+
+/**
+ * Drops the infrastructure services and every call touching them, and summarises the calls a
+ * visible service made into them as a badge on that caller. `keep` stays drawn even when it is
+ * infrastructure (the service whose drawer is open). Calls between infrastructure services,
+ * and from them, produce no badge.
+ */
+export function hideInfra(
+  map: ServiceMapView,
+  infra: readonly string[],
+  keep: string | undefined,
+  windowSecs: number,
+): { map: ServiceMapView; badges: Map<string, InfraBadge> } {
+  const hidden = new Set(infra.filter((s) => s !== keep))
+  const badges = new Map<string, InfraBadge>()
+  if (hidden.size === 0) return { map, badges }
+  const edges: EdgeView[] = []
+  for (const e of map.edges) {
+    if (hidden.has(e.parent)) continue
+    if (!hidden.has(e.child)) {
+      edges.push(e)
+      continue
+    }
+    if (e.parent === e.child) continue
+    const badge = badges.get(e.parent) ?? { services: [], failing: false }
+    badge.services.push({ name: e.child, perMin: e.calls / (windowSecs / 60), errorRate: e.error_rate })
+    badge.failing ||= edgeTone(e) === 'err'
+    badges.set(e.parent, badge)
+  }
+  for (const b of badges.values()) b.services.sort((a, c) => c.perMin - a.perMin || a.name.localeCompare(c.name))
+  return { map: { edges, nodes: map.nodes.filter((n) => !hidden.has(n.service)) }, badges }
+}
+
 /** Identifies the topology: a live refresh with the same services and calls keeps the layout. */
 export function topologyKey(g: MapGraph): string {
   return `${g.services.join(',')}|${g.links.map(([a, b]) => `${a}>${b}`).join(',')}`

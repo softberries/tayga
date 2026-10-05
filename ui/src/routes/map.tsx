@@ -13,6 +13,7 @@ import type { EdgeTypes, FitViewOptions, NodeTypes } from '@xyflow/react'
 import { ExternalLink, Network, Search } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api/queries'
+import { DEFAULT_INFRA_SERVICES } from '../api/schemas'
 import type { Health, ServiceMapView } from '../api/types'
 import type { MapSearch } from '../app/search'
 import { rangeParams, rangePhrase, widerHint } from '../app/range'
@@ -23,6 +24,7 @@ import { Card, PanelTitle } from '../components/ui/Card'
 import { EmptyState } from '../components/ui/EmptyState'
 import { ErrorState } from '../components/ui/ErrorState'
 import { Skeleton } from '../components/ui/Skeleton'
+import { Switch } from '../components/ui/Switch'
 import { RefreshNote, loadFailed } from '../components/ui/StaleNote'
 import { ServiceDrawer } from '../features/map/ServiceDrawer'
 import { ServiceEdge } from '../features/map/ServiceEdge'
@@ -31,7 +33,8 @@ import { ServiceNode } from '../features/map/ServiceNode'
 import type { ServiceNodeType } from '../features/map/ServiceNode'
 import { NODE_H, NODE_W, edgeId, layoutGraph } from '../features/map/layout'
 import type { MapLayout } from '../features/map/layout'
-import { HEALTH_COLOR, TONE_STROKE, callsPerMin, edgeTone, edgeWidth, mapGraph, mapSummary, matchServices, topologyKey } from '../features/map/model'
+import { HEALTH_COLOR, TONE_STROKE, callsPerMin, edgeTone, edgeWidth, hideInfra, mapGraph, mapSummary, matchServices, servicesOf, topologyKey } from '../features/map/model'
+import type { InfraBadge } from '../features/map/model'
 import { describeMap } from '../features/stories/MiniMap'
 import { cx } from '../lib/cx'
 import { NARROW_QUERY, REDUCED_MOTION_QUERY, useMediaQuery } from '../lib/useMediaQuery'
@@ -92,12 +95,14 @@ interface CanvasProps {
   map: ServiceMapView
   layout: MapLayout
   range: Range
+  /** Hidden infrastructure callees per caller. */
+  infra: ReadonlyMap<string, InfraBadge>
   matches: ReadonlySet<string>
   active: string | undefined
   onOpen: (service: string) => void
 }
 
-function Canvas({ map, layout, range, matches, active, onOpen }: CanvasProps) {
+function Canvas({ map, layout, range, infra, matches, active, onOpen }: CanvasProps) {
   const { fitView, getViewport, setViewport } = useReactFlow()
   const narrow = useMediaQuery(NARROW_QUERY)
   const reduce = useMediaQuery(REDUCED_MOTION_QUERY)
@@ -137,7 +142,10 @@ function Canvas({ map, layout, range, matches, active, onOpen }: CanvasProps) {
 
   const nodes = useMemo<ServiceNodeType[]>(() => {
     const views = new Map(map.nodes.map((n) => [n.service, n]))
+    // A layout kept from before a toggle may still place services the map no longer has.
+    const drawn = new Set(servicesOf(map))
     return Object.entries(layout.positions)
+      .filter(([service]) => drawn.has(service))
       .map(([service, position]) => ({
         id: service,
         type: 'service' as const,
@@ -153,6 +161,7 @@ function Canvas({ map, layout, range, matches, active, onOpen }: CanvasProps) {
           view: views.get(service) ?? null,
           match: matches.has(service),
           dimmed: searching && !matches.has(service),
+          infra: infra.get(service) ?? null,
           active: service === active,
           onOpen,
           onFocusCard: reveal,
@@ -160,7 +169,7 @@ function Canvas({ map, layout, range, matches, active, onOpen }: CanvasProps) {
       }))
       // Tab order follows the picture: left to right, then top to bottom.
       .sort((a, b) => a.position.x - b.position.x || a.position.y - b.position.y)
-  }, [map.nodes, layout, matches, searching, active, onOpen, reveal])
+  }, [map, layout, infra, matches, searching, active, onOpen, reveal])
 
   const edges = useMemo<ServiceEdgeType[]>(
     () =>
@@ -291,7 +300,22 @@ function MapView() {
   const config = useQuery(api.config())
   const grafana = grafanaMapUrl(config.data?.grafana_url)
 
-  const graph = useMemo(() => (map.data ? mapGraph(map.data) : null), [map.data])
+  const showInfra = search.infra === true
+  const infraServices = config.data?.infra_services ?? DEFAULT_INFRA_SERVICES
+  // The drawer's service stays drawn even when it is infrastructure.
+  const { visible, badges } = useMemo(() => {
+    if (!map.data) return { visible: undefined, badges: new Map<string, InfraBadge>() }
+    const r = hideInfra(map.data, showInfra ? [] : infraServices, search.service, range.secs)
+    return { visible: r.map, badges: r.badges }
+  }, [map.data, showInfra, infraServices, search.service, range.secs])
+  const hiddenInfra = useMemo(() => {
+    if (!map.data || showInfra) return 0
+    const seen = new Set(servicesOf(map.data))
+    return infraServices.filter((s) => s !== search.service && seen.has(s)).length
+  }, [map.data, showInfra, infraServices, search.service])
+
+  // The layout's key is the drawn topology, so toggling infrastructure lays the map out again.
+  const graph = useMemo(() => (visible ? mapGraph(visible) : null), [visible])
   const key = graph ? topologyKey(graph) : ''
   const layout = useQuery({
     queryKey: ['map-layout', key],
@@ -330,6 +354,7 @@ function MapView() {
   }, [])
 
   const data = map.data
+  const drawn = visible ?? data
   const empty = map.isSuccess && graph !== null && graph.services.length === 0
   const q = search.q ?? ''
 
@@ -338,7 +363,7 @@ function MapView() {
       <Card className="flex flex-wrap items-center gap-x-4 gap-y-2.5 px-4 py-3">
         <PanelTitle>Service map</PanelTitle>
         <span aria-live="polite" className="text-xs text-muted">
-          {data && !empty ? mapSummary(data) : map.isPending ? 'Loading…' : ''}
+          {drawn && !empty ? `${mapSummary(drawn)}${hiddenInfra ? ` · ${hiddenInfra} infra hidden` : ''}` : map.isPending ? 'Loading…' : ''}
         </span>
         <div className="ml-auto flex min-w-0 flex-wrap items-center gap-2 max-sm:w-full">
           <label className="relative flex min-w-0 items-center max-sm:flex-1">
@@ -362,6 +387,18 @@ function MapView() {
           <span id="map-search-status" aria-live="polite" className={cx('text-xs', q && matchList.length === 0 ? 'text-err' : 'text-muted')}>
             {q ? (matchList.length === 0 ? 'No match' : `${matchList.length} ${matchList.length === 1 ? 'match' : 'matches'} · Enter to zoom`) : ''}
           </span>
+          {infraServices.length > 0 ? (
+            <div className="flex items-center gap-2">
+              <Switch
+                id="map-show-infra"
+                checked={showInfra}
+                onCheckedChange={(on) => setSearch({ infra: on ? true : undefined })}
+              />
+              <label htmlFor="map-show-infra" className="cursor-pointer select-none text-xs text-muted">
+                Show infrastructure
+              </label>
+            </div>
+          ) : null}
           {grafana ? (
             <Button asChild size="sm" variant="secondary">
               <a href={grafana} target="_blank" rel="noreferrer noopener">
@@ -391,12 +428,12 @@ function MapView() {
           />
         ) : layout.isError ? (
           <ErrorState error={layout.error} title="Could not lay out the map" onRetry={() => void layout.refetch()} className="m-auto" />
-        ) : !layout.data || !data ? (
+        ) : !layout.data || !drawn ? (
           <CanvasSkeleton label={`Laying out ${graph?.services.length ?? 0} services`} />
         ) : (
           <section aria-label="Service map canvas" className="absolute inset-0">
-            <p className="sr-only">{describeMap(data)}</p>
-            <Canvas map={data} layout={layout.data} range={range} matches={matches} active={search.service} onOpen={onOpen} />
+            <p className="sr-only">{describeMap(drawn)}</p>
+            <Canvas map={drawn} layout={layout.data} range={range} infra={badges} matches={matches} active={search.service} onOpen={onOpen} />
             <Legend />
           </section>
         )}

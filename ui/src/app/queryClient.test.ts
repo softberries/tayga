@@ -51,7 +51,7 @@ describe('query client', () => {
   it('a /config success does not clear the banner: it never touches ClickHouse', async () => {
     const qc = createQueryClient()
     await qc.fetchQuery({ queryKey: ['h'], queryFn: () => Promise.reject(new ApiError(503, 'clickhouse down')), retry: false }).catch(() => {})
-    await qc.fetchQuery({ ...api.config(), queryFn: () => Promise.resolve({ jaeger_url: null, grafana_url: null, auth_enabled: false }) })
+    await qc.fetchQuery({ ...api.config(), queryFn: () => Promise.resolve({ jaeger_url: null, grafana_url: null, auth_enabled: false, infra_services: ['flagd'] }) })
     expect(getOutage()?.message).toBe('clickhouse down')
     await qc.fetchQuery({ queryKey: ['i'], queryFn: () => Promise.resolve(1) })
     expect(getOutage()).toBeNull()

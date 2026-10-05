@@ -3,14 +3,18 @@
  * glowing and failing calls as flowing dashed red edges (still under reduced motion). The
  * whole preview links to the interactive map.
  */
+import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { ArrowRight } from 'lucide-react'
 import { useId, useMemo } from 'react'
+import { DEFAULT_INFRA_SERVICES } from '../../api/schemas'
+import { api } from '../../api/queries'
 import type { ServiceMapView } from '../../api/types'
 import { rangeSearch } from '../../app/range'
 import type { Range } from '../../app/range'
 import { cx } from '../../lib/cx'
 import { NARROW_QUERY, useMediaQuery } from '../../lib/useMediaQuery'
+import { hideInfra } from '../map/model'
 import { MINI, isFailingEdge, layoutMiniMap, servicesOf } from './mapLayout'
 
 /** Label size in viewBox units: about 9 px on a desktop card. */
@@ -39,7 +43,11 @@ export function describeMap(map: ServiceMapView): string {
   return `Service map: ${parts.join('; ')}.`
 }
 
-export function MiniMap({ map, range }: { map: ServiceMapView; range: Range }) {
+/** The home preview never draws the infrastructure services (the full map has a toggle for them). */
+export function MiniMap({ map: full, range }: { map: ServiceMapView; range: Range }) {
+  const config = useQuery(api.config())
+  const infra = config.data?.infra_services ?? DEFAULT_INFRA_SERVICES
+  const map = useMemo(() => hideInfra(full, infra, undefined, range.secs).map, [full, infra, range.secs])
   const layout = useMemo(() => layoutMiniMap(map), [map])
   const narrow = useMediaQuery(NARROW_QUERY)
   const glowId = `${useId()}-glow`

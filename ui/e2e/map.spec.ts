@@ -45,3 +45,27 @@ for (const service of ['payment', 'shipping']) {
     await expect(page.getByText('No traces match')).toBeHidden()
   })
 }
+
+test('infrastructure (flagd) is hidden by default and drawn with infra=true', async ({ page }) => {
+  await page.goto('/map')
+  await expect(page.locator('[data-service]').first()).toBeVisible()
+  expect(await page.locator('[data-service]').count()).toBeGreaterThan(3)
+  await expect(page.locator('[data-service="flagd"]')).toHaveCount(0)
+  // Its callers say so.
+  await expect(page.locator('[data-infra-badge]').first()).toBeVisible()
+
+  await page.getByRole('switch', { name: 'Show infrastructure' }).click()
+  await expect(page).toHaveURL(/[?&]infra=true/)
+  await expect(page.locator('[data-service="flagd"]')).toBeVisible()
+  await expect(page.locator('[data-infra-badge]')).toHaveCount(0)
+
+  await page.goto('/map?infra=true')
+  await expect(page.locator('[data-service="flagd"]')).toBeVisible()
+  await expect(page.getByRole('switch', { name: 'Show infrastructure' })).toBeChecked()
+})
+
+test('/map?service=flagd opens flagd even while infrastructure is hidden', async ({ page }) => {
+  await page.goto('/map?service=flagd')
+  await expect(page.getByRole('dialog', { name: 'flagd' })).toBeVisible()
+  await expect(page.getByRole('switch', { name: 'Show infrastructure' })).not.toBeChecked()
+})

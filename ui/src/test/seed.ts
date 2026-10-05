@@ -1,6 +1,6 @@
 import type { ClientConfig } from '../api/types'
 
-export const AUTH_OFF: ClientConfig = { jaeger_url: null, grafana_url: null, auth_enabled: false }
+export const AUTH_OFF: ClientConfig = { jaeger_url: null, grafana_url: null, auth_enabled: false, infra_services: ['flagd'] }
 
 /**
  * The `/config` the next renderApp seeds into its query client, so the session guard resolves

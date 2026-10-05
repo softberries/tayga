@@ -31,6 +31,28 @@ struct Settings {
     record_secs: u64,
     #[serde(default)]
     auth: AuthSettings,
+    #[serde(default)]
+    map: MapSettings,
+}
+
+/// Service map options.
+#[derive(Deserialize)]
+struct MapSettings {
+    /// Services the map hides unless "Show infrastructure" is on.
+    #[serde(default = "default_infra")]
+    infra_services: Vec<String>,
+}
+
+impl Default for MapSettings {
+    fn default() -> Self {
+        Self {
+            infra_services: default_infra(),
+        }
+    }
+}
+
+fn default_infra() -> Vec<String> {
+    vec!["flagd".into()]
 }
 
 fn default_record_secs() -> u64 {
@@ -66,7 +88,12 @@ async fn main() -> anyhow::Result<()> {
         repo.clone(),
         metrics.clone(),
         LagCache::kafka(settings.kafka.brokers.clone(), settings.kafka.topic.clone()),
-        ClientConfig::new(&settings.jaeger_url, &settings.grafana_url, auth.is_some()),
+        ClientConfig::new(
+            &settings.jaeger_url,
+            &settings.grafana_url,
+            auth.is_some(),
+            settings.map.infra_services,
+        ),
     );
     let mut app = api_router(repo, metrics)
         .merge(v2)
@@ -91,4 +118,44 @@ async fn main() -> anyhow::Result<()> {
     recorder.await?;
     tracing::info!("tayga-api stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings(extra: serde_json::Value) -> Settings {
+        let mut v = serde_json::json!({
+            "clickhouse": {"url": "http://ch"},
+            "kafka": {"brokers": "k:9092"},
+        });
+        v.as_object_mut()
+            .expect("object")
+            .extend(extra.as_object().expect("object").clone());
+        serde_json::from_value(v).expect("settings")
+    }
+
+    #[test]
+    fn infra_services_default_to_flagd_and_can_be_overridden() {
+        assert_eq!(
+            settings(serde_json::json!({})).map.infra_services,
+            ["flagd"]
+        );
+        assert_eq!(
+            settings(serde_json::json!({"map": {}})).map.infra_services,
+            ["flagd"]
+        );
+        assert_eq!(
+            settings(serde_json::json!({"map": {"infra_services": ["flagd", "otel-collector"]}}))
+                .map
+                .infra_services,
+            ["flagd", "otel-collector"]
+        );
+        assert!(
+            settings(serde_json::json!({"map": {"infra_services": []}}))
+                .map
+                .infra_services
+                .is_empty()
+        );
+    }
 }

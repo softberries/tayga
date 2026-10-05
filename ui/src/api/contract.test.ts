@@ -79,4 +79,10 @@ describe('API contract (live fixtures)', () => {
     expect(S.ClientConfigSchema.safeParse({ ...clientConfig, extra: 1 }).success).toBe(false)
     expect(S.ClientConfigSchema.safeParse({ jaeger_url: null }).success).toBe(false)
   })
+
+  it('a config without infra_services (an older API) means flagd', () => {
+    const older: Record<string, unknown> = { ...clientConfig }
+    delete older.infra_services
+    expect(S.ClientConfigSchema.parse(older).infra_services).toEqual(['flagd'])
+  })
 })

@@ -3,9 +3,9 @@
  * nodes, failing edges, the drawer opened from the URL and from a node, search, the Grafana
  * link, and the empty and error states.
  */
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import logAlerts from '../api/__fixtures__/log-alerts.json'
 import logTemplates from '../api/__fixtures__/log-templates.json'
 import service from '../api/__fixtures__/service.json'
@@ -45,7 +45,7 @@ const paymentGroup = { ...groups[0], fingerprint: '42', kind: 'error', rc_servic
 function routes(extra: Routes = {}): Routes {
   return {
     '/service-map': { body: degraded() },
-    '/config': { body: { jaeger_url: null, grafana_url: null, auth_enabled: false } },
+    '/config': { body: { jaeger_url: null, grafana_url: null, auth_enabled: false, infra_services: ['flagd'] } },
     '/services/payment': { body: { ...service, service: 'payment' } },
     '/story-groups': { body: [paymentGroup] },
     '/log-alerts': { body: [{ ...logAlerts[0], service: 'payment', template: 'Payment request failed. Invalid token.' }] },
@@ -92,6 +92,30 @@ afterEach(() => {
   clearOutage()
 })
 
+/**
+ * The first render of /map used to pay for the cold start inside its 1 s `findBy` wait: the
+ * lazy route chunk (React Flow, the drawer and their transforms, ~0.7 s alone), ELK's 1.4 MB
+ * bundle and its first layout, and the first React Flow render. That fits on an idle machine
+ * and not while other test files compete for the CPU. One throwaway render here moves the cost
+ * into a hook with its own generous timeout; it is not ELK's work (a layout takes ~15 ms warm).
+ */
+beforeAll(async () => {
+  vi.stubGlobal('ResizeObserver', MeasuringResizeObserver)
+  vi.stubGlobal('DOMMatrixReadOnly', DOMMatrixStub)
+  const offsetWidth = vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(1000)
+  const offsetHeight = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(600)
+  stubApi(routes())
+  try {
+    renderApp('/map')
+    await screen.findByRole('button', { name: /^payment[,:]/ }, { timeout: 30_000 })
+  } finally {
+    cleanup()
+    offsetWidth.mockRestore()
+    offsetHeight.mockRestore()
+    vi.unstubAllGlobals()
+  }
+}, 40_000)
+
 describe('service map', () => {
   it('renders every service with its health, and failing calls as flowing edges', async () => {
     stubApi(routes())
@@ -103,14 +127,110 @@ describe('service map', () => {
     expect(await node('cart')).toHaveAttribute('data-health', 'ok')
     // Callers without server spans of their own are still on the map.
     expect(await node('load-generator')).toHaveAccessibleName(/no server spans/)
-    expect(screen.getAllByRole('button', { name: /Open details\.$/ })).toHaveLength(19)
-    expect(screen.getByText('19 services · 3 degraded · 4 failing calls')).toBeInTheDocument()
-    expect(screen.getByText(/^Service map: 19 services; degraded: checkout \(error\), payment \(error\), shipping \(slow\); callers without spans of their own: frontend-web, load-generator;/)).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /Open details\.$/ })).toHaveLength(18)
+    // flagd is infrastructure: hidden by default.
+    expect(screen.getByText('18 services · 3 degraded · 1 failing call · 1 infra hidden')).toBeInTheDocument()
+    expect(screen.getByText(/^Service map: 18 services; degraded: checkout \(error\), payment \(error\), shipping \(slow\); callers without spans of their own: frontend-web, load-generator;/)).toBeInTheDocument()
     expect(screen.getByRole('list', { name: 'Legend' })).toHaveTextContent('failing calls')
     await waitFor(() => expect(container.querySelectorAll('.react-flow__edge').length).toBeGreaterThan(0))
-    expect(container.querySelectorAll('[data-tone="err"] path.tg-flow')).toHaveLength(4)
+    expect(container.querySelectorAll('[data-tone="err"] path.tg-flow')).toHaveLength(1)
     // No Grafana URL configured: no link.
     expect(screen.queryByRole('link', { name: /Open in Grafana/ })).toBeNull()
+  })
+
+  it('hides infrastructure by default; callers carry a badge, red when a call into it fails', async () => {
+    stubApi(routes())
+    renderApp('/map')
+    await node('payment')
+    expect(screen.queryByRole('button', { name: /^flagd[,:]/ })).toBeNull()
+    // cart -> flagd is healthy: a slow-toned badge. ad -> flagd is failing: red.
+    const cart = await node('cart')
+    expect(cart.querySelector('[data-infra-badge]')).toHaveTextContent('+1 infra')
+    expect(cart.querySelector('[data-infra-badge]')).toHaveAttribute('data-infra-badge', 'slow')
+    expect(cart).toHaveAccessibleName(/Calls hidden infrastructure: flagd\. Open details\.$/)
+    const ad = await node('ad')
+    expect(ad.querySelector('[data-infra-badge]')).toHaveAttribute('data-infra-badge', 'err')
+    expect(ad).toHaveAccessibleName(/Calls hidden infrastructure: flagd, failing\./)
+    // No hidden callee, no badge.
+    expect((await node('currency')).querySelector('[data-infra-badge]')).toBeNull()
+    expect(document.querySelectorAll('.react-flow__node')).toHaveLength(18)
+  })
+
+  it('the badge tooltip opens with the card keyboard focus and lists the hidden callees', async () => {
+    stubApi(routes())
+    renderApp('/map')
+    const ad = await node('ad')
+    expect(screen.queryByText(/flagd · /)).toBeNull()
+    act(() => ad.focus())
+    // 5 calls in the 1h window.
+    const tip = await screen.findByRole('tooltip')
+    expect(tip).toHaveTextContent('flagd · 0.1/min · 100 % err')
+    act(() => ad.blur())
+    await waitFor(() => expect(screen.queryByRole('tooltip')).toBeNull())
+  })
+
+  it('"Show infrastructure" draws flagd and its calls, and is kept in the URL', async () => {
+    const user = userEvent.setup()
+    const lay = vi.mocked(layoutGraph)
+    lay.mockClear()
+    stubApi(routes())
+    const { router } = renderApp('/map')
+    await node('payment')
+    expect(lay).toHaveBeenCalledTimes(1)
+    const toggle = screen.getByRole('switch', { name: 'Show infrastructure' })
+    expect(toggle).not.toBeChecked()
+    await user.click(toggle)
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ infra: true }))
+    expect(router.state.location.href).toContain('infra=true')
+    expect(await node('flagd')).toBeInTheDocument()
+    // The topology changed, so ELK ran again.
+    expect(lay).toHaveBeenCalledTimes(2)
+    expect(screen.getAllByRole('button', { name: /Open details\.$/ })).toHaveLength(19)
+    expect(screen.getByText('19 services · 3 degraded · 4 failing calls')).toBeInTheDocument()
+    expect(document.querySelector('[data-infra-badge]')).toBeNull()
+    await user.click(screen.getByRole('switch', { name: 'Show infrastructure' }))
+    await waitFor(() => expect(router.state.location.search).not.toHaveProperty('infra'))
+    await waitFor(() => expect(screen.queryByRole('button', { name: /^flagd[,:]/ })).toBeNull())
+  })
+
+  it('/map?service=flagd opens the flagd drawer with infra hidden, and keeps its card', async () => {
+    stubApi(routes({ '/services/flagd': { body: { ...service, service: 'flagd' } } }))
+    renderApp('/map?service=flagd')
+    const drawer = await screen.findByRole('dialog', { name: 'flagd' })
+    expect(drawer).toBeInTheDocument()
+    expect(await node('flagd')).toHaveAttribute('aria-current', 'true')
+    expect(screen.getByRole('switch', { name: 'Show infrastructure' })).not.toBeChecked()
+  })
+
+  it('a degraded infra service still counts in the header badge', async () => {
+    const m = degraded()
+    for (const n of m.nodes) if (n.service === 'flagd') Object.assign(n, { health: 'error' })
+    stubApi(routes({ '/service-map': { body: m } }))
+    renderApp('/map')
+    await node('payment')
+    // The map's own count leaves flagd out; the header counts it.
+    expect(screen.getByText('18 services · 3 degraded · 1 failing call · 1 infra hidden')).toBeInTheDocument()
+    expect(await screen.findByText('4 services degraded')).toBeInTheDocument()
+  })
+
+  it('without infra_services in /config (an older API) flagd is hidden', async () => {
+    stubApi(routes({ '/config': { body: { jaeger_url: null, grafana_url: null, auth_enabled: false } } }))
+    renderApp('/map')
+    await node('payment')
+    expect(screen.queryByRole('button', { name: /^flagd[,:]/ })).toBeNull()
+  })
+
+  it('hides whatever the API lists, and hides the toggle when the list is empty', async () => {
+    stubApi(routes({ '/config': { body: { jaeger_url: null, grafana_url: null, auth_enabled: false, infra_services: ['cart'] } } }))
+    const { unmount } = renderApp('/map')
+    await node('payment')
+    expect(screen.queryByRole('button', { name: /^cart[,:]/ })).toBeNull()
+    expect(await node('flagd')).toBeInTheDocument()
+    unmount()
+    stubApi(routes({ '/config': { body: { jaeger_url: null, grafana_url: null, auth_enabled: false, infra_services: [] } } }))
+    renderApp('/map')
+    expect(await node('cart')).toBeInTheDocument()
+    expect(screen.queryByRole('switch', { name: 'Show infrastructure' })).toBeNull()
   })
 
   it('opens the drawer from ?service= with RED charts, stories, log signals and callers', async () => {
@@ -247,7 +367,7 @@ describe('service map', () => {
   })
 
   it('shows "Open in Grafana" when the API reports a Grafana URL', async () => {
-    stubApi(routes({ '/config': { body: { jaeger_url: null, grafana_url: 'http://localhost:3001/', auth_enabled: false } } }))
+    stubApi(routes({ '/config': { body: { jaeger_url: null, grafana_url: 'http://localhost:3001/', auth_enabled: false, infra_services: ['flagd'] } } }))
     renderApp('/map')
     expect(await screen.findByRole('link', { name: /Open in Grafana/ })).toHaveAttribute(
       'href',

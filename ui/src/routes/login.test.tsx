@@ -15,7 +15,7 @@ const UNAUTHORIZED = { status: 401, body: { error: 'unauthorized' } }
 
 function routes(opts: { auth: boolean; signedIn: boolean }): Routes {
   return {
-    '/config': { body: { jaeger_url: null, grafana_url: null, auth_enabled: opts.auth } },
+    '/config': { body: { jaeger_url: null, grafana_url: null, auth_enabled: opts.auth, infra_services: ['flagd'] } },
     '/auth/me': opts.signedIn ? { body: { username: 'admin' } } : UNAUTHORIZED,
     '/auth/login': { status: 204, body: null },
     '/auth/logout': { status: 204, body: null },

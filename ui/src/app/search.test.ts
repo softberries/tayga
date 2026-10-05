@@ -75,8 +75,14 @@ describe('page search params', () => {
   })
   it('map: service', () => {
     expect(validateMapSearch({ service: 'checkout' })).toEqual({ service: 'checkout' })
-    expect(validateMapSearch({})).toStrictEqual({ service: undefined, q: undefined })
-    expect(validateMapSearch({ q: 'pay', service: '' })).toStrictEqual({ service: undefined, q: 'pay' })
+    expect(validateMapSearch({})).toStrictEqual({ service: undefined, q: undefined, infra: undefined })
+    expect(validateMapSearch({ q: 'pay', service: '' })).toStrictEqual({ service: undefined, q: 'pay', infra: undefined })
+  })
+  it('map: infra is true or absent', () => {
+    expect(validateMapSearch({ infra: true }).infra).toBe(true)
+    expect(validateMapSearch({ infra: 'true' }).infra).toBe(true)
+    expect(validateMapSearch({ infra: false }).infra).toBeUndefined()
+    expect(validateMapSearch({ infra: 'yes' }).infra).toBeUndefined()
   })
 })
 

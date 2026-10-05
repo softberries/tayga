@@ -34,7 +34,7 @@ const hostile: TraceView = {
 function routes(extra: Routes = {}): Routes {
   return {
     '/service-map': { body: serviceMap },
-    '/config': { body: { jaeger_url: 'http://jaeger.local/ui/', grafana_url: null, auth_enabled: false } },
+    '/config': { body: { jaeger_url: 'http://jaeger.local/ui/', grafana_url: null, auth_enabled: false, infra_services: ['flagd'] } },
     [`/stories/${ID}`]: { body: story },
     [`/traces/${ID}`]: { body: hostile },
     [`/traces/${ID}/log-templates`]: { body: traceTemplates },
@@ -177,7 +177,7 @@ describe('trace page and span drawer', () => {
   })
 
   it('hides the Jaeger link when the API has no Jaeger URL', async () => {
-    stubApi(routes({ '/config': { body: { jaeger_url: null, grafana_url: null, auth_enabled: false } } }))
+    stubApi(routes({ '/config': { body: { jaeger_url: null, grafana_url: null, auth_enabled: false, infra_services: ['flagd'] } } }))
     renderApp(`/traces/${ID}`)
     await screen.findByRole('tree', { name: 'Trace waterfall' })
     expect(screen.queryByRole('link', { name: /Open in Jaeger/ })).not.toBeInTheDocument()

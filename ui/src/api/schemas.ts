@@ -364,11 +364,16 @@ export const ConsumerLagSchema = z.strictObject({
   lag: int,
 })
 
+/** What an API that predates `infra_services` implies, and what the map assumes before `/config` loads. */
+export const DEFAULT_INFRA_SERVICES: readonly string[] = ['flagd']
+
 /** `GET /config` */
 export const ClientConfigSchema = z.strictObject({
   jaeger_url: z.nullable(str),
   grafana_url: z.nullable(str),
   auth_enabled: z.boolean(),
+  /** Services the map hides unless asked; an older API omits it. */
+  infra_services: z.array(str).default([...DEFAULT_INFRA_SERVICES]),
 })
 
 /** `GET /auth/me` */

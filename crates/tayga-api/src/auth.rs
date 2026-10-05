@@ -861,7 +861,7 @@ mod tests {
             repo.clone(),
             metrics.clone(),
             LagCache::new(fetch, LAG_TTL),
-            ClientConfig::new("", "", auth.is_some()),
+            ClientConfig::new("", "", auth.is_some(), vec!["flagd".into()]),
         );
         // Composed as in main.
         let mut app = api_router(repo, metrics)
