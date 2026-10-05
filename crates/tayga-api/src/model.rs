@@ -296,6 +296,8 @@ pub struct LogAlertRow {
     pub baseline_per_window: f64,
     pub active: u8,
     pub example_trace_ids: Vec<String>,
+    pub baseline_day: Option<f64>,
+    pub baseline_week: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -317,6 +319,11 @@ pub struct LogAlertView {
     pub window_count: u64,
     pub peak_count: u64,
     pub baseline_per_window: f64,
+    /// Seasonal mode only: hits of the same window 1 day / 7 days earlier. Omitted when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_day: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_week: Option<f64>,
     pub active: bool,
     pub example_traces: Vec<ExampleTrace>,
 }
@@ -335,6 +342,8 @@ impl LogAlertView {
             window_count: r.window_count,
             peak_count: r.peak_count,
             baseline_per_window: r.baseline_per_window,
+            baseline_day: r.baseline_day,
+            baseline_week: r.baseline_week,
             active: r.active != 0,
             example_traces: r
                 .example_trace_ids
@@ -851,10 +860,13 @@ pub(crate) mod tests {
             baseline_per_window: 0.5,
             active: 1,
             example_trace_ids: vec!["x".into(), "y".into()],
+            baseline_day: Some(3.0),
+            baseline_week: None,
         };
         let stories: HashSet<String> = ["y".to_string()].into();
         let v = LogAlertView::from_row(row, &stories);
         assert!(v.active);
+        assert_eq!((v.baseline_day, v.baseline_week), (Some(3.0), None));
         assert_eq!(v.example_traces[0].story_id, None);
         assert_eq!(v.example_traces[1].story_id.as_deref(), Some("y"));
     }

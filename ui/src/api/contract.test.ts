@@ -80,6 +80,13 @@ describe('API contract (live fixtures)', () => {
     expect(S.ClientConfigSchema.safeParse({ jaeger_url: null }).success).toBe(false)
   })
 
+  it('seasonal alerts carry optional baseline_day / baseline_week', () => {
+    const a = { ...logAlerts[0], baseline_day: 4, baseline_week: 2.5 }
+    expect(S.LogAlertViewSchema.safeParse(a).success).toBe(true)
+    expect(S.LogAlertViewSchema.safeParse({ ...a, baseline_week: null }).success).toBe(true)
+    expect(S.LogAlertViewSchema.safeParse(logAlerts[0]).success).toBe(true)
+  })
+
   it('a config without infra_services (an older API) means flagd', () => {
     const older: Record<string, unknown> = { ...clientConfig }
     delete older.infra_services

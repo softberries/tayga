@@ -48,7 +48,7 @@ fn span(id: &str) -> SpanRow {
 #[ignore = "requires ClickHouse: make it"]
 async fn migrate_is_idempotent_and_rows_roundtrip() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
     assert!(migrate(&s).await.unwrap().is_empty());
 
     let store = Store::new(&s);
@@ -150,7 +150,7 @@ fn story_row(id: &str) -> StoryRow {
 #[ignore = "requires ClickHouse: run against the live stack"]
 async fn analysis_tables_roundtrip_and_baseline_queries() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
     let store = Store::new(&s);
 
     let mut summaries: Vec<TraceSummaryRow> = (0..60).map(|i| summary_row(i, i % 2 == 0)).collect();
@@ -224,7 +224,7 @@ async fn analysis_tables_roundtrip_and_baseline_queries() {
 #[ignore = "requires ClickHouse: run against the live stack"]
 async fn replayed_trace_collapses_to_most_complete_row() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
     let store = Store::new(&s);
 
     let full = TraceSummaryRow {
@@ -297,7 +297,7 @@ async fn replayed_trace_collapses_to_most_complete_row() {
 #[ignore = "requires ClickHouse: make it"]
 async fn slow_story_traces_are_excluded_from_baselines() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
     let store = Store::new(&s);
 
     let summaries: Vec<TraceSummaryRow> = (0..60).map(|i| summary_row(i, i % 2 == 0)).collect();
@@ -563,6 +563,8 @@ fn alert(id: &str, kind: i8, template_id: u64, last_at: i64) -> LogAlertRow {
         baseline_per_window: 1.5,
         example_trace_ids: vec!["tr1".into()],
         version: 1,
+        baseline_day: Some(3.0),
+        baseline_week: None,
     }
 }
 
@@ -1045,5 +1047,108 @@ async fn metric_buckets_keep_the_last_value_per_series_and_step() {
         "only samples before the window's end, in epoch-aligned buckets"
     );
 
+    drop_db(&s, &store).await;
+}
+
+const DAY_SECS: u32 = 86_400;
+const WEEK_SECS: u32 = 7 * DAY_SECS;
+
+fn shifted(shift_secs: u32, back_min: i64) -> i64 {
+    now_ns() - i64::from(shift_secs) * 1_000_000_000 - back_min * MIN_NS
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn minutes_mv_does_not_double_count_replayed_hits() {
+    let (s, store) = log_store().await;
+    // Ten hits inside one past minute (mid-minute, so none crosses a boundary).
+    let minute_start = (now_ns() - 10 * MIN_NS).div_euclid(MIN_NS) * MIN_NS;
+    let batch = |ids: std::ops::RangeInclusive<u64>| -> Vec<LogHitRow> {
+        ids.map(|i| hit(i, 7, minute_start + 20_000_000_000 + i as i64, ""))
+            .collect()
+    };
+    let merged = |store: &Store| {
+        let c = store.client().clone();
+        async move {
+            c.query(
+                "SELECT count(), uniqExactMerge(hits) FROM log_template_minutes \
+                 WHERE template_id = 7 AND minute = fromUnixTimestamp(?)",
+            )
+            .bind(minute_start / 1_000_000_000)
+            .fetch_one::<(u64, u64)>()
+            .await
+            .unwrap()
+        }
+    };
+    store.insert_log_hits(&batch(1..=10)).await.unwrap();
+    assert_eq!(merged(&store).await, (1, 10));
+    // The same 10 log_ids again: a second state row lands in the table (the MV fires per
+    // insert), but the merged distinct count stays 10.
+    store.insert_log_hits(&batch(1..=10)).await.unwrap();
+    let (state_rows, distinct) = merged(&store).await;
+    assert_eq!(state_rows, 2, "each insert block adds a state row");
+    assert_eq!(distinct, 10, "uniqExactMerge dedups the replay");
+    // A partial replay with new ids only adds the new ones.
+    store.insert_log_hits(&batch(6..=15)).await.unwrap();
+    assert_eq!(merged(&store).await.1, 15);
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn seasonal_counts_cover_shifted_windows() {
+    let (s, store) = log_store().await;
+    let mut hits = Vec::new();
+    // Template 1: 10 hits one day ago (inserted twice below), 4 hits a week ago.
+    for i in 1..=10u64 {
+        hits.push(hit(i, 1, shifted(DAY_SECS, 3) + i as i64, ""));
+    }
+    // Template 3 is active in the day window only, so template 2 has coverage but no row.
+    for i in 101..=102u64 {
+        hits.push(hit(i, 3, shifted(DAY_SECS, 2) + i as i64, ""));
+    }
+    store.insert_log_hits(&hits).await.unwrap();
+    store.insert_log_hits(&hits).await.unwrap(); // replay
+    // A hit outside the day window (30 minutes before it) must not count.
+    store
+        .insert_log_hits(&[hit(201, 1, shifted(DAY_SECS, 30), "")])
+        .await
+        .unwrap();
+
+    let w = store
+        .seasonal_counts(&[1, 2], 5, &[DAY_SECS, WEEK_SECS])
+        .await
+        .unwrap();
+    assert_eq!(w.len(), 2);
+    assert_eq!((w[0].shift_secs, w[0].covered), (DAY_SECS, true));
+    assert_eq!(
+        w[0].counts,
+        vec![(1, 10), (2, 0)],
+        "replay deduped, no row in a covered window is 0"
+    );
+    assert_eq!((w[1].shift_secs, w[1].covered), (WEEK_SECS, false));
+    assert!(
+        w[1].counts.is_empty(),
+        "no rows at all: no coverage, no counts"
+    );
+
+    // Seed the week window: only template 3 and template 1 (4 hits).
+    let mut week = vec![hit(301, 3, shifted(WEEK_SECS, 3), "")];
+    for i in 1..=4u64 {
+        week.push(hit(310 + i, 1, shifted(WEEK_SECS, 4) + i as i64, ""));
+    }
+    store.insert_log_hits(&week).await.unwrap();
+    let w = store
+        .seasonal_counts(&[1, 2], 5, &[DAY_SECS, WEEK_SECS])
+        .await
+        .unwrap();
+    assert_eq!(w[0].counts, vec![(1, 10), (2, 0)]);
+    assert!(w[1].covered);
+    assert_eq!(w[1].counts, vec![(1, 4), (2, 0)]);
+    assert!(
+        store.seasonal_counts(&[], 5, &[DAY_SECS]).await.unwrap()[0]
+            .counts
+            .is_empty()
+    );
     drop_db(&s, &store).await;
 }

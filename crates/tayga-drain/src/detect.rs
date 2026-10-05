@@ -6,6 +6,30 @@ use tayga_analysis::fingerprint::fingerprint;
 
 const MIN_NS: i64 = 60_000_000_000;
 
+/// How a spike is judged (spec 7a §2.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BaselineMode {
+    /// The flat rule only: the template's own preceding hour.
+    #[default]
+    Flat,
+    /// The flat rule, and the window must also beat the same window 1 day and 7 days earlier.
+    Seasonal,
+}
+
+impl std::str::FromStr for BaselineMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "flat" => Ok(Self::Flat),
+            "seasonal" => Ok(Self::Seasonal),
+            other => Err(format!(
+                "unknown baseline mode {other:?}, expected \"flat\" or \"seasonal\""
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DetectConfig {
     pub spike_window_min: u32,
@@ -15,6 +39,7 @@ pub struct DetectConfig {
     pub new_template_recent_min: u32,
     pub new_template_warmup_min: u32,
     pub alert_active_min: u32,
+    pub baseline_mode: BaselineMode,
 }
 
 impl Default for DetectConfig {
@@ -27,6 +52,7 @@ impl Default for DetectConfig {
             new_template_recent_min: 10,
             new_template_warmup_min: 15,
             alert_active_min: 10,
+            baseline_mode: BaselineMode::Flat,
         }
     }
 }
@@ -80,6 +106,10 @@ pub struct Alert {
     pub window_count: u64,
     pub peak_count: u64,
     pub baseline_per_window: f64,
+    /// Seasonal mode: hits of the same window 1 day / 7 days earlier; `None` when that window
+    /// had no coverage or the mode is flat.
+    pub baseline_day: Option<f64>,
+    pub baseline_week: Option<f64>,
     pub example_trace_ids: Vec<String>,
 }
 
@@ -168,6 +198,24 @@ pub fn spike_baseline(
     .then_some(per_window))
 }
 
+/// Seasonal spike rule (spec 7a §2.3): the flat rule fires and `current` also beats
+/// `spike_factor * max(c, 1)` for every comparator that counts. `day` / `week` are the hit
+/// counts of the window shifted by 1 / 7 days, `None` when that past window had no global
+/// coverage. With no comparator this is the flat rule.
+pub fn seasonal_decision(
+    cfg: &DetectConfig,
+    current: u64,
+    flat_per_window: f64,
+    day: Option<u64>,
+    week: Option<u64>,
+) -> bool {
+    let beats = |c: u64| current as f64 >= cfg.spike_factor * (c.max(1) as f64);
+    current >= cfg.spike_min_count
+        && current as f64 >= cfg.spike_factor * flat_per_window.max(1.0)
+        && day.is_none_or(beats)
+        && week.is_none_or(beats)
+}
+
 /// Slack below the previous tick's data clock, for logs that arrive slightly out of order.
 pub const NEW_TEMPLATE_MARGIN_NS: i64 = MIN_NS;
 
@@ -214,6 +262,8 @@ pub fn new_alert(c: &NewCandidate, examples: Vec<String>, now_ns: i64) -> Alert 
         window_count: 0,
         peak_count: 0,
         baseline_per_window: 0.0,
+        baseline_day: None,
+        baseline_week: None,
         example_trace_ids: examples,
     }
 }
@@ -236,6 +286,7 @@ impl SpikeTracker {
         cfg: &DetectConfig,
         w: &TemplateWindow,
         baseline_per_window: f64,
+        seasonal: (Option<f64>, Option<f64>),
         examples: Vec<String>,
         now_ns: i64,
     ) -> (Alert, bool) {
@@ -247,6 +298,7 @@ impl SpikeTracker {
             a.window_count = w.current;
             a.peak_count = a.peak_count.max(w.current);
             a.baseline_per_window = baseline_per_window;
+            (a.baseline_day, a.baseline_week) = seasonal;
             if !examples.is_empty() {
                 a.example_trace_ids = examples;
             }
@@ -268,6 +320,8 @@ impl SpikeTracker {
             window_count: w.current,
             peak_count: w.current,
             baseline_per_window,
+            baseline_day: seasonal.0,
+            baseline_week: seasonal.1,
             example_trace_ids: examples,
         };
         self.active.insert(w.template_id, a.clone());
@@ -450,6 +504,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn seasonal_without_comparators_is_flat() {
+        let cfg = DetectConfig::default();
+        assert!(seasonal_decision(&cfg, 50, 10.0, None, None));
+        assert!(!seasonal_decision(&cfg, 49, 10.0, None, None), "flat rule");
+        assert!(!seasonal_decision(&cfg, 9, 0.0, None, None), "min count");
+    }
+
+    #[test]
+    fn seasonal_day_comparator_alone() {
+        let cfg = DetectConfig::default();
+        assert!(seasonal_decision(&cfg, 50, 0.0, Some(10), None)); // 50 >= 5*10
+        assert!(!seasonal_decision(&cfg, 49, 0.0, Some(10), None));
+        assert!(seasonal_decision(&cfg, 10, 0.0, Some(0), None), "max(c, 1)");
+        assert!(!seasonal_decision(&cfg, 10, 0.0, Some(3), None));
+    }
+
+    #[test]
+    fn seasonal_day_and_week_must_both_be_beaten() {
+        let cfg = DetectConfig::default();
+        assert!(seasonal_decision(&cfg, 50, 0.0, Some(10), Some(10)));
+        assert!(!seasonal_decision(&cfg, 50, 0.0, Some(10), Some(11)));
+        assert!(
+            seasonal_decision(&cfg, 50, 0.0, None, Some(10)),
+            "week only"
+        );
+    }
+
+    #[test]
+    fn a_high_comparator_suppresses_a_flat_spike() {
+        let cfg = DetectConfig::default();
+        // Flat says spike (baseline 2/window), but the same window yesterday was as busy.
+        assert!(seasonal_decision(&cfg, 60, 2.0, None, None));
+        assert!(
+            !seasonal_decision(&cfg, 60, 2.0, Some(40), None),
+            "daily peak"
+        );
+        assert!(
+            !seasonal_decision(&cfg, 60, 2.0, Some(1), Some(40)),
+            "weekly peak"
+        );
+        // The flat rule still gates: a quiet comparator does not rescue a flat non-spike.
+        assert!(!seasonal_decision(&cfg, 60, 20.0, Some(0), Some(0)));
+    }
+
+    #[test]
+    fn baseline_mode_parses() {
+        assert_eq!("flat".parse(), Ok(BaselineMode::Flat));
+        assert_eq!("seasonal".parse(), Ok(BaselineMode::Seasonal));
+        assert!("Seasonal".parse::<BaselineMode>().is_err());
+        assert_eq!(BaselineMode::default(), BaselineMode::Flat);
+    }
+
     fn candidate(first_seen_ns: i64, service_oldest_ns: i64) -> NewCandidate {
         NewCandidate {
             template_id: 1,
@@ -536,12 +643,27 @@ mod tests {
     fn spike_tracker_updates_then_rolls_over() {
         let cfg = DetectConfig::default();
         let mut t = SpikeTracker::default();
-        let (a1, created) = t.observe(&cfg, &window(20, 0, 120), 0.0, vec!["t1".into()], NOW);
+        let (a1, created) = t.observe(
+            &cfg,
+            &window(20, 0, 120),
+            0.0,
+            (None, None),
+            vec!["t1".into()],
+            NOW,
+        );
         assert!(created);
-        let (a2, created) = t.observe(&cfg, &window(30, 0, 120), 0.0, vec![], NOW + 5 * MIN_NS);
+        let (a2, created) = t.observe(
+            &cfg,
+            &window(30, 0, 120),
+            0.0,
+            (Some(2.0), None),
+            vec![],
+            NOW + 5 * MIN_NS,
+        );
         assert!(!created);
         assert_eq!(a2.alert_id, a1.alert_id);
         assert_eq!((a2.peak_count, a2.window_count), (30, 30));
+        assert_eq!((a2.baseline_day, a2.baseline_week), (Some(2.0), None));
         assert_eq!(
             a2.example_trace_ids,
             vec!["t1".to_string()],
@@ -549,7 +671,14 @@ mod tests {
         );
         assert_eq!(t.expire(&cfg, NOW + 15 * MIN_NS), 1);
         assert_eq!(t.expire(&cfg, NOW + 16 * MIN_NS), 0);
-        let (a3, created) = t.observe(&cfg, &window(20, 0, 120), 0.0, vec![], NOW + 30 * MIN_NS);
+        let (a3, created) = t.observe(
+            &cfg,
+            &window(20, 0, 120),
+            0.0,
+            (None, None),
+            vec![],
+            NOW + 30 * MIN_NS,
+        );
         assert!(created);
         assert_ne!(a3.alert_id, a1.alert_id);
     }

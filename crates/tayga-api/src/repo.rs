@@ -320,7 +320,8 @@ impl ChRepo {
                 "SELECT alert_id, toString(kind) AS kind, toString(template_id) AS template_id, service, template, \
                  toUnixTimestamp64Nano(started_at) AS started_at_ns, toUnixTimestamp64Nano(last_at) AS last_at_ns, \
                  window_count, peak_count, baseline_per_window, \
-                 toUInt8(last_at > toDateTime(?) - toIntervalMinute({ALERT_ACTIVE_MIN})) AS active, example_trace_ids \
+                 toUInt8(last_at > toDateTime(?) - toIntervalMinute({ALERT_ACTIVE_MIN})) AS active, example_trace_ids, \
+                 baseline_day, baseline_week \
                  FROM (SELECT * FROM log_alerts FINAL WHERE last_at >= toDateTime(?) AND started_at < toDateTime(?) \
                  AND (? = '' OR toString(kind) = ?) AND (? = '' OR service = ?) AND (? = '' OR toString(template_id) = ?)) \
                  ORDER BY last_at DESC LIMIT {limit}"

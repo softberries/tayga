@@ -109,6 +109,8 @@ pub fn alert_row(a: &Alert, version: u64) -> LogAlertRow {
         baseline_per_window: a.baseline_per_window,
         example_trace_ids: a.example_trace_ids.clone(),
         version,
+        baseline_day: a.baseline_day,
+        baseline_week: a.baseline_week,
     }
 }
 
@@ -130,13 +132,15 @@ pub fn alert_from_row(r: &LogAlertRow) -> Option<Alert> {
         window_count: r.window_count,
         peak_count: r.peak_count,
         baseline_per_window: r.baseline_per_window,
+        baseline_day: r.baseline_day,
+        baseline_week: r.baseline_week,
         example_trace_ids: r.example_trace_ids.clone(),
     })
 }
 
 /// The `tayga.alerts` message: `template_id` as a decimal string (u64 does not fit a JS number).
 pub fn alert_json(a: &Alert) -> Value {
-    json!({
+    let mut v = json!({
         "alert_id": a.alert_id,
         "kind": a.kind.as_str(),
         "template_id": a.template_id.to_string(),
@@ -148,7 +152,15 @@ pub fn alert_json(a: &Alert) -> Value {
         "peak_count": a.peak_count,
         "baseline_per_window": a.baseline_per_window,
         "example_trace_ids": a.example_trace_ids,
-    })
+    });
+    // Seasonal comparators are optional: absent in flat mode and when no past window counted.
+    if let Some(d) = a.baseline_day {
+        v["baseline_day"] = json!(d);
+    }
+    if let Some(w) = a.baseline_week {
+        v["baseline_week"] = json!(w);
+    }
+    v
 }
 
 #[cfg(test)]
@@ -183,6 +195,8 @@ mod tests {
             window_count: 30,
             peak_count: 40,
             baseline_per_window: 1.5,
+            baseline_day: Some(4.0),
+            baseline_week: None,
             example_trace_ids: vec!["t1".into()],
         }
     }
@@ -265,6 +279,8 @@ mod tests {
         assert_eq!(v["started_at_ns"], 10);
         assert_eq!(v["last_at_ns"], 20);
         assert_eq!(v["example_trace_ids"], json!(["t1"]));
+        assert_eq!(v["baseline_day"], 4.0);
+        assert!(v.get("baseline_week").is_none(), "absent, not null");
     }
 
     #[test]

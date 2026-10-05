@@ -305,6 +305,8 @@ async fn reads_seeded_log_templates_alerts_and_trace_links() {
             baseline_per_window: 0.5,
             example_trace_ids: vec![trace_story.clone(), trace_plain.clone()],
             version: 1,
+            baseline_day: Some(4.0),
+            baseline_week: None,
         };
     let ids = [hex32(), hex32(), hex32()];
     store
@@ -382,6 +384,11 @@ async fn reads_seeded_log_templates_alerts_and_trace_links() {
     assert!(alerts[0].active && !alerts[1].active && !alerts[2].active);
     assert_eq!(alerts[0].kind, "spike");
     assert_eq!(alerts[0].template_id, tmpl_a.to_string());
+    assert_eq!(
+        (alerts[0].baseline_day, alerts[0].baseline_week),
+        (Some(4.0), None),
+        "seasonal comparators pass through"
+    );
     assert_eq!(alerts[0].example_traces[0].trace_id, trace_story);
     assert_eq!(
         alerts[0].example_traces[0].story_id.as_deref(),
@@ -690,6 +697,8 @@ async fn reads_seeded_overview_traces_services_and_search() {
         baseline_per_window: 0.0,
         example_trace_ids: vec![],
         version: 1,
+        baseline_day: None,
+        baseline_week: None,
     };
     store
         .insert_alerts(&[alert(&hex32(), now), alert(&hex32(), now - 3600 * sec)])
@@ -1123,6 +1132,8 @@ async fn a_past_window_returns_only_the_rows_inside_it() {
         baseline_per_window: 0.0,
         example_trace_ids: vec![],
         version: 1,
+        baseline_day: None,
+        baseline_week: None,
     };
     let (ended_before, overlapping, firing_at_end, started_after) = (
         alert(before - 60 * sec, before),

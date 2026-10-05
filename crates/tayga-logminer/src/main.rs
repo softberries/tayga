@@ -11,8 +11,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tayga_common::metrics::KindLabel;
 use tayga_common::retry::retry_until;
 use tayga_drain::detect::{
-    Alert, DetectConfig, NewCandidate, SpikeSkip, SpikeTracker, TemplateWindow, initial_watermark,
-    is_new, new_alert, new_template_since, spike_baseline, template_coverage,
+    Alert, BaselineMode, DetectConfig, NewCandidate, SpikeSkip, SpikeTracker, TemplateWindow,
+    initial_watermark, is_new, new_alert, new_template_since, seasonal_decision, spike_baseline,
+    template_coverage,
 };
 use tayga_drain::drain::DrainConfig;
 use tayga_drain::preprocess::masking_version;
@@ -31,6 +32,8 @@ const GROUP: &str = "tayga-logminer";
 const EXAMPLES: u32 = 5;
 const ALERTS_PARTITIONS: i32 = 3;
 const MIN_NS: i64 = 60_000_000_000;
+/// Seasonal comparators: the spike window 1 day and 7 days earlier (spec 7a §2.3).
+const SEASONAL_SHIFTS_SECS: [u32; 2] = [86_400, 7 * 86_400];
 const KEY_WATERMARK: &str = "new_template_watermark_ns";
 const KEY_MASKING_VERSION: &str = "masking_version";
 const KEY_EPOCH_START: &str = "masking_epoch_start_ns";
@@ -61,6 +64,8 @@ struct LogminerSettings {
     spike_min_count: u64,
     new_template_warmup_min: u32,
     alert_active_min: u32,
+    /// `"flat"` or `"seasonal"`.
+    baseline_mode: String,
     alerts_topic: String,
     metrics_addr: SocketAddr,
 }
@@ -82,6 +87,7 @@ impl Default for LogminerSettings {
             spike_min_count: detect.spike_min_count,
             new_template_warmup_min: detect.new_template_warmup_min,
             alert_active_min: detect.alert_active_min,
+            baseline_mode: "flat".to_string(),
             alerts_topic: "tayga.alerts".to_string(),
             metrics_addr: SocketAddr::from(([0, 0, 0, 0], 9100)),
         }
@@ -103,6 +109,9 @@ impl LogminerSettings {
             self.max_clusters_per_service > 0,
             "logminer.max_clusters_per_service must be positive"
         );
+        self.baseline_mode
+            .parse::<BaselineMode>()
+            .map_err(|e| anyhow::anyhow!("logminer.baseline_mode: {e}"))?;
         Ok(())
     }
 
@@ -123,6 +132,8 @@ impl LogminerSettings {
             spike_min_count: self.spike_min_count,
             new_template_warmup_min: self.new_template_warmup_min,
             alert_active_min: self.alert_active_min,
+            // Checked by `validate`.
+            baseline_mode: self.baseline_mode.parse().unwrap_or_default(),
             ..DetectConfig::default()
         }
     }
@@ -834,6 +845,7 @@ async fn find_alerts(
             cfg.spike_min_count,
         )
         .await?;
+    let mut spiking = Vec::new();
     for r in windows {
         let w = TemplateWindow {
             template_id: r.template_id,
@@ -844,19 +856,50 @@ async fn find_alerts(
             baseline_total: r.baseline_total,
         };
         let cov = template_coverage(cfg, &buckets, w.first_seen_ns, now);
-        let baseline = match spike_baseline(cfg, &w, cov, now) {
-            Ok(Some(b)) => b,
-            Ok(None) => continue,
+        match spike_baseline(cfg, &w, cov, now) {
+            Ok(Some(b)) => spiking.push((w, b)),
+            Ok(None) => {}
             Err(SpikeSkip::Coverage) => {
                 metrics
                     .spike_skipped
                     .get_or_create(&ReasonLabel::new("coverage"))
                     .inc();
-                continue;
             }
+        }
+    }
+    // Seasonal comparators are only looked up for templates the flat rule already flags.
+    let seasonal = if cfg.baseline_mode == BaselineMode::Seasonal && !spiking.is_empty() {
+        let ids: Vec<u64> = spiking.iter().map(|(w, _)| w.template_id).collect();
+        Some(
+            store
+                .seasonal_counts(&ids, cfg.spike_window_min, &SEASONAL_SHIFTS_SECS)
+                .await?,
+        )
+    } else {
+        None
+    };
+    for (w, baseline) in spiking {
+        let (day, week) = match &seasonal {
+            Some(windows) => {
+                let pick = |i: usize| {
+                    windows[i].covered.then(|| {
+                        windows[i]
+                            .counts
+                            .iter()
+                            .find(|(id, _)| *id == w.template_id)
+                            .map_or(0, |&(_, n)| n)
+                    })
+                };
+                (pick(0), pick(1))
+            }
+            None => (None, None),
         };
+        if !seasonal_decision(cfg, w.current, baseline, day, week) {
+            continue;
+        }
         let examples = examples(store, w.template_id, cfg.spike_window_min).await;
-        out.push(tracker.observe(cfg, &w, baseline, examples, now));
+        let comparators = (day.map(|n| n as f64), week.map(|n| n as f64));
+        out.push(tracker.observe(cfg, &w, baseline, comparators, examples, now));
     }
     let since = new_template_since(clock.watermark);
     let candidates = store.new_template_candidates(since).await?;
@@ -952,8 +995,18 @@ mod tests {
         assert_eq!(s.alerts_topic, "tayga.alerts");
         assert_eq!(s.metrics_addr, SocketAddr::from(([0, 0, 0, 0], 9100)));
         assert_eq!(s.detect(), DetectConfig::default());
+        assert_eq!(s.detect().baseline_mode, BaselineMode::Flat);
         assert_eq!(s.drain(), DrainConfig::default());
         s.validate().unwrap();
+    }
+
+    #[test]
+    fn baseline_mode_setting_is_validated() {
+        let s: LogminerSettings = serde_json::from_str(r#"{"baseline_mode": "seasonal"}"#).unwrap();
+        s.validate().unwrap();
+        assert_eq!(s.detect().baseline_mode, BaselineMode::Seasonal);
+        let bad: LogminerSettings = serde_json::from_str(r#"{"baseline_mode": "daily"}"#).unwrap();
+        assert!(bad.validate().is_err());
     }
 
     #[test]
