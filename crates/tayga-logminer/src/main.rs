@@ -23,7 +23,7 @@ use tayga_logminer::miner::{Miner, alert_from_row, alert_json, alert_row};
 use tayga_model::envelope::{Envelope, HEADER_KIND, Kind};
 use tayga_store::ClickHouseSettings;
 use tayga_store::flatten::rows_from_envelope;
-use tayga_store::logs::LogHitRow;
+use tayga_store::logs::{LogHitRow, SeasonalWindow};
 use tayga_store::store::Store;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
@@ -870,10 +870,11 @@ async fn find_alerts(
     // Seasonal comparators are only looked up for templates the flat rule already flags.
     let seasonal = if cfg.baseline_mode == BaselineMode::Seasonal && !spiking.is_empty() {
         let ids: Vec<u64> = spiking.iter().map(|(w, _)| w.template_id).collect();
-        Some(
+        seasonal_or_flat(
             store
                 .seasonal_counts(&ids, cfg.spike_window_min, &SEASONAL_SHIFTS_SECS)
-                .await?,
+                .await,
+            metrics,
         )
     } else {
         None
@@ -919,6 +920,19 @@ async fn find_alerts(
         out.push((new_alert(&c, examples, now), true));
     }
     Ok((out, data_now))
+}
+
+/// A failed comparator lookup must not drop the tick's alerts: log it, count it and judge by the
+/// flat rule alone (spec 7a §2.3 fallback).
+fn seasonal_or_flat<E: std::fmt::Display>(
+    res: Result<Vec<SeasonalWindow>, E>,
+    metrics: &LogminerMetrics,
+) -> Option<Vec<SeasonalWindow>> {
+    res.inspect_err(|e| {
+        metrics.seasonal_failures.inc();
+        tracing::warn!(error = %e, "seasonal comparator lookup failed, using the flat rule");
+    })
+    .ok()
 }
 
 /// Example traces are best effort: a failed lookup yields none rather than dropping the alert.
@@ -998,6 +1012,20 @@ mod tests {
         assert_eq!(s.detect().baseline_mode, BaselineMode::Flat);
         assert_eq!(s.drain(), DrainConfig::default());
         s.validate().unwrap();
+    }
+
+    #[test]
+    fn a_failed_seasonal_lookup_falls_back_to_flat_and_is_counted() {
+        let m = LogminerMetrics::default();
+        let ok = vec![SeasonalWindow {
+            shift_secs: 86_400,
+            covered: true,
+            counts: vec![(1, 3)],
+        }];
+        assert_eq!(seasonal_or_flat(Ok::<_, String>(ok.clone()), &m), Some(ok));
+        assert_eq!(m.seasonal_failures.get(), 0);
+        assert_eq!(seasonal_or_flat(Err("boom".to_string()), &m), None);
+        assert_eq!(m.seasonal_failures.get(), 1);
     }
 
     #[test]

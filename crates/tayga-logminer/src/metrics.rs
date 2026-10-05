@@ -38,6 +38,8 @@ pub struct LogminerMetrics {
     pub state_save_failures: Counter,
     /// Template windows not judged for a spike, by reason.
     pub spike_skipped: Family<ReasonLabel, Counter>,
+    /// Failed seasonal comparator lookups (the tick fell back to flat).
+    pub seasonal_failures: Counter,
 }
 
 impl Default for LogminerMetrics {
@@ -54,6 +56,7 @@ impl Default for LogminerMetrics {
             data_lag_seconds: Gauge::default(),
             state_save_failures: Counter::default(),
             spike_skipped: Family::default(),
+            seasonal_failures: Counter::default(),
         }
     }
 }
@@ -111,6 +114,11 @@ impl LogminerMetrics {
             "Spike candidates not judged, by reason (coverage: under half the baseline minutes had logs)",
             m.spike_skipped.clone(),
         );
+        registry.register(
+            "tayga_logminer_seasonal_failures",
+            "Failed seasonal comparator lookups; the pass fell back to the flat rule",
+            m.seasonal_failures.clone(),
+        );
         drop(m.spike_skipped.get_or_create(&ReasonLabel::new("coverage")));
         // Export both series at 0 so the family is visible before the first alert.
         for kind in [AlertKind::New, AlertKind::Spike] {
@@ -150,6 +158,7 @@ mod tests {
             "# TYPE tayga_logminer_data_lag_seconds gauge",
             "tayga_logminer_data_lag_seconds 2.5",
             "tayga_logminer_state_save_failures_total 0",
+            "tayga_logminer_seasonal_failures_total 0",
             "tayga_logminer_spike_skipped_total{reason=\"coverage\"} 1",
         ] {
             assert!(out.contains(line), "missing {line:?} in\n{out}");
