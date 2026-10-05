@@ -22,6 +22,7 @@ import { Card, PanelTitle } from '../components/ui/Card'
 import { EmptyState } from '../components/ui/EmptyState'
 import { ErrorState } from '../components/ui/ErrorState'
 import { Skeleton } from '../components/ui/Skeleton'
+import { RefreshNote, loadFailed } from '../components/ui/StaleNote'
 import { ServiceDrawer } from '../features/map/ServiceDrawer'
 import { ServiceEdge } from '../features/map/ServiceEdge'
 import type { ServiceEdgeType } from '../features/map/ServiceEdge'
@@ -31,7 +32,6 @@ import { NODE_H, NODE_W, edgeId, layoutGraph } from '../features/map/layout'
 import type { MapLayout } from '../features/map/layout'
 import { HEALTH_COLOR, TONE_STROKE, callsPerMin, edgeTone, edgeWidth, mapGraph, mapSummary, matchServices, topologyKey } from '../features/map/model'
 import { describeMap } from '../features/stories/MiniMap'
-import { ErrorBanner } from '../features/stories/ErrorBanner'
 import { cx } from '../lib/cx'
 import { NARROW_QUERY, REDUCED_MOTION_QUERY, useMediaQuery } from '../lib/useMediaQuery'
 import { useAppliedTheme } from '../theme/useAppliedTheme'
@@ -371,7 +371,7 @@ function MapView() {
         </div>
       </Card>
 
-      {map.isError && data ? <ErrorBanner what="the service map" error={map.error} onRetry={() => void map.refetch()} /> : null}
+      <RefreshNote queries={[map]} />
 
       <Card
         className="relative flex min-h-[460px] flex-1 overflow-hidden max-sm:min-h-[62dvh]"
@@ -379,7 +379,7 @@ function MapView() {
       >
         {map.isPending ? (
           <CanvasSkeleton label="Loading the service map" />
-        ) : map.isError && !data ? (
+        ) : loadFailed(map) ? (
           <ErrorState error={map.error} onRetry={() => void map.refetch()} className="m-auto" />
         ) : empty ? (
           <EmptyState

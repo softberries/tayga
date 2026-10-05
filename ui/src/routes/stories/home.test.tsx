@@ -197,6 +197,22 @@ describe('stories home', () => {
     await waitFor(() => expect(calls()).toBe(before + 1))
   })
 
+  it('a failed refresh keeps the tiles, table, inspector, map and alerts, and notes it', async () => {
+    stubApi(routes())
+    const { queryClient } = renderApp('/')
+    await bodyRows()
+    await screen.findByRole('complementary', { name: 'Selected story' })
+    const down = { status: 503, body: { error: 'clickhouse unavailable' } }
+    stubApi(routes({ '/overview': down, '/story-groups': down, '/service-map': down, '/log-alerts': down }))
+    await act(() => queryClient.refetchQueries({ type: 'active' }))
+    await waitFor(() => expect(screen.getAllByText(/^Refresh failed · showing data from \d\d:\d\d:\d\d$/)).toHaveLength(4))
+    expect(screen.queryByText(/^Could not load/)).toBeNull()
+    expect(await bodyRows()).toHaveLength(groups.length)
+    expect(screen.getByRole('list', { name: 'Summary' })).toHaveTextContent(String(overview.error_stories))
+    expect(screen.getByRole('complementary', { name: 'Selected story' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /^Service map: 19 services/ })).toBeInTheDocument()
+  })
+
   it('shows skeletons while loading', async () => {
     stubApi(routes())
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})))

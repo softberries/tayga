@@ -443,6 +443,18 @@ describe('log template page', () => {
     await waitFor(() => expect(calls(fetch, 'log-templates/').length).toBeGreaterThan(before))
   })
 
+  it('a failed refresh keeps the page and notes it', async () => {
+    stubApi(routes())
+    const { queryClient } = renderApp(`/logs/templates/${TID}`)
+    await screen.findByRole('heading', { level: 2, name: detail.template.template })
+    stubApi(routes({ [`/log-templates/${TID}`]: { status: 503, body: { error: 'clickhouse unavailable' } } }))
+    await act(() => queryClient.refetchQueries({ queryKey: ['log-templates'] }))
+    expect(await screen.findByText(/^Refresh failed · showing data from \d\d:\d\d:\d\d$/)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 2, name: detail.template.template })).toBeInTheDocument()
+    expect(screen.getByRole('table', { name: 'Recent hits' })).toBeInTheDocument()
+    expect(screen.queryByText('Storage is unavailable')).toBeNull()
+  })
+
   it('shows a skeleton while loading, and 404s a malformed id', async () => {
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})))
     const { unmount } = renderApp(`/logs/templates/${TID}`)

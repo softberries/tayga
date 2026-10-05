@@ -17,6 +17,7 @@ import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
 import { ErrorState } from '../../components/ui/ErrorState'
 import { Skeleton } from '../../components/ui/Skeleton'
+import { RefreshNote } from '../../components/ui/StaleNote'
 import { dateTime, duration, shortId } from '../../lib/format'
 
 /** Header numbers derived from the spans. */
@@ -133,7 +134,7 @@ export function TracePage() {
   }, [story.data, trace.data])
 
   if (trace.isPending) return <TraceSkeleton />
-  if (trace.isError) {
+  if (!trace.data) {
     if (isApiError(trace.error) && trace.error.status === 404)
       return (
         <NotFoundCard
@@ -166,6 +167,7 @@ export function TracePage() {
 
   return (
     <div className="flex flex-col gap-4">
+      <RefreshNote queries={[trace, story, templates]} />
       <Card className="tg-in flex flex-col gap-4 px-5 py-4">
         <div className="flex flex-wrap items-start gap-3">
           <div className="flex min-w-[min(100%,320px)] flex-1 flex-col gap-1">

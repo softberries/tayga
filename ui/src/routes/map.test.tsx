@@ -134,6 +134,38 @@ describe('service map', () => {
     expect(within(drawer).getByRole('link', { name: /Open payment traces/ })).toHaveAttribute('href', '/traces?service=payment')
   })
 
+  it('a failed refresh keeps the drawer sections and notes it', async () => {
+    stubApi(routes())
+    const { queryClient } = renderApp('/map?service=payment')
+    const drawer = await screen.findByRole('dialog', { name: 'payment' })
+    const red = await within(drawer).findByRole('region', { name: 'RED · last 1h' })
+    await within(red).findByText('38 %')
+    const stories = within(drawer).getByRole('region', { name: 'Stories with root cause here' })
+    await within(stories).findByRole('link', { name: /payment charge failed/ })
+    const logs = within(drawer).getByRole('region', { name: 'Log signals' })
+    await within(logs).findByText('Payment request failed. Invalid token.')
+    const down = { status: 503, body: { error: 'clickhouse unavailable' } }
+    stubApi(routes({ '/services/payment': down, '/story-groups': down, '/log-alerts': down, '/log-templates': down }))
+    await act(() => queryClient.refetchQueries({ type: 'active', predicate: (q) => q.queryKey[0] !== 'service-map' }))
+    const note = /^Refresh failed · showing data from \d\d:\d\d:\d\d$/
+    expect(await within(red).findByText(note)).toBeInTheDocument()
+    expect(within(stories).getByText(note)).toBeInTheDocument()
+    expect(within(logs).getByText(note)).toBeInTheDocument()
+    expect(within(red).getAllByRole('figure')).toHaveLength(3)
+    expect(within(stories).getByRole('link', { name: /payment charge failed/ })).toBeInTheDocument()
+    expect(within(logs).getByText('Payment request failed. Invalid token.')).toBeInTheDocument()
+    expect(within(drawer).queryByText('Storage is unavailable')).toBeNull()
+  })
+
+  it('a service with no spans in the window shows an empty state, not an error', async () => {
+    stubApi(routes({ '/services/payment': { status: 404, body: { error: 'not found' } } }))
+    renderApp('/map?service=payment&since=15m')
+    const drawer = await screen.findByRole('dialog', { name: 'payment' })
+    const red = await within(drawer).findByRole('region', { name: 'RED · last 15m' })
+    expect(await within(red).findByText('No spans for payment in the last 15m.')).toBeInTheDocument()
+    expect(within(red).queryByRole('alert')).toBeNull()
+  })
+
   it('a node opens its drawer from the keyboard and closing returns focus to it', async () => {
     const user = userEvent.setup()
     stubApi(routes({ '/services/checkout': { body: service } }))

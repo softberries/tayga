@@ -17,6 +17,7 @@ import { Button } from '../../components/ui/Button'
 import { Card, PanelTitle } from '../../components/ui/Card'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { Skeleton } from '../../components/ui/Skeleton'
+import { RefreshNote, loadFailed } from '../../components/ui/StaleNote'
 import { ToggleGroup } from '../../components/ui/ToggleGroup'
 import { ErrorBanner } from '../../features/stories/ErrorBanner'
 import { SINCE_SECS } from '../../features/stories/model'
@@ -182,9 +183,8 @@ export function TracesExplorer() {
         />
       </Card>
 
-      {traces.isError && !traces.data ? (
-        <ErrorBanner what="traces" error={traces.error} onRetry={() => void traces.refetch()} />
-      ) : null}
+      {loadFailed(traces) ? <ErrorBanner what="traces" error={traces.error} onRetry={() => void traces.refetch()} /> : null}
+      <RefreshNote queries={[traces]} />
 
       <Card className="flex min-w-0 flex-col gap-2 px-4 py-3.5" aria-busy={traces.isFetching || undefined}>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">

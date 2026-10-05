@@ -25,6 +25,7 @@ import { Card, PanelTitle } from '../../components/ui/Card'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { ErrorState } from '../../components/ui/ErrorState'
 import { Skeleton } from '../../components/ui/Skeleton'
+import { RefreshNote } from '../../components/ui/StaleNote'
 import { compact, dateTime, duration, shortId } from '../../lib/format'
 
 function useStorySearchUpdater() {
@@ -124,7 +125,7 @@ function GroupTrend({ story, group, since }: { story: StoryView; group: UseQuery
       </div>
       {group.isPending ? (
         <Skeleton className="h-[180px]" />
-      ) : group.isError ? (
+      ) : !group.data ? (
         isApiError(group.error) && group.error.status === 404 ? (
           <EmptyState title="No stories of this group in the range" description="Pick a longer time range to see its trend." />
         ) : (
@@ -239,7 +240,7 @@ function RelatedAlerts({
       <PanelTitle>Related log alerts</PanelTitle>
       {alerts.isPending ? (
         <Skeleton className="h-16" />
-      ) : alerts.isError ? (
+      ) : !alerts.data ? (
         <ErrorState error={alerts.error} onRetry={() => void alerts.refetch()} />
       ) : related.length === 0 ? (
         <p className="m-0 text-muted">No log alert in the last 7 days involves this story's logs.</p>
@@ -316,7 +317,7 @@ function WaterfallCard({
             <Skeleton key={i} className="h-6" />
           ))}
         </div>
-      ) : trace.isError ? (
+      ) : !trace.data ? (
         isApiError(trace.error) && trace.error.status === 404 ? (
           <EmptyState title="The trace is no longer stored" description="Its spans have expired; the story summary above still applies." />
         ) : (
@@ -363,7 +364,7 @@ export function StoryPage() {
   )
 
   if (story.isPending) return <StorySkeleton />
-  if (story.isError) {
+  if (!story.data) {
     if (isApiError(story.error) && story.error.status === 404)
       return (
         <NotFoundCard
@@ -380,6 +381,7 @@ export function StoryPage() {
   const st = story.data
   return (
     <div className="flex flex-col gap-4">
+      <RefreshNote queries={[story, trace, group, templates, alerts]} />
       <StoryHeader story={st} services={services} />
       <div className="grid gap-4 lg:grid-cols-2">
         <GroupTrend story={st} group={group} since={trendSince} />
@@ -393,7 +395,7 @@ export function StoryPage() {
         </div>
         {trace.isPending ? (
           <Skeleton className="h-40" />
-        ) : trace.isError ? (
+        ) : !trace.data ? (
           <p className="m-0 text-muted">Logs are unavailable while the trace cannot be loaded.</p>
         ) : (
           <LogTable

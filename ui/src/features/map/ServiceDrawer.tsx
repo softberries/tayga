@@ -9,6 +9,7 @@ import { Link } from '@tanstack/react-router'
 import { ArrowRight } from 'lucide-react'
 import { useMemo } from 'react'
 import type { ReactNode } from 'react'
+import { isApiError } from '../../api/client'
 import { api } from '../../api/queries'
 import type { EdgeView, Health, LogAlertView, LogTemplateView, NodeView, ServiceMapView, ServiceView, StoryGroup } from '../../api/types'
 import { useLiveInterval } from '../../app/live'
@@ -21,6 +22,7 @@ import { Button } from '../../components/ui/Button'
 import { ErrorState } from '../../components/ui/ErrorState'
 import { Sheet } from '../../components/ui/Sheet'
 import { Skeleton } from '../../components/ui/Skeleton'
+import { RefreshNote, loadFailed } from '../../components/ui/StaleNote'
 import { cx } from '../../lib/cx'
 import { ago, compact, duration, percent } from '../../lib/format'
 import { endpointOf, SINCE_SECS, splitSummary } from '../stories/model'
@@ -135,35 +137,42 @@ function RedTiles({ service, red, node, since }: { service: string; red: UseQuer
       </div>
     )
   }
+  // The API answers 404 when the service has no spans in the window: nothing to chart, not a
+  // failure. This holds after a refresh too, as the window slides past its last span.
+  if (red.isError && isApiError(red.error) && red.error.status === 404)
+    return <Muted>No spans for {service} in the last {since}.</Muted>
   if (!specs) return <ErrorState error={red.error} onRetry={() => void red.refetch()} className="py-4" />
   if (red.data?.buckets.length === 0) return <Muted>No calls to {service} in the last {since}.</Muted>
   return (
-    <ul className="m-0 flex list-none flex-col gap-2 p-0">
-      {specs.map((s) => (
-        <li key={s.label} className="flex flex-col gap-1 rounded-field border border-panel-line bg-inner px-3 pb-1 pt-2.5">
-          <div className="flex items-baseline gap-2">
-            <span className="text-[11px] text-muted">{s.label}</span>
-            <span
-              className={cx(
-                'tabular ml-auto text-[18px] font-semibold',
-                s.label === 'Errors' && s.value !== '0 %' && 'text-err',
-                s.tone === 'slow' && 'text-slow',
-              )}
-            >
-              {s.value}
-            </span>
-          </div>
-          <TimeSeries
-            series={[{ name: s.label, points: s.points, tone: s.tone, type: 'area' }]}
-            height={92}
-            format={s.format}
-            minInterval={0}
-            splitNumber={2}
-            summary={s.summary}
-          />
-        </li>
-      ))}
-    </ul>
+    <div className="flex flex-col gap-2">
+      <RefreshNote queries={[red]} />
+      <ul className="m-0 flex list-none flex-col gap-2 p-0">
+        {specs.map((s) => (
+          <li key={s.label} className="flex flex-col gap-1 rounded-field border border-panel-line bg-inner px-3 pb-1 pt-2.5">
+            <div className="flex items-baseline gap-2">
+              <span className="text-[11px] text-muted">{s.label}</span>
+              <span
+                className={cx(
+                  'tabular ml-auto text-[18px] font-semibold',
+                  s.label === 'Errors' && s.value !== '0 %' && 'text-err',
+                  s.tone === 'slow' && 'text-slow',
+                )}
+              >
+                {s.value}
+              </span>
+            </div>
+            <TimeSeries
+              series={[{ name: s.label, points: s.points, tone: s.tone, type: 'area' }]}
+              height={92}
+              format={s.format}
+              minInterval={0}
+              splitNumber={2}
+              summary={s.summary}
+            />
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }
 
@@ -307,17 +316,20 @@ function DrawerBody({ service, map, since }: { service: string; map: ServiceMapV
       <Section title="Stories with root cause here">
         {groups.isPending ? (
           <ListSkeleton />
-        ) : groups.isError ? (
+        ) : loadFailed(groups) || !groups.data ? (
           <ErrorState error={groups.error} onRetry={() => void groups.refetch()} className="py-4" />
         ) : (
-          <Stories groups={groups.data} since={since} service={service} nowMs={nowMs} />
+          <>
+            <RefreshNote queries={[groups]} />
+            <Stories groups={groups.data} since={since} service={service} nowMs={nowMs} />
+          </>
         )}
       </Section>
 
       <Section title="Log signals">
         {alerts.isPending || templates.isPending ? (
           <ListSkeleton />
-        ) : alerts.isError || templates.isError ? (
+        ) : loadFailed(alerts) || loadFailed(templates) ? (
           <ErrorState
             error={alerts.error ?? templates.error}
             onRetry={() => {
@@ -327,7 +339,10 @@ function DrawerBody({ service, map, since }: { service: string; map: ServiceMapV
             className="py-4"
           />
         ) : (
-          <Signals signals={signals} since={since} service={service} />
+          <>
+            <RefreshNote queries={[alerts, templates]} />
+            <Signals signals={signals} since={since} service={service} />
+          </>
         )}
       </Section>
 

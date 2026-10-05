@@ -19,6 +19,7 @@ import { Button } from '../../components/ui/Button'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { ErrorState } from '../../components/ui/ErrorState'
 import { Skeleton } from '../../components/ui/Skeleton'
+import { RefreshNote } from '../../components/ui/StaleNote'
 import { useResizableWidth } from '../../components/ui/useResizableWidth'
 import { cx } from '../../lib/cx'
 import { duration, shortId } from '../../lib/format'
@@ -90,7 +91,7 @@ function WaterfallPreview({ story, trace }: { story: StoryView; trace: UseQueryR
         ))}
       </div>
     )
-  if (trace.isError)
+  if (!trace.data)
     return isApiError(trace.error) && trace.error.status === 404 ? (
       <p className="m-0 text-muted">The trace is no longer stored; the story summary still applies.</p>
     ) : (
@@ -123,7 +124,7 @@ function StoryBody({ group }: { group: StoryGroup }) {
         <Skeleton className="h-40" />
       </div>
     )
-  if (story.isError)
+  if (!story.data)
     return isApiError(story.error) && story.error.status === 404 ? (
       <EmptyState title="This story has expired" description="Its group is still counted; newer stories will replace the sample." />
     ) : (
@@ -135,6 +136,7 @@ function StoryBody({ group }: { group: StoryGroup }) {
   const services = trace.data ? new Set(trace.data.spans.map((sp) => sp.service_name)).size : null
   return (
     <>
+      <RefreshNote queries={[story, trace]} />
       <div className="flex flex-col gap-1.5">
         <span className={cx('font-mono text-[11px]', slow ? 'text-slow' : 'text-err')}>
           {slow ? 'SLOW' : 'ERROR'} · trace {shortId(st.trace_id)} · {duration(st.duration_ns)}

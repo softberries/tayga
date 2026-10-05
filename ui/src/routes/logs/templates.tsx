@@ -15,6 +15,7 @@ import { Card } from '../../components/ui/Card'
 import { Combobox } from '../../components/ui/Combobox'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { Skeleton } from '../../components/ui/Skeleton'
+import { RefreshNote, loadFailed } from '../../components/ui/StaleNote'
 import { TemplatesTable } from '../../features/logs/TemplatesTable'
 import type { TemplateSort } from '../../features/logs/model'
 import { ErrorBanner } from '../../features/stories/ErrorBanner'
@@ -130,7 +131,7 @@ export function LogTemplatesPage() {
         </div>
         {templates.isPending ? (
           <TableSkeleton />
-        ) : templates.isError && !data ? (
+        ) : loadFailed(templates) ? (
           <div className="p-4">
             <ErrorBanner what="log templates" error={templates.error} onRetry={() => void templates.refetch()} />
           </div>
@@ -154,9 +155,7 @@ export function LogTemplatesPage() {
           </Reveal>
         ) : null}
       </Card>
-      {templates.isError && data ? (
-        <ErrorBanner what="log templates" error={templates.error} onRetry={() => void templates.refetch()} />
-      ) : null}
+      <RefreshNote queries={[templates]} />
     </div>
   )
 }

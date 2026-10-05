@@ -21,6 +21,7 @@ import { Card, PanelTitle } from '../../components/ui/Card'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { ErrorState } from '../../components/ui/ErrorState'
 import { Skeleton } from '../../components/ui/Skeleton'
+import { RefreshNote } from '../../components/ui/StaleNote'
 import { AlertsTable } from '../../features/logs/AlertsTable'
 import { bucketPoints, stepWord } from '../../features/logs/model'
 import { SINCE_SECS } from '../../features/stories/model'
@@ -138,7 +139,7 @@ export function LogTemplatePage() {
   const xRange = useMemo(() => [nowMs - SINCE_SECS[since] * 1000, nowMs + ((d?.bucket_secs ?? 60) * 1000) / 2] as const, [nowMs, since, d?.bucket_secs])
 
   if (detail.isPending) return <PageSkeleton />
-  if (detail.isError) {
+  if (!detail.data) {
     if (isApiError(detail.error) && detail.error.status === 404)
       return (
         <Card>
@@ -167,6 +168,7 @@ export function LogTemplatePage() {
 
   return (
     <div className="flex flex-col gap-3.5">
+      <RefreshNote queries={[detail]} />
       <Card className="tg-in flex flex-col gap-4 px-5 py-4">
         <div className="flex flex-wrap items-center gap-2">
           <span className="flex items-center gap-1.5 text-[13px]">

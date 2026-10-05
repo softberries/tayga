@@ -14,6 +14,7 @@ import { Card, PanelTitle } from '../../components/ui/Card'
 import { Combobox } from '../../components/ui/Combobox'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { Skeleton } from '../../components/ui/Skeleton'
+import { RefreshNote, loadFailed } from '../../components/ui/StaleNote'
 import { ToggleGroup } from '../../components/ui/ToggleGroup'
 import { ErrorBanner } from '../../features/stories/ErrorBanner'
 import { AlertsTable } from '../../features/logs/AlertsTable'
@@ -105,7 +106,8 @@ export function LogAlertsPage() {
         </div>
       </Card>
 
-      {alerts.isError && !data ? <ErrorBanner what="log alerts" error={alerts.error} onRetry={() => void alerts.refetch()} /> : null}
+      {loadFailed(alerts) ? <ErrorBanner what="log alerts" error={alerts.error} onRetry={() => void alerts.refetch()} /> : null}
+      <RefreshNote queries={[alerts]} />
 
       <Card className="flex min-w-0 flex-col gap-2 px-4 py-3.5">
         <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">

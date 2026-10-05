@@ -11,7 +11,7 @@ import { useSince } from '../components/shell/TimeRange'
 import { Card, PanelTitle } from '../components/ui/Card'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Skeleton } from '../components/ui/Skeleton'
-import { StaleNote } from '../features/pipeline/Notes'
+import { RefreshNote, loadFailed } from '../components/ui/StaleNote'
 import { LagList } from '../features/pipeline/LagList'
 import { COLLECTING, PipelineChart } from '../features/pipeline/PipelineChart'
 import { StatusStrip } from '../features/pipeline/StatusStrip'
@@ -33,7 +33,6 @@ export function PipelinePage() {
   const loaded = up.every((r) => r.data !== undefined)
   // Charts wait for the job statuses, so an empty history shows one notice, not nine.
   const upPending = up.some((r) => r.isPending)
-  const staleUp = up.some((r) => r.isError && r.data !== undefined)
   const upError = up.find((r) => r.isError)
   // Nothing recorded yet (the recorder writes its first row on its first tick, 15 s apart).
   const collecting = loaded && up.every((r) => (r.data?.points.length ?? 0) === 0)
@@ -46,7 +45,7 @@ export function PipelinePage() {
         <StatusStrip views={loaded ? up.map((r) => r.data) : undefined} />
       )}
 
-      {staleUp ? <StaleNote updatedAt={Math.min(...up.filter((r) => r.isError && r.data !== undefined).map((r) => r.dataUpdatedAt))} onRetry={() => up.forEach((r) => void r.refetch())} /> : null}
+      <RefreshNote queries={up} />
 
       {collecting ? (
         <Card>
@@ -71,8 +70,8 @@ export function PipelinePage() {
           <PanelTitle>Consumer lag</PanelTitle>
           <span className="text-xs text-muted">messages each group has yet to commit, live from Kafka</span>
         </div>
-        {lag.isError && lag.data ? <StaleNote updatedAt={lag.dataUpdatedAt} onRetry={() => void lag.refetch()} /> : null}
-        {lag.isError && !lag.data ? (
+        <RefreshNote queries={[lag]} />
+        {loadFailed(lag) ? (
           <ErrorBanner what="consumer lag" error={lag.error} onRetry={() => void lag.refetch()} />
         ) : (
           <LagList groups={lag.data} />

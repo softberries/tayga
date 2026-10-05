@@ -15,6 +15,7 @@ import { useSince } from '../../components/shell/TimeRange'
 import { Card, PanelTitle } from '../../components/ui/Card'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { Skeleton } from '../../components/ui/Skeleton'
+import { RefreshNote, loadFailed } from '../../components/ui/StaleNote'
 import { AlertsPanel } from '../../features/stories/AlertsPanel'
 import { ErrorBanner } from '../../features/stories/ErrorBanner'
 import { GroupsTable } from '../../features/stories/GroupsTable'
@@ -81,13 +82,13 @@ export function StoriesHome() {
     if (stale) onSearch({ group: undefined })
   }, [stale, onSearch])
 
-  const empty = groups.isSuccess && groups.data.length === 0
+  const empty = groups.data?.length === 0
 
   const table = (
     <Card className="overflow-hidden">
       {groups.isPending ? (
         <TableSkeleton />
-      ) : groups.isError ? (
+      ) : loadFailed(groups) ? (
         <div className="p-4">
           <ErrorBanner what="story groups" error={groups.error} onRetry={() => void groups.refetch()} />
         </div>
@@ -96,8 +97,9 @@ export function StoriesHome() {
           title="No stories in this window"
           description={`Nothing failed or ran slow in the last ${since}. A longer time range may show older stories.`}
         />
-      ) : (
+      ) : groups.data ? (
         <Reveal>
+          <RefreshNote queries={[groups]} className="mx-4 mt-3" />
           <GroupsTable
             groups={groups.data}
             search={search}
@@ -110,7 +112,7 @@ export function StoriesHome() {
             onVisible={setVisible}
           />
         </Reveal>
-      )}
+      ) : null}
     </Card>
   )
 
@@ -120,10 +122,11 @@ export function StoriesHome() {
         <PanelTitle>Service map</PanelTitle>
         {map.isPending ? (
           <Skeleton className="h-[190px]" />
-        ) : map.isError ? (
+        ) : loadFailed(map) || !map.data ? (
           <ErrorBanner what="the service map" error={map.error} onRetry={() => void map.refetch()} />
         ) : (
           <Reveal>
+            <RefreshNote queries={[map]} className="mb-1.5" />
             <MiniMap map={map.data} since={since} />
           </Reveal>
         )}
@@ -140,10 +143,11 @@ export function StoriesHome() {
             <Skeleton className="h-[54px]" />
             <Skeleton className="h-[54px]" />
           </div>
-        ) : alerts.isError ? (
+        ) : loadFailed(alerts) || !alerts.data ? (
           <ErrorBanner what="log alerts" error={alerts.error} onRetry={() => void alerts.refetch()} />
         ) : (
           <Reveal>
+            <RefreshNote queries={[alerts]} className="mb-2.5" />
             <AlertsPanel alerts={alerts.data} since={since} nowMs={alerts.dataUpdatedAt} />
           </Reveal>
         )}
@@ -151,15 +155,18 @@ export function StoriesHome() {
     </div>
   )
 
-  const showInspector = !empty && !groups.isError
+  const showInspector = !empty && !loadFailed(groups)
   return (
     <div className="flex flex-col gap-[18px]">
-      {overview.isError ? (
-        <ErrorBanner what="the summary" error={overview.error} onRetry={() => void overview.refetch()} />
-      ) : overview.isPending ? (
+      {overview.isPending ? (
         <KpiTilesSkeleton />
+      ) : loadFailed(overview) || !overview.data ? (
+        <ErrorBanner what="the summary" error={overview.error} onRetry={() => void overview.refetch()} />
       ) : (
-        <KpiTiles overview={overview.data} doubled={doubled} alerts={alerts.data} since={since} nowMs={overview.dataUpdatedAt} />
+        <>
+          <RefreshNote queries={[overview, doubled]} />
+          <KpiTiles overview={overview.data} doubled={doubled} alerts={alerts.data} since={since} nowMs={overview.dataUpdatedAt} />
+        </>
       )}
       {wide ? (
         <div className="flex items-start gap-3.5">
