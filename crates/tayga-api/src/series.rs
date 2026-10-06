@@ -56,10 +56,24 @@ pub fn rate(points: &[MetricPointRow], step_secs: u32) -> Vec<(i64, f64)> {
     sum.into_iter().collect()
 }
 
-/// Last value per step, summed over series.
+/// Last value per step. Series that differ only in their `instance` label (one scrape target
+/// with several replicas, see `recorder::endpoints`) count once, with the largest value: a lag
+/// is the slowest replica's, and a value every replica holds (templates, `up`) is not
+/// multiplied. The remaining label sets are summed.
 pub fn gauge(points: &[MetricPointRow], step_secs: u32) -> Vec<(i64, f64)> {
+    let mut by_set: BTreeMap<SeriesKey, BTreeMap<i64, f64>> = BTreeMap::new();
+    for ((job, labels), buckets) in last_per_bucket(points, step_secs) {
+        let rest: Vec<(String, String)> = labels
+            .into_iter()
+            .filter(|(k, _)| k != "instance")
+            .collect();
+        let slot = by_set.entry((job, rest)).or_default();
+        for (t, v) in buckets {
+            slot.entry(t).and_modify(|m| *m = m.max(v)).or_insert(v);
+        }
+    }
     let mut sum: BTreeMap<i64, f64> = BTreeMap::new();
-    for buckets in last_per_bucket(points, step_secs).values() {
+    for buckets in by_set.values() {
         for (t, v) in buckets {
             *sum.entry(*t).or_default() += v;
         }
@@ -238,6 +252,19 @@ mod tests {
         ];
         // Bucket 0: a's last is 7, b's is 1 -> 8. Bucket 10: a's last finite value is 4.
         assert_eq!(gauge(&pts, 10), vec![(0, 8.0), (10_000, 4.0)]);
+    }
+
+    #[test]
+    fn gauge_takes_the_largest_replica_and_sums_other_label_sets() {
+        let pts = vec![
+            p(0, &[("instance", "10.0.0.7:9100")], 4.0),
+            p(0, &[("instance", "10.0.0.9:9100")], 9.0),
+            p(0, &[("g", "a"), ("instance", "10.0.0.7:9100")], 1.0),
+            p(0, &[("g", "a"), ("instance", "10.0.0.9:9100")], 2.0),
+            p(10, &[], 5.0),
+        ];
+        // Bucket 0: max(4, 9) + max(1, 2). Bucket 10: one unlabelled series (one replica).
+        assert_eq!(gauge(&pts, 10), vec![(0, 11.0), (10_000, 5.0)]);
     }
 
     fn hist(ts_s: i64, counts: &[(&str, f64)]) -> Vec<MetricPointRow> {

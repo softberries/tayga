@@ -1767,3 +1767,30 @@ async fn trace_links_need_the_traces_logs_and_stay_in_their_time_range() {
     assert_eq!(links.len(), 1);
     assert_eq!(links[0].log_id, base.to_string());
 }
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: make it, or TAYGA_IT_CLICKHOUSE against the live stack"]
+async fn overview_data_lag_is_the_slowest_replica_of_the_newest_tick() {
+    let s = settings();
+    migrate(&s).await.unwrap();
+    let store = Store::new(&s);
+    let now_ms = now_ns() / 1_000_000;
+    let lag = |ts: i64, instance: &str, value: f64| MetricSampleRow {
+        ts,
+        job: "tayga-logminer".into(),
+        metric: "tayga_logminer_data_lag_seconds".into(),
+        labels: vec![("instance".into(), instance.into())],
+        value,
+    };
+    let inserted = store
+        .insert_metric_samples(&[
+            lag(now_ms - 20_000, "10.0.0.7:9100", 30.0),
+            lag(now_ms - 5_000, "10.0.0.7:9100", 2.0),
+            lag(now_ms - 5_000, "10.0.0.9:9100", 7.5),
+        ])
+        .await;
+    let o = ChRepo::new(&s).overview(last(3600)).await;
+    drop_database(&s).await;
+    inserted.unwrap();
+    assert_eq!(o.unwrap().data_lag_secs, Some(7.5));
+}

@@ -5,6 +5,7 @@ use crate::openmetrics;
 use crate::routes::{ApiMetrics, JobLabel};
 use serde::Deserialize;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tayga_store::metrics_store::MetricSampleRow;
 use tayga_store::store::Store;
@@ -40,6 +41,8 @@ pub fn default_targets() -> Vec<Target> {
 /// Fetches one exposition. A trait so the tick logic is testable without HTTP.
 pub trait Fetch: Send + Sync + 'static {
     fn fetch(&self, url: &str) -> impl Future<Output = anyhow::Result<String>> + Send;
+    /// The socket addresses `url`'s host resolves to; empty when it does not resolve.
+    fn resolve(&self, url: &str) -> impl Future<Output = Vec<SocketAddr>> + Send;
 }
 
 pub struct HttpFetch(reqwest::Client);
@@ -63,19 +66,88 @@ impl Fetch for HttpFetch {
             .text()
             .await?)
     }
+
+    async fn resolve(&self, url: &str) -> Vec<SocketAddr> {
+        let Ok(u) = reqwest::Url::parse(url) else {
+            return Vec::new();
+        };
+        let (Some(host), Some(port)) = (u.host_str(), u.port_or_known_default()) else {
+            return Vec::new();
+        };
+        match tokio::net::lookup_host((host, port)).await {
+            Ok(found) => found.collect(),
+            Err(e) => {
+                tracing::debug!(url, error = %e, "metric target did not resolve");
+                Vec::new()
+            }
+        }
+    }
 }
 
-fn up(job: &str, ts: i64, value: f64) -> MetricSampleRow {
+/// One scrape of a target: its URL, and the `instance` label when the target's host resolves to
+/// several addresses (one per replica).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Endpoint {
+    pub url: String,
+    pub instance: Option<String>,
+}
+
+/// The scrapes of `url` given its host's resolved `addrs`. At most one distinct address: the URL
+/// as configured, unlabelled, so one replica records exactly what it did before. Several: one URL
+/// per address, sorted, labelled `instance="<ip>:<port>"`. Scraping by address also keeps the
+/// HTTP client from reusing one pooled connection to one replica.
+pub fn endpoints(url: &str, addrs: &[SocketAddr]) -> Vec<Endpoint> {
+    let mut addrs = addrs.to_vec();
+    addrs.sort_unstable();
+    addrs.dedup();
+    let as_configured = || {
+        vec![Endpoint {
+            url: url.to_string(),
+            instance: None,
+        }]
+    };
+    if addrs.len() <= 1 {
+        return as_configured();
+    }
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return as_configured();
+    };
+    addrs
+        .into_iter()
+        .filter_map(|a| {
+            let mut u = parsed.clone();
+            u.set_ip_host(a.ip()).ok()?;
+            Some(Endpoint {
+                url: u.to_string(),
+                instance: Some(a.to_string()),
+            })
+        })
+        .collect()
+}
+
+fn instance_labels(instance: Option<&str>) -> Vec<(String, String)> {
+    instance
+        .map(|i| vec![("instance".to_string(), i.to_string())])
+        .unwrap_or_default()
+}
+
+fn up(job: &str, instance: Option<&str>, ts: i64, value: f64) -> MetricSampleRow {
     MetricSampleRow {
         ts,
         job: job.to_string(),
         metric: "up".to_string(),
-        labels: Vec::new(),
+        labels: instance_labels(instance),
         value,
     }
 }
 
-fn push_exposition(rows: &mut Vec<MetricSampleRow>, job: &str, text: &str, ts: i64) {
+fn push_exposition(
+    rows: &mut Vec<MetricSampleRow>,
+    job: &str,
+    instance: Option<&str>,
+    text: &str,
+    ts: i64,
+) {
     let parsed = openmetrics::parse_counted(text);
     if parsed.malformed > 0 {
         tracing::warn!(
@@ -84,18 +156,23 @@ fn push_exposition(rows: &mut Vec<MetricSampleRow>, job: &str, text: &str, ts: i
             "skipped malformed metric lines"
         );
     }
-    rows.extend(parsed.samples.into_iter().map(|s| MetricSampleRow {
-        ts,
-        job: job.to_string(),
-        metric: s.name,
-        labels: s.labels,
-        value: s.value,
+    rows.extend(parsed.samples.into_iter().map(|s| {
+        let mut labels = s.labels;
+        labels.extend(instance_labels(instance));
+        MetricSampleRow {
+            ts,
+            job: job.to_string(),
+            metric: s.name,
+            labels,
+            value: s.value,
+        }
     }));
-    rows.push(up(job, ts, 1.0));
+    rows.push(up(job, instance, ts, 1.0));
 }
 
-/// One tick's rows: every target fetched concurrently, plus the API's own exposition. A failed
-/// target contributes only `up` = 0 and increments `scrape_failures{job}`.
+/// One tick's rows: every target resolved, every resolved address fetched concurrently (see
+/// [`endpoints`]), plus the API's own exposition. A failed scrape contributes only `up` = 0 and
+/// increments `scrape_failures{job}`.
 pub async fn collect<F: Fetch>(
     fetch: &F,
     targets: &[Target],
@@ -103,22 +180,29 @@ pub async fn collect<F: Fetch>(
     metrics: &ApiMetrics,
     ts: i64,
 ) -> Vec<MetricSampleRow> {
-    let results = futures::future::join_all(targets.iter().map(|t| fetch.fetch(&t.url))).await;
+    let resolved = futures::future::join_all(targets.iter().map(|t| fetch.resolve(&t.url))).await;
+    let scrapes: Vec<(&Target, Endpoint)> = targets
+        .iter()
+        .zip(resolved)
+        .flat_map(|(t, addrs)| endpoints(&t.url, &addrs).into_iter().map(move |e| (t, e)))
+        .collect();
+    let results = futures::future::join_all(scrapes.iter().map(|(_, e)| fetch.fetch(&e.url))).await;
     let mut rows = Vec::new();
-    for (t, result) in targets.iter().zip(results) {
+    for ((t, e), result) in scrapes.iter().zip(results) {
+        let instance = e.instance.as_deref();
         match result {
-            Ok(text) => push_exposition(&mut rows, &t.job, &text, ts),
-            Err(e) => {
-                tracing::warn!(job = %t.job, url = %t.url, error = format!("{e:#}"), "metric scrape failed");
+            Ok(text) => push_exposition(&mut rows, &t.job, instance, &text, ts),
+            Err(err) => {
+                tracing::warn!(job = %t.job, url = %e.url, error = format!("{err:#}"), "metric scrape failed");
                 metrics
                     .scrape_failures
                     .get_or_create(&JobLabel { job: t.job.clone() })
                     .inc();
-                rows.push(up(&t.job, ts, 0.0));
+                rows.push(up(&t.job, instance, ts, 0.0));
             }
         }
     }
-    push_exposition(&mut rows, API_JOB, api_text, ts);
+    push_exposition(&mut rows, API_JOB, None, api_text, ts);
     rows
 }
 
@@ -197,16 +281,28 @@ mod tests {
             .unwrap();
     }
 
-    struct FakeFetch(HashMap<String, Result<String, String>>);
+    #[derive(Default)]
+    struct FakeFetch {
+        bodies: HashMap<String, Result<String, String>>,
+        addrs: HashMap<String, Vec<SocketAddr>>,
+    }
 
     impl Fetch for FakeFetch {
         async fn fetch(&self, url: &str) -> anyhow::Result<String> {
-            match self.0.get(url) {
+            match self.bodies.get(url) {
                 Some(Ok(text)) => Ok(text.clone()),
                 Some(Err(e)) => Err(anyhow::anyhow!(e.clone())),
                 None => Err(anyhow::anyhow!("no such target")),
             }
         }
+
+        async fn resolve(&self, url: &str) -> Vec<SocketAddr> {
+            self.addrs.get(url).cloned().unwrap_or_default()
+        }
+    }
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
     }
 
     fn rows_of<'a>(rows: &'a [MetricSampleRow], job: &str) -> Vec<&'a MetricSampleRow> {
@@ -225,13 +321,16 @@ mod tests {
                 url: "http://l/metrics".into(),
             },
         ];
-        let fetch = FakeFetch(HashMap::from([
-            (
-                "http://w/metrics".to_string(),
-                Ok(include_str!("../fixtures/metrics/writer.txt").to_string()),
-            ),
-            ("http://l/metrics".to_string(), Err("timed out".to_string())),
-        ]));
+        let fetch = FakeFetch {
+            bodies: HashMap::from([
+                (
+                    "http://w/metrics".to_string(),
+                    Ok(include_str!("../fixtures/metrics/writer.txt").to_string()),
+                ),
+                ("http://l/metrics".to_string(), Err("timed out".to_string())),
+            ]),
+            ..Default::default()
+        };
         let metrics = ApiMetrics::default();
         let api_text = "# TYPE x counter\nx_total 3\n# EOF\n";
 
@@ -271,6 +370,90 @@ mod tests {
         assert_eq!(api.len(), 2);
         assert!(api.iter().any(|r| r.metric == "x_total" && r.value == 3.0));
         assert!(api.iter().any(|r| r.metric == "up" && r.value == 1.0));
+    }
+
+    #[test]
+    fn one_address_keeps_the_url_and_several_get_an_instance_each() {
+        let url = "http://tayga-logminer:9100/metrics";
+        let one = endpoints(url, &[addr("10.0.0.7:9100")]);
+        assert_eq!(
+            one,
+            [Endpoint {
+                url: url.into(),
+                instance: None
+            }]
+        );
+        assert_eq!(endpoints(url, &[]), one, "unresolved: as configured");
+        let two = endpoints(
+            url,
+            &[
+                addr("10.0.0.9:9100"),
+                addr("10.0.0.7:9100"),
+                addr("10.0.0.9:9100"),
+            ],
+        );
+        assert_eq!(
+            two,
+            [
+                Endpoint {
+                    url: "http://10.0.0.7:9100/metrics".into(),
+                    instance: Some("10.0.0.7:9100".into())
+                },
+                Endpoint {
+                    url: "http://10.0.0.9:9100/metrics".into(),
+                    instance: Some("10.0.0.9:9100".into())
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn every_replica_is_scraped_with_its_instance_label() {
+        let url = "http://tayga-logminer:9100/metrics";
+        let targets = vec![Target {
+            job: "tayga-logminer".into(),
+            url: url.into(),
+        }];
+        let fetch = FakeFetch {
+            bodies: HashMap::from([
+                (
+                    "http://10.0.0.7:9100/metrics".to_string(),
+                    Ok("# TYPE x counter\nx_total 3\n# EOF\n".to_string()),
+                ),
+                (
+                    "http://10.0.0.9:9100/metrics".to_string(),
+                    Err("refused".to_string()),
+                ),
+            ]),
+            addrs: HashMap::from([(
+                url.to_string(),
+                vec![addr("10.0.0.7:9100"), addr("10.0.0.9:9100")],
+            )]),
+        };
+        let metrics = ApiMetrics::default();
+        let rows = collect(&fetch, &targets, "# EOF\n", &metrics, 1).await;
+        let inst = |i: &str| vec![("instance".to_string(), i.to_string())];
+        let logminer = rows_of(&rows, "tayga-logminer");
+        assert_eq!(logminer.len(), 3, "{logminer:?}");
+        assert!(
+            logminer.iter().any(|r| r.metric == "x_total"
+                && r.value == 3.0
+                && r.labels == inst("10.0.0.7:9100"))
+        );
+        assert!(
+            logminer
+                .iter()
+                .any(|r| r.metric == "up" && r.value == 1.0 && r.labels == inst("10.0.0.7:9100"))
+        );
+        assert!(
+            logminer
+                .iter()
+                .any(|r| r.metric == "up" && r.value == 0.0 && r.labels == inst("10.0.0.9:9100"))
+        );
+        let job = JobLabel {
+            job: "tayga-logminer".into(),
+        };
+        assert_eq!(metrics.scrape_failures.get_or_create(&job).get(), 1);
     }
 
     #[test]
