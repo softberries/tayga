@@ -11,3 +11,4 @@ pub mod series;
 pub mod spa;
 #[cfg(test)]
 pub(crate) mod testrepo;
+pub mod timeout;

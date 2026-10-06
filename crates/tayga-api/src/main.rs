@@ -10,6 +10,7 @@ use tayga_api::repo::ChRepo;
 use tayga_api::routes::{ApiMetrics, api_router};
 use tayga_api::routes_v2::{self, ClientConfig, LagCache};
 use tayga_api::spa;
+use tayga_api::timeout;
 use tayga_kafka::KafkaSettings;
 use tayga_store::ClickHouseSettings;
 use tayga_store::store::Store;
@@ -29,6 +30,10 @@ struct Settings {
     metric_targets: Vec<Target>,
     #[serde(default = "default_record_secs")]
     record_secs: u64,
+    /// Seconds a ClickHouse read may run (`max_execution_time`); an `/api/` request still running
+    /// `timeout::SLACK_SECS` later is answered 504. `0` turns both off.
+    #[serde(default = "default_query_timeout_secs")]
+    query_timeout_secs: u64,
     #[serde(default)]
     auth: AuthSettings,
     #[serde(default)]
@@ -59,6 +64,10 @@ fn default_record_secs() -> u64 {
     15
 }
 
+fn default_query_timeout_secs() -> u64 {
+    15
+}
+
 fn default_http() -> SocketAddr {
     "0.0.0.0:8090".parse().expect("valid default")
 }
@@ -70,7 +79,9 @@ async fn main() -> anyhow::Result<()> {
     let auth = auth::Auth::from_settings(&settings.auth)?;
     tracing::info!(enabled = auth.is_some(), "auth");
     tracing::info!(brokers = %settings.kafka.brokers, topic = %settings.kafka.topic, "kafka for consumer-group lag");
-    let repo = Arc::new(ChRepo::new(&settings.clickhouse));
+    let repo = Arc::new(
+        ChRepo::new(&settings.clickhouse).with_max_execution_time(settings.query_timeout_secs),
+    );
     let mut registry = Registry::default();
     let metrics = ApiMetrics::register(&mut registry);
     let registry = Arc::new(registry);
@@ -105,6 +116,10 @@ async fn main() -> anyhow::Result<()> {
         .merge(auth::routes(auth.clone()))
         // Only paths no other route matched fall through to the app.
         .merge(spa::router());
+    if settings.query_timeout_secs > 0 {
+        let limit = Duration::from_secs(settings.query_timeout_secs + timeout::SLACK_SECS);
+        app = app.layer(middleware::from_fn_with_state(limit, timeout::api_timeout));
+    }
     if let Some(auth) = auth {
         app = app.layer(middleware::from_fn_with_state(auth, auth::require));
     }
@@ -137,6 +152,15 @@ mod tests {
             .expect("object")
             .extend(extra.as_object().expect("object").clone());
         serde_json::from_value(v).expect("settings")
+    }
+
+    #[test]
+    fn query_timeout_defaults_to_15_s_and_0_turns_it_off() {
+        assert_eq!(settings(serde_json::json!({})).query_timeout_secs, 15);
+        assert_eq!(
+            settings(serde_json::json!({"query_timeout_secs": 0})).query_timeout_secs,
+            0
+        );
     }
 
     #[test]

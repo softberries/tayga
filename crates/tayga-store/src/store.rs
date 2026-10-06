@@ -24,6 +24,13 @@ impl Store {
         &self.client
     }
 
+    /// The same store with a ClickHouse setting sent on every query (e.g. `max_execution_time`).
+    pub fn with_setting(self, name: &str, value: &str) -> Self {
+        Self {
+            client: self.client.with_setting(name, value),
+        }
+    }
+
     pub async fn insert_rows<T>(&self, table: &str, rows: &[T]) -> clickhouse::error::Result<()>
     where
         T: RowOwned + RowWrite,

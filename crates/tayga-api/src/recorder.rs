@@ -129,7 +129,8 @@ fn now_ms() -> i64 {
 }
 
 /// Runs the recorder until `stop` flips to true. One insert per tick; a failed insert is
-/// logged and that tick's samples are dropped.
+/// logged and that tick's samples are dropped. With `every` = 0 (`record_secs = 0`, for runs on
+/// the host) it records nothing and returns a finished task.
 pub fn spawn<T>(
     store: Store,
     targets: Vec<Target>,
@@ -141,6 +142,10 @@ pub fn spawn<T>(
 where
     T: Fn() -> String + Send + 'static,
 {
+    if every.is_zero() {
+        tracing::info!("metric recorder disabled (record_secs = 0)");
+        return tokio::spawn(async {});
+    }
     tokio::spawn(async move {
         let fetch = match HttpFetch::new() {
             Ok(f) => f,
@@ -149,7 +154,7 @@ where
                 return;
             }
         };
-        let mut tick = tokio::time::interval(every.max(Duration::from_secs(1)));
+        let mut tick = tokio::time::interval(every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
@@ -170,6 +175,27 @@ where
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn record_secs_zero_turns_the_recorder_off() {
+        let store = Store::new(&tayga_store::ClickHouseSettings {
+            url: "http://127.0.0.1:1".into(),
+            database: "tayga".into(),
+        });
+        let (_tx, stop) = tokio::sync::watch::channel(false);
+        let task = spawn(
+            store,
+            default_targets(),
+            String::new,
+            ApiMetrics::default(),
+            Duration::ZERO,
+            stop,
+        );
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("the task ends at once")
+            .unwrap();
+    }
 
     struct FakeFetch(HashMap<String, Result<String, String>>);
 

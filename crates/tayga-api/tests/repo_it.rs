@@ -290,6 +290,26 @@ async fn reads_seeded_log_templates_alerts_and_trace_links() {
         ])
         .await
         .unwrap();
+    let log = |log_id: u64, service: &str, ts: i64, trace: &str| LogRow {
+        log_id,
+        ts,
+        observed_ts: ts,
+        trace_id: trace.into(),
+        span_id: "0000000000000002".into(),
+        severity_number: 17,
+        severity_text: "ERROR".into(),
+        service_name: service.into(),
+        body: "Payment request failed 42".into(),
+        resource_attrs: vec![],
+        log_attrs: vec![],
+    };
+    store
+        .insert_logs(&[
+            log(base, "payment", now - 2 * min, &trace_story),
+            log(base + 3, "cart", now - min, &trace_other),
+        ])
+        .await
+        .unwrap();
 
     let alert =
         |id: &str, kind: i8, tmpl: u64, service: &str, started: i64, last: i64| LogAlertRow {
@@ -579,6 +599,23 @@ async fn silence_settings_persist_and_silence_alerts_do_not_mark_templates_alert
             hit(base, quiet, "cart", &trace),
             hit(base + 1, busy, "payment", ""),
         ])
+        .await
+        .unwrap();
+    // Trace links need the trace's stored log.
+    store
+        .insert_logs(&[LogRow {
+            log_id: base,
+            ts: now - min,
+            observed_ts: now - min,
+            trace_id: trace.clone(),
+            span_id: "0000000000000002".into(),
+            severity_number: 9,
+            severity_text: "INFO".into(),
+            service_name: "cart".into(),
+            body: "s".into(),
+            resource_attrs: vec![],
+            log_attrs: vec![],
+        }])
         .await
         .unwrap();
     // A silence alert and a `new` alert, both active now, on different templates.
@@ -1599,4 +1636,134 @@ async fn a_live_window_lists_rows_ahead_but_totals_stop_at_its_end() {
         .execute()
         .await
         .unwrap();
+}
+
+fn story_at(fingerprint: u64, ts: i64) -> StoryRow {
+    let id = hex32();
+    StoryRow {
+        story_id: id.clone(),
+        fingerprint,
+        kind: 1,
+        ts,
+        trace_id: id,
+        endpoint_service: "frontend".into(),
+        endpoint_name: "POST /api/checkout".into(),
+        rc_service: "payment".into(),
+        rc_span_name: "Charge".into(),
+        rc_span_kind: "server".into(),
+        rc_message: "Invalid token".into(),
+        rc_exception_type: String::new(),
+        summary: "payment Charge failed: Invalid token".into(),
+        duration_ns: 2_000_000,
+        path_services: vec!["frontend".into(), "payment".into()],
+        path_spans: "[]".into(),
+        critical_path: "{}".into(),
+        baseline_diff: String::new(),
+        logs: "[]".into(),
+        also_failed: "[]".into(),
+        span_count: 2,
+        flags: vec![],
+        rc_span_id: "0000000000000002".into(),
+    }
+}
+
+async fn drop_database(s: &ClickHouseSettings) {
+    Store::new(s)
+        .client()
+        .query(&format!("DROP DATABASE `{}`", s.database))
+        .execute()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: make it, or TAYGA_IT_CLICKHOUSE against the live stack"]
+async fn group_examples_stay_inside_the_window() {
+    let s = settings();
+    migrate(&s).await.unwrap();
+    let store = Store::new(&s);
+    let now = now_ns();
+    let fingerprint: u64 = rand::random();
+    let inside = story_at(fingerprint, now - 10 * 60 * 1_000_000_000);
+    let before = story_at(fingerprint, now - 2 * 3600 * 1_000_000_000);
+    store
+        .insert_rows("error_stories", &[inside.clone(), before])
+        .await
+        .unwrap();
+    let detail = ChRepo::new(&s)
+        .story_group(&fingerprint.to_string(), last(3600))
+        .await
+        .unwrap()
+        .expect("the group has a story in the window");
+    drop_database(&s).await;
+    let ids: Vec<&str> = detail
+        .examples
+        .iter()
+        .map(|e| e.story_id.as_str())
+        .collect();
+    assert_eq!(ids, [inside.story_id.as_str()]);
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: make it, or TAYGA_IT_CLICKHOUSE against the live stack"]
+async fn trace_links_need_the_traces_logs_and_stay_in_their_time_range() {
+    let s = settings();
+    migrate(&s).await.unwrap();
+    let store = Store::new(&s);
+    let now = now_ns();
+    let min = 60_000_000_000_i64;
+    let trace = hex32();
+    let tmpl: u64 = rand::random();
+    store
+        .upsert_templates(&[LogTemplateRow {
+            template_id: tmpl,
+            service: "payment".into(),
+            template: "Payment request failed <*>".into(),
+            first_seen: now - 30 * min,
+            last_seen: now,
+            count: 2,
+            max_severity: 17,
+            sample: "Payment request failed 42".into(),
+            version: 1,
+        }])
+        .await
+        .unwrap();
+    let hit = |log_id: u64, ts: i64| LogHitRow {
+        log_id,
+        template_id: tmpl,
+        service: "payment".into(),
+        ts,
+        severity_number: 17,
+        trace_id: trace.clone(),
+        span_id: "0000000000000002".into(),
+    };
+    let base: u64 = rand::random::<u32>().into();
+    // The second hit lies a day before the trace's only log: outside its time range.
+    store
+        .insert_log_hits(&[hit(base, now - 2 * min), hit(base + 1, now - 24 * 60 * min)])
+        .await
+        .unwrap();
+    let r = ChRepo::new(&s);
+    let before_logs = r.trace_log_templates(&trace).await.unwrap();
+    store
+        .insert_logs(&[LogRow {
+            log_id: base,
+            ts: now - 2 * min,
+            observed_ts: now - 2 * min,
+            trace_id: trace.clone(),
+            span_id: "0000000000000002".into(),
+            severity_number: 17,
+            severity_text: "ERROR".into(),
+            service_name: "payment".into(),
+            body: "Payment request failed 42".into(),
+            resource_attrs: vec![],
+            log_attrs: vec![],
+        }])
+        .await
+        .unwrap();
+    let links = r.trace_log_templates(&trace).await.unwrap();
+    drop_database(&s).await;
+    assert!(before_logs.is_empty(), "no stored log, no templates");
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].log_id, base.to_string());
 }
