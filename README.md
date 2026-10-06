@@ -232,6 +232,7 @@ Silence alerts are opt-in per template. Tayga raises a `silence` alert when a te
 - Save sends the PUT below. A 401 follows the session-lost flow, and other errors show inline.
 - The templates table shows a bell on rows with silence on.
 - In `/logs/alerts` and the other alert lists, a silence alert has its own `silence` badge, the kind filter has a "Silence" option, and the count column reads "silent N min".
+- The `/logs/alerts` timeline draws a silence alert at its latest detection (`last_at`), not at the template's last hit, so a silence that began before the range but is still detected inside it is counted. New and spike alerts are drawn at their start.
 
 **API.** `PUT /api/v1/log-templates/{id}/silence` with `Content-Type: application/json`:
 

@@ -112,7 +112,7 @@ export function LogAlertsPage() {
       <Card className="flex min-w-0 flex-col gap-2 px-4 py-3.5">
         <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
           <PanelTitle>Alerts per {stepWord(timelineStep(range.secs))}</PanelTitle>
-          <span className="text-xs text-muted">alerts started in this window, by kind</span>
+          <span className="text-xs text-muted">new and spike by start, silence by latest detection</span>
           <ul aria-label="Legend" className="m-0 flex list-none gap-3 p-0 text-xs text-muted">
             <li className="flex items-center gap-1.5">
               <span aria-hidden className="size-2 rounded-full bg-accent" />

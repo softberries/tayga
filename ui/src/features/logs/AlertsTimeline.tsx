@@ -5,7 +5,7 @@ import type { Range } from '../../app/range'
 import { TimeSeries } from '../../components/charts/TimeSeries'
 import { stepWord, timeline, timelineStep } from './model'
 
-/** Alerts started per bucket, stacked by kind (new in the accent color, spike in the slow one, silence in its own). */
+/** Alerts per bucket, stacked by kind (new in the accent color, spike in the slow one, silence in its own): new and spike by start, silence by its latest detection (see `timelineAt`). */
 export function AlertsTimeline({ alerts, range, nowMs }: { alerts: readonly LogAlertView[]; range: Range; nowMs: number }) {
   const step = timelineStep(range.secs)
   const [start, end] = rangeBounds(range, nowMs)
@@ -22,6 +22,6 @@ export function AlertsTimeline({ alerts, range, nowMs }: { alerts: readonly LogA
   const spikes = bars.reduce((n, b) => n + b.spike, 0)
   const fresh = bars.reduce((n, b) => n + b.new, 0)
   const silent = bars.reduce((n, b) => n + b.silence, 0)
-  const summary = `Log alerts started per ${stepWord(step)} over ${rangePhrase(range)}: ${fresh} new, ${spikes} spike, ${silent} silence.`
+  const summary = `Log alerts per ${stepWord(step)} over ${rangePhrase(range)}: ${fresh} new and ${spikes} spike by start, ${silent} silence by latest detection.`
   return <TimeSeries series={series} stack height={170} summary={summary} xRange={xRange} splitNumber={3} />
 }

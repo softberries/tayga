@@ -15,7 +15,7 @@ import services from '../../api/__fixtures__/services.json'
 import type { LogAlertView, LogTemplateDetail, LogTemplateListItem } from '../../api/types'
 import { clearOutage } from '../../app/apiStatus'
 import type { EChartProps } from '../../components/charts/EChart'
-import { countVsBaseline, exampleLink, sortAlerts, sortTemplates, timeline } from '../../features/logs/model'
+import { countVsBaseline, exampleLink, sortAlerts, sortTemplates, timeline, timelineAt } from '../../features/logs/model'
 import { renderApp, stubApi } from '../../test/renderApp'
 import type { Routes } from '../../test/renderApp'
 import { SEARCH_DEBOUNCE_MS } from './templates'
@@ -69,13 +69,49 @@ describe('model', () => {
   it('counts alerts per bucket and kind over the whole window', () => {
     const now = Date.UTC(2026, 9, 4, 12, 30)
     const at = (min: number) => (now - min * 60_000) * 1e6
-    const a = (kind: 'new' | 'spike' | 'silence', min: number) => ({ kind, started_at_ns: at(min) }) as LogAlertView
+    const a = (kind: 'new' | 'spike' | 'silence', min: number) => ({ kind, started_at_ns: at(min), last_at_ns: at(min) }) as LogAlertView
     const bars = timeline([a('new', 5), a('spike', 5), a('spike', 6), a('silence', 7), a('spike', 24 * 60 * 2)], presetRange('24h'), now)
     expect(bars).toHaveLength(25)
     expect(bars.reduce((n, b) => n + b.new, 0)).toBe(1)
     expect(bars.reduce((n, b) => n + b.spike, 0)).toBe(2) // the 2-day-old alert is outside
     expect(bars.at(-1)).toMatchObject({ new: 1, spike: 2, silence: 1 })
     expect(bars[1]!.t - bars[0]!.t).toBe(3_600_000)
+  })
+
+  it('places a silence alert at its latest detection, not at the last hit', () => {
+    const now = Date.UTC(2026, 9, 4, 12, 30)
+    const at = (min: number) => (now - min * 60_000) * 1e6
+    const silence = (quietSinceMin: number, lastAtMin: number) =>
+      ({ kind: 'silence', started_at_ns: at(quietSinceMin), last_at_ns: at(lastAtMin) }) as LogAlertView
+    const range = presetRange('1h') // 5-minute bars
+    const bars = timeline([silence(40, 1)], range, now)
+    // Refreshed at 12:29, though quiet since 11:50 (which is outside the window).
+    expect(bars.find((b) => b.t === Date.UTC(2026, 9, 4, 12, 25))!.silence).toBe(1)
+    expect(bars.reduce((n, b) => n + b.silence, 0)).toBe(1)
+
+    // Quiet for days, so it began long before the window; still detected inside it: counted.
+    const old = timeline([silence(3 * 24 * 60, 20)], range, now)
+    expect(old.reduce((n, b) => n + b.silence, 0)).toBe(1)
+    expect(old.findIndex((b) => b.silence === 1)).toBe(old.findIndex((b) => b.t === Date.UTC(2026, 9, 4, 12, 10)))
+
+    // Ended before the window: not counted, however recent its last hit.
+    expect(timeline([silence(3 * 24 * 60, 90)], range, now).reduce((n, b) => n + b.silence, 0)).toBe(0)
+
+    // A past window: a silence still detected after it, but quiet since before its end, sits at the end.
+    const pastEnd = now - 6 * 3_600_000
+    const past = timeline([silence(7 * 60, 1)], presetRange('1h'), pastEnd)
+    expect(past.at(-1)!.silence).toBe(1)
+    // One whose quiet period began after that window is not in it.
+    expect(timeline([silence(60, 1)], presetRange('1h'), pastEnd).reduce((n, b) => n + b.silence, 0)).toBe(0)
+  })
+
+  it('places new and spike alerts at their start', () => {
+    const start = 1_000_000_000_000_000_000
+    const at = (a: Partial<LogAlertView>) => timelineAt(a as LogAlertView, start, start + 3_600e9)
+    expect(at({ kind: 'spike', started_at_ns: start + 60e9, last_at_ns: start + 7_200e9 })).toBe(start + 60e9)
+    expect(at({ kind: 'new', started_at_ns: start - 60e9, last_at_ns: start + 60e9 })).toBeNull()
+    expect(at({ kind: 'silence', started_at_ns: start - 600e9, last_at_ns: start + 60e9 })).toBe(start + 60e9)
+    expect(at({ kind: 'silence', started_at_ns: start - 600e9, last_at_ns: start + 7_200e9 })).toBe(start + 3_600e9 - 1e6)
   })
 
   it('describes the count against the baseline, and sorts templates', () => {
@@ -128,7 +164,7 @@ describe('log alerts', () => {
     renderApp('/logs/alerts?since=7d')
     await screen.findByRole('table', { name: 'Log alerts' })
     await waitFor(() => expect(chart).toBeDefined())
-    expect(screen.getByText(/^Log alerts started per hour over the last 7d: \d+ new, \d+ spike, \d+ silence\.$/)).toBeInTheDocument()
+    expect(screen.getByText(/^Log alerts per hour over the last 7d: \d+ new and \d+ spike by start, \d+ silence by latest detection\.$/)).toBeInTheDocument()
     const series = (chart!.option.series as Array<{ name: string; type: string; stack: string; data: unknown[] }>)
     expect(series.map((s) => [s.name, s.type, s.stack])).toEqual([
       ['new', 'bar', 'total'],
@@ -206,10 +242,10 @@ describe('log alerts', () => {
     }
   })
 
-  it('captions the chart as alerts started in the window', async () => {
+  it('captions the chart with where each kind is placed', async () => {
     stubApi(routes())
     renderApp('/logs/alerts')
-    expect(await screen.findByText('alerts started in this window, by kind')).toBeInTheDocument()
+    expect(await screen.findByText('new and spike by start, silence by latest detection')).toBeInTheDocument()
   })
 
   it('shows the full template in a tooltip', async () => {
