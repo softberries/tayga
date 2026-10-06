@@ -363,7 +363,7 @@ impl SpikeTracker {
     ) -> (Alert, bool) {
         let active_ns = i64::from(cfg.alert_active_min) * MIN_NS;
         if let Some(a) = self.active.get_mut(&w.template_id)
-            && now_ns - a.last_at_ns <= active_ns
+            && now_ns.saturating_sub(a.last_at_ns) <= active_ns
         {
             a.last_at_ns = now_ns;
             a.window_count = w.current;
@@ -403,7 +403,7 @@ impl SpikeTracker {
     pub fn expire(&mut self, cfg: &DetectConfig, now_ns: i64) -> usize {
         let active_ns = i64::from(cfg.alert_active_min) * MIN_NS;
         self.active
-            .retain(|_, a| now_ns - a.last_at_ns <= active_ns);
+            .retain(|_, a| now_ns.saturating_sub(a.last_at_ns) <= active_ns);
         self.active.len()
     }
 }
@@ -852,5 +852,39 @@ mod tests {
         a.kind = AlertKind::Spike;
         t.restore(vec![a]);
         assert_eq!(t.expire(&DetectConfig::default(), NOW), 1);
+    }
+
+    #[test]
+    fn an_alert_from_the_distant_past_neither_overflows_nor_stays_active() {
+        let cfg = DetectConfig::default();
+        let old = Alert {
+            alert_id: "old".into(),
+            kind: AlertKind::Spike,
+            template_id: 7,
+            service: "api".into(),
+            template: "t <*>".into(),
+            started_at_ns: i64::MIN,
+            last_at_ns: i64::MIN,
+            window_count: 1,
+            peak_count: 1,
+            baseline_per_window: 0.0,
+            baseline_day: None,
+            baseline_week: None,
+            example_trace_ids: vec![],
+        };
+        let mut t = SpikeTracker::default();
+        t.restore(vec![old.clone()]);
+        assert_eq!(t.expire(&cfg, 1_000), 0, "lapsed, not an overflow panic");
+        t.restore(vec![old]);
+        let w = TemplateWindow {
+            template_id: 7,
+            service: "api".into(),
+            template: "t <*>".into(),
+            first_seen_ns: 0,
+            current: 12,
+            baseline_total: 0,
+        };
+        let (_, created) = t.observe(&cfg, &w, 1.0, (None, None), vec![], 1_000);
+        assert!(created, "the lapsed alert is replaced by a new one");
     }
 }

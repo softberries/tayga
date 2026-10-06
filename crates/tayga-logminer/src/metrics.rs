@@ -35,10 +35,13 @@ pub struct LogminerMetrics {
     pub write_failures: Counter,
     /// Offset commits Kafka refused; the records are read again, nothing is lost.
     pub commit_failures: Counter,
+    /// Stored alerts published again because no publication was recorded.
+    pub alerts_republished: Counter,
     pub templates: Gauge,
     pub alerts: Family<KindLabel, Counter>,
     pub detect_seconds: Histogram,
-    /// Wall clock minus the latest mined log's `ts`, set each detection tick.
+    /// Wall clock minus this replica's data clock (its slowest partition still behind), set each
+    /// detection tick.
     pub data_lag_seconds: Gauge<f64, AtomicU64>,
     /// Failed saves of the new-template watermark to `logminer_state`.
     pub state_save_failures: Counter,
@@ -60,6 +63,7 @@ impl Default for LogminerMetrics {
             cluster_cap_hits: Counter::default(),
             write_failures: Counter::default(),
             commit_failures: Counter::default(),
+            alerts_republished: Counter::default(),
             templates: Gauge::default(),
             alerts: Family::default(),
             // 10 ms .. ~20 s.
@@ -103,6 +107,11 @@ impl LogminerMetrics {
             m.commit_failures.clone(),
         );
         registry.register(
+            "tayga_logminer_alerts_republished",
+            "Stored alerts published again because no publication was recorded",
+            m.alerts_republished.clone(),
+        );
+        registry.register(
             "tayga_logminer_templates",
             "Templates held in memory",
             m.templates.clone(),
@@ -119,7 +128,7 @@ impl LogminerMetrics {
         );
         registry.register(
             "tayga_logminer_data_lag_seconds",
-            "Wall clock minus the newest mined log timestamp, at the last detection pass",
+            "Wall clock minus this replica's data clock (its slowest partition still behind), at the last detection pass",
             m.data_lag_seconds.clone(),
         );
         registry.register(
@@ -185,6 +194,7 @@ mod tests {
             "tayga_logminer_cluster_cap_hits_total 0",
             "tayga_logminer_write_failures_total 0",
             "tayga_logminer_commit_failures_total 0",
+            "tayga_logminer_alerts_republished_total 0",
             "tayga_logminer_templates 3",
             "tayga_logminer_silence_alerts 2",
             "tayga_logminer_alerts_total{kind=\"new\"} 1",

@@ -48,6 +48,13 @@ pub struct LogAlertRow {
     pub baseline_week: Option<f64>,
 }
 
+/// One recorded publication of an alert to `tayga.alerts`.
+#[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
+pub struct AlertPublicationRow {
+    pub alert_id: String,
+    pub published_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
 pub struct TemplateWindowRow {
     pub template_id: u64,
@@ -444,6 +451,62 @@ impl Store {
             q = q.bind(key.as_str()).bind(*value);
         }
         q.execute().await
+    }
+
+    /// Records that `alert_ids` were published at `now_ns`. No-op when empty.
+    pub async fn mark_alerts_published(
+        &self,
+        alert_ids: &[String],
+        now_ns: i64,
+    ) -> clickhouse::error::Result<()> {
+        let rows: Vec<AlertPublicationRow> = alert_ids
+            .iter()
+            .map(|id| AlertPublicationRow {
+                alert_id: id.clone(),
+                published_at: now_ns,
+            })
+            .collect();
+        self.insert_rows("log_alert_publications", &rows).await
+    }
+
+    /// Alerts of `services` stored at or after `since_ns` (by `version`, their write time) with
+    /// no recorded publication, oldest first, at most 1000. An empty `services` reads nothing.
+    pub async fn unpublished_alerts(
+        &self,
+        services: &[String],
+        since_ns: i64,
+    ) -> clickhouse::error::Result<Vec<LogAlertRow>> {
+        if services.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.client()
+            .query(
+                "SELECT alert_id, kind, template_id, service, template, started_at, last_at, \
+                 window_count, peak_count, baseline_per_window, example_trace_ids, version, \
+                 baseline_day, baseline_week \
+                 FROM log_alerts FINAL WHERE service IN ? AND version >= ? \
+                 AND alert_id NOT IN (SELECT alert_id FROM log_alert_publications) \
+                 ORDER BY version LIMIT 1000",
+            )
+            .bind(services)
+            .bind(u64::try_from(since_ns).unwrap_or(0))
+            .fetch_all()
+            .await
+    }
+
+    /// Deletes the `logminer_state` keys starting with `prefix` whose value is below `older_than`
+    /// (a lightweight DELETE). Meant for heartbeat keys, whose value is their write time in ns.
+    pub async fn state_delete_older(
+        &self,
+        prefix: &str,
+        older_than: i64,
+    ) -> clickhouse::error::Result<()> {
+        self.client()
+            .query("DELETE FROM logminer_state WHERE startsWith(key, ?) AND value < ?")
+            .bind(prefix)
+            .bind(older_than)
+            .execute()
+            .await
     }
 
     /// Distinct trace ids of recent hits of a template, newest first.

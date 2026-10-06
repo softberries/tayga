@@ -21,8 +21,8 @@ use tayga_drain::drain::DrainConfig;
 use tayga_drain::preprocess::masking_version;
 use tayga_kafka::KafkaSettings;
 use tayga_logminer::config::{
-    DrainSettings, KEY_EPOCH_START, KEY_MASKING_VERSION, KEY_WATERMARK, Watermarks, heartbeat_key,
-    watermark_key,
+    DrainSettings, KEY_EPOCH_START, KEY_HEARTBEAT, KEY_MASKING_VERSION, KEY_WATERMARK, Watermarks,
+    heartbeat_key, watermark_key,
 };
 use tayga_logminer::metrics::{LogminerMetrics, PRE_EPOCH_MATCH, ReasonLabel};
 use tayga_logminer::miner::{Miner, alert_from_row, alert_json, alert_row};
@@ -43,6 +43,10 @@ const MIN_NS: i64 = 60_000_000_000;
 const SEASONAL_SHIFTS_SECS: [u32; 2] = [86_400, 7 * 86_400];
 /// Timeout of one `fetch_watermarks` call per detection tick.
 const WATERMARK_TIMEOUT: Duration = Duration::from_secs(2);
+/// Alerts stored at most this long ago with no recorded publication are published again.
+const REPUBLISH_WINDOW_NS: i64 = 24 * 3600 * 1_000_000_000;
+/// Heartbeat keys older than this belong to replicas that are gone; deleted at startup.
+const STALE_HEARTBEAT_NS: i64 = 24 * 3600 * 1_000_000_000;
 
 #[derive(Deserialize)]
 struct Settings {
@@ -390,6 +394,7 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
             return Ok(());
         }
     }
+    delete_stale_heartbeats(&store, now_ns()).await;
 
     let topic = settings.kafka.logs_topic.as_str();
     let consumer: Arc<LogConsumer> = Arc::new(tayga_kafka::consumer_with_context(
@@ -511,10 +516,34 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
 /// in `stop_grace_period` of `tayga-logminer` in `deploy/compose.tayga.yaml` (40 s).
 const SHUTDOWN_PASS_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Clean shutdown: the final flush of pending work (single attempt; skipped when shutdown
-/// already interrupted a flush, and on failure nothing is committed), then one bounded
-/// new-template pass for the owned services ([`announce_new_templates`]), so a template mined
-/// after the last pass is not left to a service that may never log again.
+/// Longest the final flush at a clean shutdown may take. With the new-template pass
+/// (`SHUTDOWN_PASS_TIMEOUT`) it must fit in the 40 s `stop_grace_period`.
+const SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// `flush` bounded by `limit`. Past it the flush counts as a failed write and as not stored: its
+/// records stay uncommitted and are read again on restart, as after a crash.
+async fn bounded_flush(
+    flush: impl Future<Output = anyhow::Result<bool>>,
+    limit: Duration,
+    metrics: &LogminerMetrics,
+) -> anyhow::Result<bool> {
+    match tokio::time::timeout(limit, flush).await {
+        Ok(r) => r,
+        Err(_) => {
+            metrics.write_failures.inc();
+            tracing::warn!(
+                timeout_secs = limit.as_secs(),
+                "final flush timed out; records remain uncommitted and will be re-read on restart"
+            );
+            Ok(false)
+        }
+    }
+}
+
+/// Clean shutdown: the final flush of pending work (single attempt, bounded at 15 s; skipped
+/// when shutdown already interrupted a flush, and on failure nothing is committed), then one
+/// bounded new-template pass for the owned services ([`announce_new_templates`]), so a template
+/// mined after the last pass is not left to a service that may never log again.
 ///
 /// A crash (or a failed or timed-out pass here or at revoke) skips this announcement. The
 /// committed records are not re-read, so the template is a candidate again only if its service
@@ -530,7 +559,12 @@ async fn shut_down(
 ) -> anyhow::Result<()> {
     if !interrupted && !st.pending.is_empty() {
         let batch = std::mem::take(&mut st.pending);
-        flush(ctx, &mut st.miner, batch, &mut st.seen, None).await?;
+        bounded_flush(
+            flush(ctx, &mut st.miner, batch, &mut st.seen, None),
+            SHUTDOWN_FLUSH_TIMEOUT,
+            ctx.metrics,
+        )
+        .await?;
     }
     announce_new_templates(ctx, &cfg.detect(), st, SHUTDOWN_PASS_TIMEOUT, "shutdown").await;
     Ok(())
@@ -1072,6 +1106,8 @@ async fn detect(
         }
         Err(e) => tracing::warn!(error = %e, "detection failed"),
     }
+    let owned = st.tracker.ownership.owned(now);
+    republish_unpublished(store, producer, &cfg.alerts_topic, &owned, now, metrics).await;
     if let Err(e) = store.state_put(&st.heartbeat_key, now).await {
         metrics.state_save_failures.inc();
         tracing::warn!(error = %e, "saving the heartbeat failed");
@@ -1123,6 +1159,21 @@ fn startup_epoch(
 /// (within the query's 1-minute allowance) must not push the watermark past real time.
 fn data_clock(raw_ns: i64, now_ns: i64) -> i64 {
     raw_ns.min(now_ns)
+}
+
+/// The clock this replica's data lag is read from: its detection clock over the partitions it
+/// holds ([`detection_clock`]), or the store's newest hit (`stored_now_ns`) before it has
+/// partition data (restart, nothing consumed, no assignment). Never ahead of `now_ns`.
+fn lag_clock(
+    partitions: Option<&BTreeMap<i32, (i64, bool)>>,
+    stored_now_ns: i64,
+    now_ns: i64,
+) -> i64 {
+    let raw = match partitions {
+        Some(m) if !m.is_empty() => detection_clock(m, stored_now_ns),
+        _ => stored_now_ns,
+    };
+    data_clock(raw, now_ns)
 }
 
 /// Seconds from the newest mined log to the wall clock; `None` before any log was mined.
@@ -1238,7 +1289,7 @@ async fn find_alerts(
     let owned = owned.as_slice();
     restore_spikes(store, cfg, tracker, owned).await?;
     let stored_now = store.data_now_ns().await?;
-    if let Some(lag) = data_lag_secs(data_clock(stored_now, now), now) {
+    if let Some(lag) = data_lag_secs(lag_clock(clock.partitions.as_ref(), stored_now, now), now) {
         metrics.data_lag_seconds.set(lag);
         if lag > f64::from(cfg.new_template_recent_min) * 60.0 {
             tracing::warn!(
@@ -1553,9 +1604,91 @@ async fn examples(store: &Store, template_id: u64, since_min: u32) -> Vec<String
         })
 }
 
+/// Publishes one alert to `tayga.alerts`, keyed by template id; `false` when the send failed.
+async fn send_alert(producer: &FutureProducer, topic: &str, alert: &Alert) -> bool {
+    let key = alert.template_id.to_string();
+    let payload = alert_json(alert).to_string();
+    match producer
+        .send(
+            FutureRecord::to(topic).key(&key).payload(&payload),
+            Duration::from_secs(5),
+        )
+        .await
+    {
+        Ok(_) => true,
+        Err((e, _)) => {
+            tracing::warn!(error = %e, alert_id = %alert.alert_id, "alert publish failed");
+            false
+        }
+    }
+}
+
+/// Records the publications; on failure the next pass publishes those alerts again.
+async fn mark_published(store: &Store, alert_ids: &[String], now: i64) {
+    if alert_ids.is_empty() {
+        return;
+    }
+    if let Err(e) = store.mark_alerts_published(alert_ids, now).await {
+        tracing::warn!(
+            error = %e,
+            alerts = alert_ids.len(),
+            "recording alert publications failed; the next pass publishes them again"
+        );
+    }
+}
+
+/// Publishes again the alerts of `owned` services stored in the last 24 h with no recorded
+/// publication: a send that failed or timed out, or a stop between the insert and the send. The
+/// notifier delivers once per `(alert_id, target)`, so a repeat is harmless. Failures are logged
+/// and retried on the next pass.
+async fn republish_unpublished(
+    store: &Store,
+    producer: &FutureProducer,
+    topic: &str,
+    owned: &[String],
+    now: i64,
+    metrics: &LogminerMetrics,
+) {
+    let rows = match store
+        .unpublished_alerts(owned, now - REPUBLISH_WINDOW_NS)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "unpublished alert lookup failed");
+            return;
+        }
+    };
+    let mut sent = Vec::new();
+    for alert in rows.iter().filter_map(alert_from_row) {
+        if send_alert(producer, topic, &alert).await {
+            sent.push(alert.alert_id);
+        }
+    }
+    if sent.is_empty() {
+        return;
+    }
+    metrics.alerts_republished.inc_by(sent.len() as u64);
+    tracing::info!(alerts = sent.len(), "unpublished alerts published again");
+    mark_published(store, &sent, now).await;
+}
+
+/// Deletes the heartbeat keys of replicas gone for more than a day (best effort). Only keys with
+/// the heartbeat prefix are touched; watermark and masking keys never are.
+async fn delete_stale_heartbeats(store: &Store, now: i64) {
+    if let Err(e) = store
+        .state_delete_older(KEY_HEARTBEAT, now - STALE_HEARTBEAT_NS)
+        .await
+    {
+        tracing::warn!(error = %e, "deleting stale heartbeat keys failed");
+    }
+}
+
 /// One attempt each: insert all alerts, then publish each one. Alerts are published only once
 /// stored; a new-template alert that failed to store is found again on the next pass, and an
-/// active spike is rewritten on its next update. Returns whether the alerts were stored.
+/// active spike is rewritten on its next update. Each sent alert's publication is recorded;
+/// one stored but not sent is published again by [`republish_unpublished`]. Returns whether the
+/// alerts were stored.
 async fn publish_alerts(
     store: &Store,
     producer: &FutureProducer,
@@ -1573,6 +1706,7 @@ async fn publish_alerts(
         tracing::warn!(error = %e, alerts = rows.len(), "alert insert failed");
         return false;
     }
+    let mut published = Vec::new();
     for (alert, created) in alerts {
         if *created {
             metrics
@@ -1580,16 +1714,8 @@ async fn publish_alerts(
                 .get_or_create(&KindLabel::new(alert.kind.as_str()))
                 .inc();
         }
-        let key = alert.template_id.to_string();
-        let payload = alert_json(alert).to_string();
-        if let Err((e, _)) = producer
-            .send(
-                FutureRecord::to(topic).key(&key).payload(&payload),
-                Duration::from_secs(5),
-            )
-            .await
-        {
-            tracing::warn!(error = %e, alert_id = %alert.alert_id, "alert publish failed");
+        if send_alert(producer, topic, alert).await {
+            published.push(alert.alert_id.clone());
         }
         tracing::info!(
             alert_id = %alert.alert_id,
@@ -1600,6 +1726,8 @@ async fn publish_alerts(
             "log alert"
         );
     }
+    // An alert whose send failed has no mark, so `republish_unpublished` sends it next pass.
+    mark_published(store, &published, now).await;
     true
 }
 
@@ -1857,6 +1985,41 @@ mod tests {
 
     fn parts(v: &[(i32, i64, bool)]) -> BTreeMap<i32, (i64, bool)> {
         v.iter().map(|&(p, ts, c)| (p, (ts, c))).collect()
+    }
+
+    #[tokio::test]
+    async fn a_hanging_final_flush_gives_up_at_its_bound() {
+        let metrics = LogminerMetrics::default();
+        let started = Instant::now();
+        let stored = bounded_flush(
+            std::future::pending::<anyhow::Result<bool>>(),
+            Duration::from_millis(50),
+            &metrics,
+        )
+        .await
+        .unwrap();
+        assert!(!stored);
+        assert_eq!(metrics.write_failures.get(), 1);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(
+            SHUTDOWN_FLUSH_TIMEOUT + SHUTDOWN_PASS_TIMEOUT < Duration::from_secs(40),
+            "the flush and the pass fit in stop_grace_period"
+        );
+    }
+
+    #[test]
+    fn the_lag_follows_this_replicas_lagging_partition() {
+        let m = parts(&[(0, 50, false), (1, 90, true)]);
+        assert_eq!(lag_clock(Some(&m), 999, 1_000), 50);
+        let m = parts(&[(0, 50, true), (1, 90, true)]);
+        assert_eq!(lag_clock(Some(&m), 999, 1_000), 90, "caught up: the newest");
+    }
+
+    #[test]
+    fn without_partition_data_the_lag_uses_the_store_clock_and_never_runs_ahead() {
+        assert_eq!(lag_clock(None, 700, 1_000), 700);
+        assert_eq!(lag_clock(Some(&BTreeMap::new()), 700, 1_000), 700);
+        assert_eq!(lag_clock(None, 5_000, 1_000), 1_000);
     }
 
     #[test]
@@ -2345,6 +2508,7 @@ mod tests {
             .delete_topics(&[&alerts_topic], &rdkafka::admin::AdminOptions::new())
             .await
             .unwrap();
+        let unpublished = store.unpublished_alerts(&owned(&["api"]), 0).await.unwrap();
         drop_db(&s, &store).await;
         assert!(done);
         assert_eq!(ids, [expected]);
@@ -2352,6 +2516,92 @@ mod tests {
         assert_eq!(
             st.clock.watermark, last_pass,
             "the final pass does not move it"
+        );
+        assert!(
+            unpublished.is_empty(),
+            "the final pass marks what it published"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ClickHouse and Kafka: TAYGA_IT_CLICKHOUSE, TAYGA_IT_KAFKA"]
+    async fn a_stored_but_unpublished_alert_is_published_on_the_next_pass() {
+        let (s, store) = live_store().await;
+        let kafka: KafkaSettings = serde_json::from_value(serde_json::json!({
+            "brokers": std::env::var("TAYGA_IT_KAFKA").unwrap_or_else(|_| "localhost:19092".into()),
+        }))
+        .unwrap();
+        let alerts_topic = format!("tayga-it-alerts-{}", rand::random::<u32>());
+        tayga_kafka::ensure_topic(&KafkaSettings {
+            topic: alerts_topic.clone(),
+            partitions: 1,
+            ..kafka.clone()
+        })
+        .await
+        .unwrap();
+        let now = now_ns();
+        let api = new_alert(
+            &candidate(5, "api", "provider <*> unreachable", now - MIN_NS),
+            vec![],
+            now,
+        );
+        let web = new_alert(
+            &candidate(6, "web", "cart <*> empty", now - MIN_NS),
+            vec![],
+            now,
+        );
+        let version = u64::try_from(now).unwrap();
+        // Stored, never published: the send failed, or the process died before it.
+        store
+            .insert_alerts(&[alert_row(&api, version), alert_row(&web, version)])
+            .await
+            .unwrap();
+        let producer = tayga_kafka::producer(&kafka).unwrap();
+        let metrics = LogminerMetrics::default();
+        republish_unpublished(
+            &store,
+            &producer,
+            &alerts_topic,
+            &owned(&["api"]),
+            now,
+            &metrics,
+        )
+        .await;
+        let first = metrics.alerts_republished.get();
+        republish_unpublished(
+            &store,
+            &producer,
+            &alerts_topic,
+            &owned(&["api"]),
+            now,
+            &metrics,
+        )
+        .await;
+        let left = store
+            .unpublished_alerts(&owned(&["api", "web"]), 0)
+            .await
+            .unwrap();
+        let admin: rdkafka::admin::AdminClient<rdkafka::client::DefaultClientContext> =
+            rdkafka::ClientConfig::new()
+                .set("bootstrap.servers", &kafka.brokers)
+                .create()
+                .unwrap();
+        admin
+            .delete_topics(&[&alerts_topic], &rdkafka::admin::AdminOptions::new())
+            .await
+            .unwrap();
+        drop_db(&s, &store).await;
+        assert_eq!(first, 1, "the owned service's alert");
+        assert_eq!(
+            metrics.alerts_republished.get(),
+            1,
+            "marked, so not sent again"
+        );
+        let left: Vec<&str> = left.iter().map(|r| r.alert_id.as_str()).collect();
+        assert_eq!(
+            left,
+            [web.alert_id.as_str()],
+            "another replica's service is left alone"
         );
     }
 
