@@ -2008,9 +2008,14 @@ dependencies = [
  "rdkafka",
  "reqwest",
  "rpassword",
+ "serde",
  "serde_json",
  "tayga-analysis",
+ "tayga-common",
+ "tayga-drain",
+ "tayga-logminer",
  "tayga-model",
+ "tayga-store",
  "tokio",
 ]
 

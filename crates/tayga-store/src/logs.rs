@@ -80,6 +80,18 @@ pub struct SilenceInput {
     pub s_last_ns: Option<i64>,
 }
 
+/// The columns of a stored log that template mining reads.
+#[derive(Debug, Clone, PartialEq, clickhouse::Row, Deserialize)]
+pub struct LogMineRow {
+    pub log_id: u64,
+    pub ts: i64,
+    pub trace_id: String,
+    pub span_id: String,
+    pub severity_number: u8,
+    pub service_name: String,
+    pub body: String,
+}
+
 #[derive(clickhouse::Row, Deserialize)]
 struct SilenceSettingRow {
     enabled: u8,
@@ -317,6 +329,42 @@ impl Store {
             )
             .bind(since_ns)
             .fetch_all()
+            .await
+    }
+
+    /// Up to `limit` stored logs strictly after `(after_ts, after_id)` in `(ts, log_id)` order
+    /// (keyset paging: pass the last row's key to get the next page). A log stored twice before
+    /// its parts merged is returned once. Start with `(since_ns - 1, u64::MAX)` to include every
+    /// log from `since_ns` on.
+    pub async fn logs_batch(
+        &self,
+        after_ts: i64,
+        after_id: u64,
+        limit: u32,
+    ) -> clickhouse::error::Result<Vec<LogMineRow>> {
+        self.client()
+            .query(
+                "SELECT log_id, ts, trace_id, span_id, severity_number, service_name, body \
+                 FROM logs WHERE (ts, log_id) > (fromUnixTimestamp64Nano(?), ?) \
+                 ORDER BY ts, log_id LIMIT 1 BY ts, log_id LIMIT ?",
+            )
+            .bind(after_ts)
+            .bind(after_id)
+            .bind(limit)
+            .fetch_all()
+            .await
+    }
+
+    /// Empties `log_templates`, `log_template_hits` and `log_template_minutes`. Only for
+    /// `tayga-devtools remine`, with the logminer stopped.
+    pub async fn truncate_templates(&self) -> clickhouse::error::Result<()> {
+        let c = self.client();
+        c.query("TRUNCATE TABLE log_templates").execute().await?;
+        c.query("TRUNCATE TABLE log_template_hits")
+            .execute()
+            .await?;
+        c.query("TRUNCATE TABLE log_template_minutes")
+            .execute()
             .await
     }
 

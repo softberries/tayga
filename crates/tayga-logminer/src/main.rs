@@ -18,6 +18,9 @@ use tayga_drain::detect::{
 use tayga_drain::drain::DrainConfig;
 use tayga_drain::preprocess::masking_version;
 use tayga_kafka::KafkaSettings;
+use tayga_logminer::config::{
+    DrainSettings, KEY_EPOCH_START, KEY_HEARTBEAT, KEY_MASKING_VERSION, KEY_WATERMARK,
+};
 use tayga_logminer::metrics::{LogminerMetrics, PRE_EPOCH_MATCH, ReasonLabel};
 use tayga_logminer::miner::{Miner, alert_from_row, alert_json, alert_row};
 use tayga_model::envelope::{Envelope, HEADER_KIND, Kind};
@@ -34,11 +37,6 @@ const ALERTS_PARTITIONS: i32 = 3;
 const MIN_NS: i64 = 60_000_000_000;
 /// Seasonal comparators: the spike window 1 day and 7 days earlier (spec 7a §2.3).
 const SEASONAL_SHIFTS_SECS: [u32; 2] = [86_400, 7 * 86_400];
-const KEY_WATERMARK: &str = "new_template_watermark_ns";
-/// Liveness stamp for `tayga-devtools remine`: written after every detection pass.
-const KEY_HEARTBEAT: &str = "logminer_heartbeat_ns";
-const KEY_MASKING_VERSION: &str = "masking_version";
-const KEY_EPOCH_START: &str = "masking_epoch_start_ns";
 /// Timeout of one `fetch_watermarks` call per detection tick.
 const WATERMARK_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -74,7 +72,7 @@ struct LogminerSettings {
 
 impl Default for LogminerSettings {
     fn default() -> Self {
-        let drain = DrainConfig::default();
+        let drain = DrainSettings::default();
         let detect = DetectConfig::default();
         Self {
             sim_threshold: drain.sim_threshold,
@@ -118,12 +116,12 @@ impl LogminerSettings {
     }
 
     fn drain(&self) -> DrainConfig {
-        DrainConfig {
+        DrainSettings {
             sim_threshold: self.sim_threshold,
             max_clusters_per_service: self.max_clusters_per_service,
             keep_http_status: self.keep_http_status,
-            ..DrainConfig::default()
         }
+        .drain()
     }
 
     fn detect(&self) -> DetectConfig {

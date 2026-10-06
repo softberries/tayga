@@ -46,6 +46,7 @@ tayga-model = { path = "crates/tayga-model" }
 tayga-analysis = { path = "crates/tayga-analysis" }
 tayga-drain = { path = "crates/tayga-drain" }
 tayga-kafka = { path = "crates/tayga-kafka" }
+tayga-logminer = { path = "crates/tayga-logminer" }
 tayga-store = { path = "crates/tayga-store" }
 tayga-devtools = { path = "crates/tayga-devtools" }
 prometheus-client = "0.25.1"

@@ -1443,3 +1443,76 @@ async fn deliveries_round_trip_and_latest_wins() {
     assert_eq!(store.delivery_get("a2", "slack").await.unwrap(), None);
     drop_db(&s, &store).await;
 }
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: make it"]
+async fn logs_batch_pages_by_ts_and_id_and_truncate_empties_template_tables() {
+    let (s, store) = log_store().await;
+    let base = now_ns() - 10 * MIN_NS;
+    let log = |log_id: u64, ts: i64| LogRow {
+        log_id,
+        ts,
+        observed_ts: 0,
+        trace_id: String::new(),
+        span_id: String::new(),
+        severity_number: 9,
+        severity_text: String::new(),
+        service_name: format!("svc{}", log_id % 2),
+        body: format!("body {log_id}"),
+        resource_attrs: vec![],
+        log_attrs: vec![],
+    };
+    // Ids 1..=5 over three timestamps (ties on ts), inserted out of order and id 3 twice.
+    let logs = [
+        log(4, base + 2),
+        log(1, base),
+        log(3, base + 1),
+        log(2, base),
+        log(5, base + 2),
+        log(3, base + 1),
+    ];
+    store.insert_logs(&logs).await.unwrap();
+
+    let (mut ts, mut id) = (base - 1, u64::MAX);
+    let mut seen = Vec::new();
+    loop {
+        let page = store.logs_batch(ts, id, 2).await.unwrap();
+        let Some(last) = page.last() else { break };
+        (ts, id) = (last.ts, last.log_id);
+        seen.extend(page.iter().map(|r| r.log_id));
+    }
+    assert_eq!(seen, vec![1, 2, 3, 4, 5]);
+    // The start key is exclusive.
+    let rest = store.logs_batch(base, 1, 10).await.unwrap();
+    assert_eq!(
+        rest.iter().map(|r| r.log_id).collect::<Vec<_>>(),
+        [2, 3, 4, 5]
+    );
+    assert_eq!(rest[0].body, "body 2");
+
+    store
+        .upsert_templates(&[template(1, "a", base)])
+        .await
+        .unwrap();
+    store.insert_log_hits(&[hit(1, 1, base, "")]).await.unwrap();
+    store.truncate_templates().await.unwrap();
+    for table in ["log_templates", "log_template_hits", "log_template_minutes"] {
+        let n: u64 = store
+            .client()
+            .query(&format!("SELECT count() FROM {table}"))
+            .fetch_one()
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "{table}");
+    }
+    // The logs themselves stay.
+    assert_eq!(
+        store
+            .logs_batch(base - 1, u64::MAX, 10)
+            .await
+            .unwrap()
+            .len(),
+        5
+    );
+    drop_db(&s, &store).await;
+}
