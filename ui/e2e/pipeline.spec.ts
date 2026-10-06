@@ -1,10 +1,10 @@
 import { expect, test } from './fixtures'
 
-test('the status strip shows 5 jobs up and every chart has a series', async ({ page }) => {
+test('the status strip shows 6 jobs up (ingest, writer, assembler, logminer, notifier, api) and every chart has a series', async ({ page }) => {
   await page.goto('/pipeline')
   const jobs = page.getByRole('list', { name: 'Job status' }).getByRole('listitem')
-  await expect(jobs).toHaveCount(5)
-  for (let i = 0; i < 5; i++) await expect(jobs.nth(i)).toHaveAttribute('data-state', 'up')
+  await expect(jobs).toHaveCount(6)
+  for (let i = 0; i < 6; i++) await expect(jobs.nth(i)).toHaveAttribute('data-state', 'up')
 
   // Every chart's text summary names a latest value, which exists only for a non-empty series.
   const captions = page.locator('figcaption')

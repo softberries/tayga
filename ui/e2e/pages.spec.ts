@@ -85,7 +85,7 @@ const ROUTES: Route[] = [
     path: () => '/pipeline',
     heading: /^Pipeline$/,
     data: async (page) => {
-      await expect(page.getByRole('list', { name: 'Job status' }).getByRole('listitem')).toHaveCount(5)
+      await expect(page.getByRole('list', { name: 'Job status' }).getByRole('listitem')).toHaveCount(6)
       await expect(page.locator('canvas').first()).toBeVisible()
     },
   },
