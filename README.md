@@ -398,7 +398,7 @@ Use it after changing masking or a Drain setting (`sim_threshold`, `max_clusters
 3. After each page it writes the hits and the changed templates; `log_template_minutes` is filled through its materialized view. Template rows of page n carry version `now + n` ns, so a template written on several pages keeps the row of its last page (final `count` and `last_seen`) without depending on how ClickHouse breaks an equal-version tie.
 4. It stores `new_template_watermark_ns` (the newest mined `ts`), `masking_epoch_start_ns = now` and the current `masking_version` in `logminer_state`.
 
-The watermark means the restarted logminer does not report the rebuilt templates as new. The new masking epoch adds the 15-minute warmup: no `new` alert fires for templates first seen in the 15 minutes after the re-mine. `log_alerts` and `log_template_silence` are kept. ClickHouse defaults to `http://localhost:18123`, database `tayga`; `--clickhouse` and `--database` override them.
+The watermark means the restarted logminer does not report the rebuilt templates as new. The new masking epoch adds the 15-minute warmup: no `new` alert fires for templates first seen in the 15 minutes after the re-mine. Only `new` alerts are gated this way. Spikes are not: spike alerts are matched by template id, so a template that is spiking when the re-mine changes its id gets a new spike alert id, and the notifier may deliver it a second time. `log_alerts` and `log_template_silence` are kept. ClickHouse defaults to `http://localhost:18123`, database `tayga`; `--clickhouse` and `--database` override them.
 
 ```sh
 # 1. Preview. Read-only, and allowed while the logminer runs.
