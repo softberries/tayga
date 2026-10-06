@@ -3,3 +3,4 @@
 pub mod config;
 pub mod metrics;
 pub mod miner;
+pub mod ownership;

@@ -561,6 +561,10 @@ fn hit(log_id: u64, template_id: u64, ts: i64, trace: &str) -> LogHitRow {
     }
 }
 
+fn svc(names: &[&str]) -> Vec<String> {
+    names.iter().map(|s| (*s).to_string()).collect()
+}
+
 fn alert(id: &str, kind: i8, template_id: u64, last_at: i64) -> LogAlertRow {
     LogAlertRow {
         alert_id: id.into(),
@@ -624,14 +628,23 @@ async fn template_windows_counts_current_and_baseline() {
     }
     store.insert_log_hits(&hits).await.unwrap();
 
-    let w = store.template_windows(5, 60, 10).await.unwrap();
+    let w = store
+        .template_windows(5, 60, 10, &svc(&["checkout"]))
+        .await
+        .unwrap();
     assert_eq!(w.len(), 1);
     assert_eq!(w[0].template_id, 1);
     assert_eq!(w[0].service, "checkout");
     assert_eq!(w[0].first_seen_ns, now - 120 * MIN_NS);
     assert_eq!(w[0].current, 12);
     assert_eq!(w[0].baseline_total, 6);
-    assert!(store.template_windows(5, 60, 13).await.unwrap().is_empty());
+    assert!(
+        store
+            .template_windows(5, 60, 13, &svc(&["checkout"]))
+            .await
+            .unwrap()
+            .is_empty()
+    );
     drop_db(&s, &store).await;
 }
 
@@ -692,14 +705,15 @@ async fn new_candidates_and_alerts() {
         .await
         .unwrap();
     let since = now - 10 * MIN_NS;
-    let c = store.new_template_candidates(since).await.unwrap();
+    let owned = svc(&["checkout"]);
+    let c = store.new_template_candidates(since, &owned).await.unwrap();
     assert_eq!(c.len(), 1);
     assert_eq!(c[0].template_id, 2);
     assert_eq!(c[0].service_oldest_ns, old_first);
     let first = c[0].first_seen_ns;
     assert!(
         store
-            .new_template_candidates(first)
+            .new_template_candidates(first, &owned)
             .await
             .unwrap()
             .is_empty(),
@@ -707,14 +721,18 @@ async fn new_candidates_and_alerts() {
     );
     assert_eq!(
         store
-            .new_template_candidates(first - 1)
+            .new_template_candidates(first - 1, &owned)
             .await
             .unwrap()
             .len(),
         1
     );
     assert_eq!(
-        store.new_template_candidates(0).await.unwrap().len(),
+        store
+            .new_template_candidates(0, &owned)
+            .await
+            .unwrap()
+            .len(),
         2,
         "the bound is in data time, not a wall-clock window"
     );
@@ -725,7 +743,7 @@ async fn new_candidates_and_alerts() {
         .unwrap();
     assert!(
         store
-            .new_template_candidates(0)
+            .new_template_candidates(0, &owned)
             .await
             .unwrap()
             .iter()
@@ -733,7 +751,7 @@ async fn new_candidates_and_alerts() {
     );
     assert!(
         store
-            .new_template_candidates(since)
+            .new_template_candidates(since, &owned)
             .await
             .unwrap()
             .is_empty()
@@ -810,7 +828,13 @@ async fn active_spike_alerts_filters_by_last_at() {
         ])
         .await
         .unwrap();
-    assert_eq!(store.active_spike_alerts(10).await.unwrap(), vec![fresh]);
+    assert_eq!(
+        store
+            .active_spike_alerts(10, &svc(&["checkout"]))
+            .await
+            .unwrap(),
+        vec![fresh]
+    );
     drop_db(&s, &store).await;
 }
 
@@ -1298,7 +1322,10 @@ async fn silence_inputs_read_template_and_service_last_hit() {
         ])
         .await
         .unwrap();
-    let mut got = store.silence_inputs(&[1, 3, 4, 77]).await.unwrap();
+    let mut got = store
+        .silence_inputs(&[1, 3, 4, 77], &svc(&["checkout", "ghost"]))
+        .await
+        .unwrap();
     got.sort_by_key(|i| i.template_id);
     let ns = |v: i64| Some(v);
     assert_eq!(got.len(), 3, "unknown id 77 is left out");
@@ -1320,7 +1347,13 @@ async fn silence_inputs_read_template_and_service_last_hit() {
     assert_eq!(got[2].template_id, 4);
     assert!(got[2].t_last_ns.is_some_and(|v| v >= now));
     assert_eq!(got[2].s_last_ns, None);
-    assert!(store.silence_inputs(&[]).await.unwrap().is_empty());
+    assert!(
+        store
+            .silence_inputs(&[], &svc(&["checkout"]))
+            .await
+            .unwrap()
+            .is_empty()
+    );
     drop_db(&s, &store).await;
 }
 
@@ -1513,6 +1546,135 @@ async fn logs_batch_pages_by_ts_and_id_and_truncate_empties_template_tables() {
             .unwrap()
             .len(),
         5
+    );
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn detection_queries_are_scoped_to_owned_services() {
+    let (s, store) = log_store().await;
+    let now = now_ns();
+    store
+        .upsert_templates(&[
+            template(1, "checkout", now - 120 * MIN_NS),
+            template(2, "checkout", now - 2 * MIN_NS),
+            template(3, "payments", now - 120 * MIN_NS),
+            template(4, "payments", now - 3 * MIN_NS),
+        ])
+        .await
+        .unwrap();
+    let mut hits = Vec::new();
+    for i in 0..12u64 {
+        hits.push(hit(i + 1, 1, now - MIN_NS - i as i64, ""));
+        hits.push(LogHitRow {
+            service: "payments".into(),
+            ..hit(100 + i, 3, now - MIN_NS - i as i64, "")
+        });
+    }
+    store.insert_log_hits(&hits).await.unwrap();
+    let mut pay_alert = alert("spike:3", 2, 3, now - MIN_NS);
+    pay_alert.service = "payments".into();
+    store
+        .insert_alerts(&[alert("spike:1", 2, 1, now - MIN_NS), pay_alert])
+        .await
+        .unwrap();
+    let (co, pay, both, none) = (
+        svc(&["checkout"]),
+        svc(&["payments"]),
+        svc(&["checkout", "payments"]),
+        svc(&[]),
+    );
+
+    let ids = |c: Vec<tayga_store::logs::NewCandidateRow>| {
+        let mut v: Vec<u64> = c.iter().map(|r| r.template_id).collect();
+        v.sort_unstable();
+        v
+    };
+    assert_eq!(
+        ids(store.new_template_candidates(0, &co).await.unwrap()),
+        [1, 2]
+    );
+    assert_eq!(
+        ids(store.new_template_candidates(0, &pay).await.unwrap()),
+        [3, 4]
+    );
+    assert_eq!(
+        ids(store.new_template_candidates(0, &both).await.unwrap()),
+        [1, 2, 3, 4]
+    );
+    assert!(
+        store
+            .new_template_candidates(0, &none)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let c = store
+        .new_template_candidates(now - 10 * MIN_NS, &pay)
+        .await
+        .unwrap();
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0].template_id, 4);
+    assert_eq!(c[0].service_oldest_ns, now - 120 * MIN_NS);
+
+    let win = |w: Vec<tayga_store::logs::TemplateWindowRow>| -> Vec<u64> {
+        w.iter().map(|r| r.template_id).collect()
+    };
+    assert_eq!(
+        win(store.template_windows(5, 60, 10, &co).await.unwrap()),
+        [1]
+    );
+    assert_eq!(
+        win(store.template_windows(5, 60, 10, &pay).await.unwrap()),
+        [3]
+    );
+    assert_eq!(
+        store
+            .template_windows(5, 60, 10, &both)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        store
+            .template_windows(5, 60, 10, &none)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let spike = |a: Vec<LogAlertRow>| a.iter().map(|r| r.template_id).collect::<Vec<_>>();
+    assert_eq!(
+        spike(store.active_spike_alerts(10, &co).await.unwrap()),
+        [1]
+    );
+    assert_eq!(
+        spike(store.active_spike_alerts(10, &pay).await.unwrap()),
+        [3]
+    );
+    assert!(
+        store
+            .active_spike_alerts(10, &none)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let sil = |v: Vec<tayga_store::logs::SilenceInput>| {
+        let mut ids: Vec<u64> = v.iter().map(|i| i.template_id).collect();
+        ids.sort_unstable();
+        ids
+    };
+    assert_eq!(sil(store.silence_inputs(&[1, 3], &co).await.unwrap()), [1]);
+    assert_eq!(sil(store.silence_inputs(&[1, 3], &pay).await.unwrap()), [3]);
+    assert!(
+        store
+            .silence_inputs(&[1, 3], &none)
+            .await
+            .unwrap()
+            .is_empty()
     );
     drop_db(&s, &store).await;
 }

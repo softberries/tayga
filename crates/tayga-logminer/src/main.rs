@@ -23,6 +23,7 @@ use tayga_logminer::config::{
 };
 use tayga_logminer::metrics::{LogminerMetrics, PRE_EPOCH_MATCH, ReasonLabel};
 use tayga_logminer::miner::{Miner, alert_from_row, alert_json, alert_row};
+use tayga_logminer::ownership::Ownership;
 use tayga_model::envelope::{Envelope, HEADER_KIND, Kind};
 use tayga_store::ClickHouseSettings;
 use tayga_store::flatten::rows_from_envelope;
@@ -64,6 +65,8 @@ struct LogminerSettings {
     spike_min_count: u64,
     new_template_warmup_min: u32,
     alert_active_min: u32,
+    /// Minutes a service stays owned after the last log mined for it.
+    ownership_window_min: u32,
     /// `"flat"` or `"seasonal"`.
     baseline_mode: String,
     alerts_topic: String,
@@ -87,6 +90,7 @@ impl Default for LogminerSettings {
             spike_min_count: detect.spike_min_count,
             new_template_warmup_min: detect.new_template_warmup_min,
             alert_active_min: detect.alert_active_min,
+            ownership_window_min: 60,
             baseline_mode: "flat".to_string(),
             alerts_topic: "tayga.alerts".to_string(),
             metrics_addr: SocketAddr::from(([0, 0, 0, 0], 9100)),
@@ -104,6 +108,10 @@ impl LogminerSettings {
         anyhow::ensure!(
             self.spike_window_min > 0,
             "logminer.spike_window_min must be positive"
+        );
+        anyhow::ensure!(
+            self.ownership_window_min > 0,
+            "logminer.ownership_window_min must be positive"
         );
         self.drain_settings().validate()?;
         self.baseline_mode
@@ -226,19 +234,7 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     let restored = templates.len();
     miner.restore(templates);
     metrics.templates.set(miner.len() as i64);
-    let mut tracker = Trackers::default();
-    let Some(active) = retry_until(
-        "load active spike alerts",
-        || store.active_spike_alerts(cfg.alert_active_min),
-        &mut stop_rx,
-    )
-    .await
-    else {
-        return Ok(());
-    };
-    let active: Vec<Alert> = active.iter().filter_map(alert_from_row).collect();
-    let active_spikes = active.len();
-    tracker.spikes.restore(active);
+    let mut tracker = Trackers::new(cfg.ownership_window_min);
     let Some(data_now) = retry_until("load data clock", || store.data_now_ns(), &mut stop_rx).await
     else {
         return Ok(());
@@ -327,7 +323,6 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
         topic = %settings.kafka.topic,
         alerts = %cfg.alerts_topic,
         restored,
-        active_spikes,
         new_watermark,
         epoch_start,
         masking_version = current_version,
@@ -355,7 +350,7 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
             _ = main_stop.wait_for(|stop| *stop) => break,
             _ = detect_tick.tick() => detect_due = true,
             next = tokio::time::timeout(Duration::from_millis(200), consumer.recv()) => match next {
-                Ok(Ok(msg)) => on_message(&msg, &mut miner, &mut pending, &metrics),
+                Ok(Ok(msg)) => on_message(&msg, &mut miner, &mut pending, &mut tracker.ownership, &metrics),
                 Ok(Err(e)) => {
                     tracing::warn!(error = %e, "kafka receive error");
                     let mut backoff_stop = stop_rx.clone();
@@ -405,6 +400,7 @@ fn on_message(
     msg: &BorrowedMessage<'_>,
     miner: &mut Miner,
     pending: &mut Pending,
+    ownership: &mut Ownership,
     metrics: &LogminerMetrics,
 ) {
     // Without a broker timestamp the record counts as fresh (consumed now).
@@ -425,8 +421,10 @@ fn on_message(
         None => return,
     };
     let (_, logs) = rows_from_envelope(&env);
+    let mined_at = now_ns();
     for log in &logs {
         let (hit, a) = miner.mine(log);
+        ownership.touch(&hit.service, mined_at);
         pending.record_ts(msg.partition(), hit.ts);
         pending.hits.push(hit);
         metrics.logs_mined.inc();
@@ -845,14 +843,60 @@ fn minutes_covering(first_seen_ns: i64, now_ns: i64, floor_min: u32) -> u32 {
 }
 
 /// Alert state kept between detection passes.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Trackers {
+    /// Services this replica mines; detection is scoped to them.
+    ownership: Ownership,
     spikes: SpikeTracker,
     /// Ids of the silence alerts raised so far, to tell a new silence period (counted) from a
     /// refresh. Pruned to the currently silent templates each pass. Silence alerts need no restore:
     /// their id and `started_at` are recomputed from `t_last`, so a restart continues the same
     /// alert; the only effect is that a silence alert still running is counted once more.
     silent: HashSet<String>,
+    /// Owned services whose active spike alerts were restored from the store. A service joins
+    /// when it becomes owned and leaves when ownership expires, so a service this replica takes
+    /// over continues the spike alert its previous owner started (same id) instead of raising
+    /// a second one.
+    restored: HashSet<String>,
+}
+
+impl Trackers {
+    fn new(ownership_window_min: u32) -> Self {
+        Self {
+            ownership: Ownership::new(ownership_window_min),
+            spikes: SpikeTracker::default(),
+            silent: HashSet::new(),
+            restored: HashSet::new(),
+        }
+    }
+}
+
+/// Restores the active spike alerts of services that became owned since the last pass, and
+/// forgets services that stopped being owned. A failed lookup fails the pass; it is retried next
+/// pass because the service stays unrestored.
+async fn restore_spikes(
+    store: &Store,
+    cfg: &DetectConfig,
+    tracker: &mut Trackers,
+    owned: &[String],
+) -> anyhow::Result<()> {
+    tracker.restored.retain(|s| owned.contains(s));
+    let fresh: Vec<String> = owned
+        .iter()
+        .filter(|s| !tracker.restored.contains(*s))
+        .cloned()
+        .collect();
+    if fresh.is_empty() {
+        return Ok(());
+    }
+    let active = store
+        .active_spike_alerts(cfg.alert_active_min, &fresh)
+        .await?;
+    tracker
+        .spikes
+        .restore(active.iter().filter_map(alert_from_row).collect());
+    tracker.restored.extend(fresh);
+    Ok(())
 }
 
 /// Silence alerts of the silent templates among `inputs` (log time, spec 7b §2.2), `settings`
@@ -888,6 +932,9 @@ async fn find_alerts(
     now: i64,
     metrics: &LogminerMetrics,
 ) -> anyhow::Result<(Vec<(Alert, bool)>, i64)> {
+    let owned = tracker.ownership.owned(now);
+    let owned = owned.as_slice();
+    restore_spikes(store, cfg, tracker, owned).await?;
     let stored_now = store.data_now_ns().await?;
     if let Some(lag) = data_lag_secs(data_clock(stored_now, now), now) {
         metrics.data_lag_seconds.set(lag);
@@ -914,6 +961,7 @@ async fn find_alerts(
             cfg.spike_window_min,
             cfg.baseline_window_min,
             cfg.spike_min_count,
+            owned,
         )
         .await?;
     let mut spiking = Vec::new();
@@ -977,9 +1025,9 @@ async fn find_alerts(
                 .observe(cfg, &w, baseline, comparators, examples, now),
         );
     }
-    out.extend(silence_pass(store, miner, tracker, data_now, now, metrics).await);
+    out.extend(silence_pass(store, miner, tracker, owned, data_now, now, metrics).await);
     let since = new_template_since(clock.watermark);
-    let candidates = store.new_template_candidates(since).await?;
+    let candidates = store.new_template_candidates(since, owned).await?;
     for r in candidates {
         let c = NewCandidate {
             template_id: r.template_id,
@@ -1006,6 +1054,7 @@ async fn silence_pass(
     store: &Store,
     miner: &Miner,
     tracker: &mut Trackers,
+    owned: &[String],
     clock_ns: i64,
     now: i64,
     metrics: &LogminerMetrics,
@@ -1014,7 +1063,7 @@ async fn silence_pass(
         let settings = store.silence_enabled().await?;
         let ids: Vec<u64> = settings.iter().map(|&(id, _)| id).collect();
         let inputs: Vec<SilenceInput> = store
-            .silence_inputs(&ids)
+            .silence_inputs(&ids, owned)
             .await?
             .into_iter()
             .map(|i| SilenceInput {
