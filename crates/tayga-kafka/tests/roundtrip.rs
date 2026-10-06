@@ -12,6 +12,7 @@ fn settings() -> KafkaSettings {
     KafkaSettings {
         brokers,
         topic: format!("tayga-it-{suffix}"),
+        logs_topic: format!("tayga-it-logs-{suffix}"),
         partitions: 3,
         max_record_bytes: 900_000,
     }

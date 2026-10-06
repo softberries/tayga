@@ -1,4 +1,4 @@
-use crate::metrics::IngestMetrics;
+use crate::metrics::{IngestMetrics, Published};
 use crate::records::{Converted, log_records, now_unix_nano, trace_records};
 use crate::sink::{Sink, SinkError};
 use std::sync::Arc;
@@ -53,12 +53,13 @@ async fn publish<S: Sink>(
         return Ok(());
     }
     let count = records.len();
+    let published = Published::of(&records, signal == "logs");
     sink.publish(records).await.map_err(|e| {
         metrics.publish_failures.inc();
         tracing::warn!(signal, records = count, error = %e, "otlp/grpc export failed: kafka publish");
         status_from(e)
     })?;
-    metrics.record_published(signal, count);
+    metrics.record_published(signal, &published);
     Ok(())
 }
 
@@ -89,7 +90,7 @@ impl<S: Sink> LogsService for OtlpGrpc<S> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::records::OutRecord;
+    use crate::records::{OutRecord, Topic};
     use std::sync::Mutex;
     use tayga_model::otlp::trace::v1::{ResourceSpans, ScopeSpans, Span};
 
@@ -99,11 +100,13 @@ pub(crate) mod tests {
     pub(crate) struct FakeSink {
         pub published: Mutex<Vec<OutRecord>>,
         pub fail: bool,
+        /// Fail the whole publish when any record targets this topic.
+        pub fail_topic: Option<Topic>,
     }
 
     impl Sink for FakeSink {
         async fn publish(&self, records: Vec<OutRecord>) -> Result<(), SinkError> {
-            if self.fail {
+            if self.fail || records.iter().any(|r| Some(r.topic) == self.fail_topic) {
                 return Err(SinkError::QueueFull);
             }
             self.published.lock().unwrap().extend(records);
@@ -183,5 +186,66 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert!(sink.published.lock().unwrap().is_empty());
+    }
+
+    pub(crate) fn one_log_request() -> ExportLogsServiceRequest {
+        use tayga_model::otlp::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
+        ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![LogRecord {
+                        trace_id: vec![3; 16],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn logs_reach_both_topics_and_are_counted_per_topic() {
+        use crate::metrics::TopicLabel;
+        let sink = Arc::new(FakeSink::default());
+        let metrics = IngestMetrics::default();
+        let svc = OtlpGrpc::new(sink.clone(), TEST_MAX_RECORD_BYTES, metrics.clone());
+        LogsService::export(&svc, Request::new(one_log_request()))
+            .await
+            .unwrap();
+        let topics: Vec<_> = sink
+            .published
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.topic)
+            .collect();
+        assert_eq!(topics, vec![Topic::Signals, Topic::Logs]);
+        for topic in ["signals", "logs"] {
+            let n = metrics
+                .log_records_published
+                .get_or_create(&TopicLabel {
+                    topic: topic.into(),
+                })
+                .get();
+            assert_eq!(n, 1, "{topic}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failure_on_either_topic_is_unavailable_and_counts_no_publish() {
+        for fail_topic in [Topic::Signals, Topic::Logs] {
+            let sink = Arc::new(FakeSink {
+                fail_topic: Some(fail_topic),
+                ..Default::default()
+            });
+            let metrics = IngestMetrics::default();
+            let svc = OtlpGrpc::new(sink, TEST_MAX_RECORD_BYTES, metrics.clone());
+            let err = LogsService::export(&svc, Request::new(one_log_request()))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), tonic::Code::Unavailable, "{fail_topic:?}");
+            assert_eq!(metrics.publish_failures.get(), 1);
+        }
     }
 }
