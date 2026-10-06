@@ -13,13 +13,14 @@ pub fn masking_version(keep_http_status: bool) -> u32 {
     if keep_http_status { 3 } else { 1 }
 }
 
-/// True when `t` ends in `HTTP/<d>` or `HTTP/<d>.<d>`, optionally followed by `"`.
-fn is_http_version(t: &str) -> bool {
-    let t = t.strip_suffix('"').unwrap_or(t);
-    let Some(pos) = t.rfind("HTTP/") else {
+/// True when `t` ends in `HTTP/<d>` or `HTTP/<d>.<d>`, optionally followed by `"`. On bytes,
+/// so `fingerprint` shares it.
+pub(crate) fn is_http_version(t: &[u8]) -> bool {
+    let t = t.strip_suffix(b"\"").unwrap_or(t);
+    let Some(pos) = t.windows(5).rposition(|w| w == b"HTTP/") else {
         return false;
     };
-    match &t.as_bytes()[pos + 5..] {
+    match &t[pos + 5..] {
         [a] => a.is_ascii_digit(),
         [a, b'.', c] => a.is_ascii_digit() && c.is_ascii_digit(),
         _ => false,
@@ -28,9 +29,12 @@ fn is_http_version(t: &str) -> bool {
 
 /// A three-digit HTTP status code, 100..=599.
 pub fn is_status(t: &str) -> bool {
-    t.len() == 3
-        && t.bytes().all(|b| b.is_ascii_digit())
-        && t.parse::<u16>().is_ok_and(|n| (100..=599).contains(&n))
+    is_status_bytes(t.as_bytes())
+}
+
+/// [`is_status`] on bytes, shared with `fingerprint`.
+pub(crate) fn is_status_bytes(t: &[u8]) -> bool {
+    t.len() == 3 && t.iter().all(u8::is_ascii_digit) && (b'1'..=b'5').contains(&t[0])
 }
 
 /// True when `tok` (a token from [`tokens`] or from a stored template string) is a kept status
@@ -54,7 +58,9 @@ pub fn tokens(body: &str, keep_http_status: bool) -> Vec<String> {
             out.push(TRUNCATED.to_string());
             break;
         }
-        let keep = keep_http_status && is_status(raw) && prev.is_some_and(is_http_version);
+        let keep = keep_http_status
+            && is_status(raw)
+            && prev.is_some_and(|p| is_http_version(p.as_bytes()));
         prev = Some(raw);
         if keep {
             out.push(raw.to_string());

@@ -109,7 +109,16 @@ Spike (spec §2.3): masking 70 %, tree 11 %. Masking dominates, as in the spike.
 
 ## Fingerprint backends
 
-Filled by Task 2/4/5.
+| Batch | scalar |
+|---|---|
+| 5 | 1.95 µs (2.57 Melem/s) |
+| 64 | 16.8 µs (3.80 Melem/s) |
+| 512 | 148 µs (3.45 Melem/s) |
+| 2,048 | 566 µs (3.62 Melem/s) |
+| 5,000 | 1.36 ms (3.67 Melem/s) |
+| 50,000 | 13.8 ms (3.64 Melem/s) |
+
+Median of `cargo bench -p tayga-drain --bench mining -- fingerprint`. Every ASCII body equals `reference_fingerprint` (`tests/fingerprint.rs`); non-ASCII bodies take the Drain path.
 
 ## Cache
 

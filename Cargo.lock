@@ -2608,6 +2608,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "flate2",
+ "proptest",
  "serde",
  "serde_json",
  "tayga-analysis",

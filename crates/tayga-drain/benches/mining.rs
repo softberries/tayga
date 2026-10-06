@@ -1,9 +1,10 @@
 //! Drain mining stages, fingerprint backends and the cache (sub-project 4 spec §5).
 //! `cargo bench -p tayga-drain --bench mining` (add `--features gpu` for the GPU backend).
 
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 use tayga_drain::drain::{Drain, DrainConfig};
+use tayga_drain::fingerprint::{BatchFingerprinter, BodyBatch, ScalarFingerprinter};
 use tayga_drain::preprocess::{MAX_TOKENS, tokens};
 
 #[path = "../tests/corpus/mod.rs"]
@@ -45,5 +46,33 @@ fn stages(c: &mut Criterion) {
     });
     g.finish();
 }
-criterion_group!(benches, stages);
+fn backends() -> Vec<Box<dyn BatchFingerprinter>> {
+    vec![Box::new(ScalarFingerprinter)]
+}
+
+/// Every backend at the batch sizes of spec §2.5.
+fn fingerprint(c: &mut Criterion) {
+    let lines = corpus::load();
+    let backends = backends();
+    let mut g = c.benchmark_group("fingerprint");
+    for n in [5usize, 64, 512, 2_048, 5_000, 50_000] {
+        let mut batch = BodyBatch::new();
+        for l in lines.iter().take(n) {
+            batch.push(&l.body);
+        }
+        g.throughput(Throughput::Elements(batch.len() as u64));
+        let mut out = Vec::new();
+        for f in &backends {
+            g.bench_with_input(BenchmarkId::new(f.name(), n), &batch, |b, batch| {
+                b.iter(|| {
+                    f.fingerprint(batch, true, &mut out);
+                    black_box(&out);
+                })
+            });
+        }
+    }
+    g.finish();
+}
+
+criterion_group!(benches, stages, fingerprint);
 criterion_main!(benches);
