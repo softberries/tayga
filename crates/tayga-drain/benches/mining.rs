@@ -58,7 +58,7 @@ fn fingerprint(c: &mut Criterion) {
     for n in [5usize, 64, 512, 2_048, 5_000, 50_000] {
         let mut batch = BodyBatch::new();
         for l in lines.iter().take(n) {
-            batch.push(&l.body);
+            assert!(batch.push(&l.body));
         }
         g.throughput(Throughput::Elements(batch.len() as u64));
         let mut out = Vec::new();

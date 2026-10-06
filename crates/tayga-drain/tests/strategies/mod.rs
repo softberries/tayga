@@ -1,5 +1,5 @@
 //! Bodies that reach every rule of `preprocess::tokens`: kept and masked status codes, hex
-//! words, `<*>` literals, `\x0B` (not a separator), non-ASCII digits and letters, 65+ tokens.
+//! words, `<*>` literals, `\x0B` (not a separator), NUL bytes, non-ASCII digits and letters, 65+ tokens.
 
 use proptest::prelude::*;
 
@@ -31,6 +31,8 @@ fn token() -> impl Strategy<Value = String> {
             "<empty>",
             "\u{e9}t\u{e9}",
             "\u{0663}",
+            "a\0b",
+            "\0",
         ])
         .prop_map(str::to_string),
         "[a-fA-F_./=-]{1,12}",

@@ -12,7 +12,7 @@ fn every_corpus_body_matches_the_reference() {
     for line in corpus::load() {
         for keep in [true, false] {
             let fast = fingerprint_body(line.body.as_bytes(), keep);
-            if line.body.is_ascii() {
+            if line.body.is_ascii() && !line.body.contains('\0') {
                 assert_eq!(
                     fast,
                     Some(reference_fingerprint(&line.body, keep)),
@@ -32,7 +32,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(2_000))]
     #[test]
     fn random_bodies_match_the_reference(body in strategies::body(), keep in any::<bool>()) {
-        let expected = body.is_ascii().then(|| reference_fingerprint(&body, keep));
+        let expected = (body.is_ascii() && !body.contains('\0')).then(|| reference_fingerprint(&body, keep));
         prop_assert_eq!(fingerprint_body(body.as_bytes(), keep), expected);
     }
 }

@@ -1,8 +1,8 @@
 //! Batch fingerprints of the masked token sequence (sub-project 4 spec §3.1). The value is
 //! defined by [`reference_fingerprint`]: four 32-bit lanes over the tokens of
 //! [`tokens`], each token followed by a 0 byte. Every [`BatchFingerprinter`] returns exactly
-//! that value for an ASCII body and `None` for any other body (Unicode digits and word
-//! boundaries need the regex path).
+//! that value for an ASCII, NUL-free body and `None` for any other body (Unicode digits and
+//! word boundaries need the regex path; a NUL would collide with the token terminator).
 
 use crate::preprocess::{EMPTY, MAX_TOKENS, TRUNCATED, is_http_version, is_status_bytes, tokens};
 
@@ -12,6 +12,8 @@ use crate::preprocess::{EMPTY, MAX_TOKENS, TRUNCATED, is_http_version, is_status
 pub struct BodyBatch {
     bytes: Vec<u8>,
     offsets: Vec<u32>,
+    /// Set by the first failed `push`; cleared by `clear`.
+    sealed: bool,
 }
 
 impl Default for BodyBatch {
@@ -25,18 +27,20 @@ impl BodyBatch {
         Self {
             bytes: Vec::new(),
             offsets: vec![0],
+            sealed: false,
         }
     }
 
     /// Appends `body`. `false`, and nothing appended, when the batch would pass `u32::MAX`
-    /// bytes.
+    /// bytes. The first failure seals the batch: every later `push` returns `false` until
+    /// [`clear`](Self::clear), so a body is never skipped while a later one is kept.
+    #[must_use = "a false return means the body was not appended"]
     pub fn push(&mut self, body: &str) -> bool {
-        let Some(end) = self
-            .bytes
-            .len()
-            .checked_add(body.len())
-            .and_then(|e| u32::try_from(e).ok())
-        else {
+        if self.sealed {
+            return false;
+        }
+        let Some(end) = end_offset(self.bytes.len(), body.len()) else {
+            self.sealed = true;
             return false;
         };
         self.bytes.extend_from_slice(body.as_bytes());
@@ -48,6 +52,7 @@ impl BodyBatch {
     pub fn clear(&mut self) {
         self.bytes.clear();
         self.offsets.truncate(1);
+        self.sealed = false;
     }
 
     pub fn len(&self) -> usize {
@@ -58,6 +63,9 @@ impl BodyBatch {
         self.len() == 0
     }
 
+    /// # Panics
+    ///
+    /// When `i >= self.len()`.
     pub fn body(&self, i: usize) -> &[u8] {
         &self.bytes[self.offsets[i] as usize..self.offsets[i + 1] as usize]
     }
@@ -71,7 +79,13 @@ impl BodyBatch {
     }
 }
 
-/// Cache key of a masked token sequence, and an independent second hash that verifies a hit.
+/// The end offset after appending `add` bytes to `cur`, or `None` past `u32::MAX`.
+fn end_offset(cur: usize, add: usize) -> Option<u32> {
+    cur.checked_add(add).and_then(|e| u32::try_from(e).ok())
+}
+
+/// Cache key of a masked token sequence, and `check`, a second hash over the same stream (not
+/// independent of `key`) that verifies a hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Fingerprint {
     pub key: u64,
@@ -149,8 +163,9 @@ fn is_word(b: u8) -> bool {
 
 /// True when `mask` changes the ASCII token `t`, or `t` already holds `<*>`: then `tokens`
 /// emits `<*>`. `mask` replaces UUIDs, `\b(?:0x)?[0-9a-f]{8,}\b` (case-insensitive) and digit
-/// runs. In ASCII every UUID and every `0x` form contains a digit, so the rule is: a digit, a
-/// literal `<*>`, or a whole word (a maximal `[A-Za-z0-9_]` run) of 8 or more hex letters.
+/// runs. A UUID has an 8-hex-char first group, so it holds a digit or is itself a whole word
+/// of 8 or more hex letters; every `0x` form holds a digit. So the rule is: a digit, a literal
+/// `<*>`, or a whole word (a maximal `[A-Za-z0-9_]` run) of 8 or more hex letters.
 fn masks(t: &[u8]) -> bool {
     if t.iter().any(u8::is_ascii_digit) || t.windows(3).any(|w| w == b"<*>") {
         return true;
@@ -172,13 +187,9 @@ fn masks(t: &[u8]) -> bool {
     false
 }
 
-/// [`reference_fingerprint`] in one pass without allocating; `None` for a body with a
-/// non-ASCII byte.
-pub fn fingerprint_body(body: &[u8], keep_http_status: bool) -> Option<Fingerprint> {
-    if !body.is_ascii() {
-        return None;
-    }
-    let mut l = Lanes::new();
+/// Splits an ASCII `body` and calls `emit` with each output token of `tokens(body, keep)`,
+/// masked, without allocating.
+fn walk(body: &[u8], keep_http_status: bool, mut emit: impl FnMut(&[u8])) {
     let mut n = 0usize;
     let mut prev: &[u8] = &[];
     let mut i = 0;
@@ -195,28 +206,41 @@ pub fn fingerprint_body(body: &[u8], keep_http_status: bool) -> Option<Fingerpri
         }
         let t = &body[start..i];
         if n == MAX_TOKENS {
-            l.token(TRUNCATED.as_bytes());
+            emit(TRUNCATED.as_bytes());
             n += 1;
             break;
         }
-        if keep_http_status && n > 0 && is_status_bytes(t) && is_http_version(prev) {
-            l.token(t);
+        if keep_http_status && is_status_bytes(t) && is_http_version(prev) {
+            emit(t);
         } else if masks(t) {
-            l.token(b"<*>");
+            emit(b"<*>");
         } else {
-            l.token(t);
+            emit(t);
         }
         prev = t;
         n += 1;
     }
     if n == 0 {
-        l.token(EMPTY.as_bytes());
+        emit(EMPTY.as_bytes());
     }
+}
+
+/// [`reference_fingerprint`] in one pass without allocating; `None` for a body with a
+/// non-ASCII byte or a NUL byte (`"a\0b"` would hash like `"a b"`: the token terminator is 0).
+pub fn fingerprint_body(body: &[u8], keep_http_status: bool) -> Option<Fingerprint> {
+    if !body.iter().all(|&b| b != 0 && b < 0x80) {
+        return None;
+    }
+    let mut l = Lanes::new();
+    walk(body, keep_http_status, |t| l.token(t));
     Some(l.finish())
 }
 
 /// Fingerprints a batch of bodies. Backends differ in speed only: each returns
-/// [`fingerprint_body`] for every body.
+/// [`fingerprint_body`] for every body. A backend must accept any batch that
+/// [`BodyBatch::push`] accepted, and fall back to the scalar path when the batch exceeds a
+/// device limit. The GPU valid flag follows the same rule as `fingerprint_body`: 0 for any
+/// byte >= 0x80 or == 0x00.
 pub trait BatchFingerprinter: Send + Sync {
     /// `scalar`, `parallel` or `gpu`: the metric label and the log field.
     fn name(&self) -> &'static str;
@@ -265,6 +289,7 @@ mod tests {
         "a.deadbeefcafe",
         "deadbeefcafez",
         "a<*>b",
+        "a\0b",
         "<*",
         "<empty>",
         "a\x0Bb c",
@@ -294,12 +319,65 @@ mod tests {
                 .copied()
                 .chain([long.as_str(), sixty_five.as_str(), sixty_four.as_str()])
         {
+            if body.contains('\0') {
+                assert_eq!(fingerprint_body(body.as_bytes(), true), None, "{body:?}");
+                continue;
+            }
             for keep in [true, false] {
                 assert_eq!(
                     fingerprint_body(body.as_bytes(), keep),
                     Some(reference_fingerprint(body, keep)),
                     "{body:?} keep={keep}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn nul_bodies_are_not_fingerprinted() {
+        // "a\0b" would hash like "a b": the token terminator is 0.
+        for body in ["a\0b", "\0", "x \0"] {
+            assert_eq!(fingerprint_body(body.as_bytes(), true), None, "{body:?}");
+        }
+    }
+
+    #[test]
+    fn end_offset_stops_at_u32_max() {
+        let max = u32::MAX as usize;
+        assert_eq!(end_offset(0, 0), Some(0));
+        assert_eq!(end_offset(max - 1, 1), Some(u32::MAX));
+        assert_eq!(end_offset(max, 0), Some(u32::MAX));
+        assert_eq!(end_offset(max, 1), None);
+        assert_eq!(end_offset(max - 1, 2), None);
+        assert_eq!(end_offset(usize::MAX, 1), None);
+    }
+
+    #[test]
+    fn a_failed_push_seals_the_batch_until_clear() {
+        let mut b = BodyBatch::new();
+        assert!(b.push("ab"));
+        b.sealed = true; // as after a push that would pass u32::MAX
+        assert!(!b.push("c"));
+        assert_eq!((b.len(), b.bytes()), (1, &b"ab"[..]));
+        b.clear();
+        assert!(b.push("c"));
+    }
+
+    #[test]
+    fn walk_emits_exactly_the_tokens() {
+        let long = "word ".repeat(100);
+        for body in EDGES.iter().copied().chain([long.as_str()]) {
+            for keep in [true, false] {
+                let mut got: Vec<Vec<u8>> = Vec::new();
+                walk(body.as_bytes(), keep, |t| got.push(t.to_vec()));
+                let want: Vec<Vec<u8>> = tokens(body, keep)
+                    .into_iter()
+                    .map(String::into_bytes)
+                    .collect();
+                if body.contains('\0') {
+                    continue;
+                }
+                assert_eq!(got, want, "{body:?} keep={keep}");
             }
         }
     }
