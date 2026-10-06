@@ -508,11 +508,35 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
             }
         }
     }
-    if !interrupted && !st.pending.is_empty() {
-        // Single attempt: on failure exit without committing.
-        flush(&ctx, &mut st.miner, st.pending, &mut st.seen, None).await?;
-    }
+    shut_down(&ctx, cfg, &mut st, interrupted).await?;
     tracing::info!("tayga-logminer stopped");
+    Ok(())
+}
+
+/// Longest the new-template pass at a clean shutdown may take. With the final flush it must fit
+/// in `stop_grace_period` of `tayga-logminer` in `deploy/compose.tayga.yaml` (40 s).
+const SHUTDOWN_PASS_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Clean shutdown: the final flush of pending work (single attempt; skipped when shutdown
+/// already interrupted a flush, and on failure nothing is committed), then one bounded
+/// new-template pass for the owned services ([`announce_new_templates`]), so a template mined
+/// after the last pass is not left to a service that may never log again.
+///
+/// A crash skips this pass. Nothing is lost for a service that logs again: the persisted
+/// watermark only advances after a successful pass, so the template is a candidate once more as
+/// soon as any replica owns its service, which it does from that service's next mined log. A
+/// service that never logs again after a crash is the accepted edge.
+async fn shut_down(
+    ctx: &Ctx<'_>,
+    cfg: &LogminerSettings,
+    st: &mut LoopState,
+    interrupted: bool,
+) -> anyhow::Result<()> {
+    if !interrupted && !st.pending.is_empty() {
+        let batch = std::mem::take(&mut st.pending);
+        flush(ctx, &mut st.miner, batch, &mut st.seen, None).await?;
+    }
+    announce_new_templates(ctx, &cfg.detect(), st, SHUTDOWN_PASS_TIMEOUT, "shutdown").await;
     Ok(())
 }
 
@@ -592,7 +616,7 @@ async fn load_watermark(
 ///    instead would be safe under the eager protocol but would lose records of partitions kept
 ///    under the cooperative one, whose position is not rewound.
 /// 2. On a revoke, one bounded new-template pass for the services owned so far
-///    ([`announce_on_revoke`]), before an assignment clears ownership.
+///    ([`announce_new_templates`]), before an assignment clears ownership.
 /// 3. On an assignment, the miner is reloaded and the state reset ([`LoopState::reassign`]).
 ///    The flush comes first: the reload discards the old miner's unflushed template changes.
 async fn on_rebalance(
@@ -612,7 +636,7 @@ async fn on_rebalance(
         }
     }
     if changes.iter().any(|c| matches!(c, Change::Revoke(_))) {
-        announce_on_revoke(ctx, &cfg.detect(), st).await;
+        announce_new_templates(ctx, &cfg.detect(), st, REVOKE_PASS_TIMEOUT, "revoke").await;
     }
     if !changes.iter().any(|c| matches!(c, Change::Assign(_))) {
         return Ok(true);
@@ -1363,14 +1387,21 @@ fn new_candidates(
 /// Longest the new-template pass at a revoke may take; the rebalance goes on after it.
 const REVOKE_PASS_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// One bounded new-template pass for the services owned before a revoke, after the revoke's
-/// flush stored their last templates (review I1). Ownership is learned only from mined records:
-/// once a commit of the old owner succeeds, the new owner never mines those records, so a
-/// template first seen after the last pass would be a candidate on no replica if its service
-/// then went quiet. The alerts are stored and published as in a pass; one the new owner raises
-/// as well collapses by its `alert_id` (`hash("new", template_id)`). The watermark is not moved.
-/// A failure or timeout is logged and counted in `write_failures`, and the rebalance goes on.
-async fn announce_on_revoke(ctx: &Ctx<'_>, cfg: &DetectConfig, st: &mut LoopState) {
+/// One new-template pass for the services owned now, bounded by `bound`, when this replica is
+/// about to stop mining them: after the flush of a revoke (review I1) or of a clean shutdown
+/// (`when`). Ownership is learned only from mined records: once the old owner's commit
+/// succeeds, the next owner never mines those records, so a template first seen after the last
+/// pass would be a candidate on no replica if its service then went quiet. The alerts are stored
+/// and published as in a pass; one another replica raises as well collapses by its `alert_id`
+/// (`hash("new", template_id)`). The watermark is not moved. A failure or timeout is logged and
+/// counted in `write_failures`, and the caller goes on.
+async fn announce_new_templates(
+    ctx: &Ctx<'_>,
+    cfg: &DetectConfig,
+    st: &mut LoopState,
+    bound: Duration,
+    when: &str,
+) {
     let now = now_ns();
     let owned = st.tracker.ownership.owned(now);
     if owned.is_empty() {
@@ -1399,23 +1430,25 @@ async fn announce_on_revoke(ctx: &Ctx<'_>, cfg: &DetectConfig, st: &mut LoopStat
         anyhow::ensure!(stored, "storing the alerts failed");
         anyhow::Ok(alerts.len())
     };
-    match tokio::time::timeout(REVOKE_PASS_TIMEOUT, pass).await {
+    match tokio::time::timeout(bound, pass).await {
         Ok(Ok(alerts)) => {
             tracing::info!(
+                when,
                 services = owned.len(),
                 alerts,
-                "new-template pass at revoke"
+                "final new-template pass"
             );
         }
         Ok(Err(e)) => {
             ctx.metrics.write_failures.inc();
-            tracing::warn!(error = %e, "new-template pass at revoke failed");
+            tracing::warn!(when, error = %e, "final new-template pass failed");
         }
         Err(_) => {
             ctx.metrics.write_failures.inc();
             tracing::warn!(
-                timeout_secs = REVOKE_PASS_TIMEOUT.as_secs(),
-                "new-template pass at revoke timed out"
+                when,
+                timeout_secs = bound.as_secs(),
+                "final new-template pass timed out"
             );
         }
     }
@@ -2243,11 +2276,16 @@ mod tests {
             .unwrap();
     }
 
-    /// Review I1: a template mined and flushed after the last pass, by a replica whose
-    /// partition is then revoked, is announced during the revoke.
-    #[tokio::test]
-    #[ignore = "requires ClickHouse and Kafka: TAYGA_IT_CLICKHOUSE, TAYGA_IT_KAFKA"]
-    async fn a_template_first_seen_after_the_last_pass_is_announced_at_revoke() {
+    /// When the replica stops mining its services.
+    #[derive(Clone, Copy)]
+    enum Final {
+        Revoke,
+        Shutdown,
+    }
+
+    /// A template mined and flushed after the last pass is announced when the replica stops
+    /// mining its service: review I1 (revoke) and the clean shutdown.
+    async fn announced_when(when: Final) {
         let (s, store) = live_store().await;
         let kafka: KafkaSettings = serde_json::from_value(serde_json::json!({
             "brokers": std::env::var("TAYGA_IT_KAFKA").unwrap_or_else(|_| "localhost:19092".into()),
@@ -2276,20 +2314,23 @@ mod tests {
         let producer = tayga_kafka::producer(&kafka).unwrap();
         let metrics = LogminerMetrics::default();
         let ctx = test_ctx(&store, &consumer, &producer, &metrics, &alerts_topic);
+        let cfg = LogminerSettings::default();
         let mut st = state();
         st.clock.assigned = vec![0];
         st.clock.watermark = last_pass;
         st.tracker.ownership.touch("api", now);
-        let (_tx, mut stop) = watch::channel(false);
-        let done = on_rebalance(
-            &ctx,
-            &LogminerSettings::default(),
-            &[Change::Revoke(vec![0])],
-            &mut st,
-            &mut stop,
-        )
-        .await
-        .unwrap();
+        let done = match when {
+            Final::Revoke => {
+                let (_tx, mut stop) = watch::channel(false);
+                on_rebalance(&ctx, &cfg, &[Change::Revoke(vec![0])], &mut st, &mut stop)
+                    .await
+                    .unwrap()
+            }
+            Final::Shutdown => {
+                shut_down(&ctx, &cfg, &mut st, false).await.unwrap();
+                true
+            }
+        };
 
         let ids: Vec<String> = store
             .client()
@@ -2313,8 +2354,52 @@ mod tests {
         assert_eq!(metrics.write_failures.get(), 0);
         assert_eq!(
             st.clock.watermark, last_pass,
-            "the revoke pass does not move it"
+            "the final pass does not move it"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ClickHouse and Kafka: TAYGA_IT_CLICKHOUSE, TAYGA_IT_KAFKA"]
+    async fn a_template_first_seen_after_the_last_pass_is_announced_at_revoke() {
+        announced_when(Final::Revoke).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ClickHouse and Kafka: TAYGA_IT_CLICKHOUSE, TAYGA_IT_KAFKA"]
+    async fn a_template_first_seen_after_the_last_pass_is_announced_at_shutdown() {
+        announced_when(Final::Shutdown).await;
+    }
+
+    #[tokio::test]
+    async fn a_clean_shutdown_flushes_then_runs_a_bounded_new_template_pass() {
+        let store = unreachable_store();
+        let consumer = offline_consumer();
+        let metrics = LogminerMetrics::default();
+        let producer = offline_producer();
+        let ctx = test_ctx(&store, &consumer, &producer, &metrics, "tayga.alerts");
+        let cfg = LogminerSettings::default();
+        let mut st = state();
+        let (hit, _) = st.miner.mine(&log(1, "api", "payment failed"));
+        st.tracker.ownership.touch(&hit.service, now_ns());
+        st.pending.record(0, 4, 10, Instant::now());
+        st.pending.hits.push(hit);
+        let started = Instant::now();
+        // The store is down: the final flush fails (nothing committed), the pass fails, and
+        // shutdown still completes well inside its bound.
+        shut_down(&ctx, &cfg, &mut st, false).await.unwrap();
+        assert_eq!(metrics.write_failures.get(), 2, "the flush and the pass");
+        assert!(
+            st.seen.by_partition.is_empty(),
+            "nothing flushed, nothing committed"
+        );
+        assert!(started.elapsed() < SHUTDOWN_PASS_TIMEOUT);
+        // Shutdown interrupted a flush earlier: no second flush, the pass still runs.
+        let metrics = LogminerMetrics::default();
+        let ctx = test_ctx(&store, &consumer, &producer, &metrics, "tayga.alerts");
+        st.pending.record(0, 5, 10, Instant::now());
+        shut_down(&ctx, &cfg, &mut st, true).await.unwrap();
+        assert_eq!(metrics.write_failures.get(), 1, "the pass only");
+        assert!(!st.pending.is_empty());
     }
 
     /// Review M1/M2: `detect` holds the watermark while nothing is owned and a backlog may

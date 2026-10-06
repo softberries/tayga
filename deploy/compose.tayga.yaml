@@ -60,6 +60,8 @@ services:
     command: ["tayga-logminer"]
     environment: *tayga-env
     restart: unless-stopped
+    # Shutdown flushes pending work, then runs one new-template pass bounded at 20 s.
+    stop_grace_period: 40s
     depends_on:
       redpanda:
         condition: service_healthy
