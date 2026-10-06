@@ -148,7 +148,7 @@ pub fn intl_order(user_id: &str) -> Value {
             "state": "ON",
             "country": "Canada"
         },
-        "userCurrency": "USD",
+        "userCurrency": "CAD",
         "creditCard": {
             "creditCardNumber": "4763-1844-9699-8031",
             "creditCardExpirationMonth": 7,
@@ -192,25 +192,101 @@ pub async fn place_intl_order(http: &reqwest::Client, frontend: &str) -> anyhow:
     let user = format!("tayga-e2e-{trace_id}");
     let parent = traceparent(&trace_id, &span_id);
     let start = now_ns();
-    http.post(format!("{frontend}/api/cart"))
+    let cart = http
+        .post(format!("{frontend}/api/cart"))
         .header("traceparent", &parent)
         .json(&serde_json::json!({"item": {"productId": ORDER_PRODUCT, "quantity": 1}, "userId": user}))
         .send()
-        .await?
-        .error_for_status()?;
-    http.post(format!("{frontend}/api/checkout"))
+        .await?;
+    ensure_success(cart, "add to cart").await?;
+    let checkout = http
+        .post(format!("{frontend}/api/checkout"))
         .header("traceparent", &parent)
         .json(&intl_order(&user))
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+    ensure_success(checkout, "checkout").await?;
     let end = now_ns();
-    http.post(format!("{frontend}/otlp-http/v1/traces"))
+    let root = http
+        .post(format!("{frontend}/otlp-http/v1/traces"))
         .json(&order_root_span(&trace_id, &span_id, start, end))
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+    ensure_success(root, "root span export").await?;
     Ok(trace_id)
+}
+
+/// Fails with the status and (up to 500 characters of) the body unless `res` is a 2xx.
+async fn ensure_success(res: reqwest::Response, what: &str) -> anyhow::Result<()> {
+    let status = res.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let body = res.text().await.unwrap_or_default();
+    anyhow::bail!(
+        "{what}: HTTP {status}: {}",
+        body.chars().take(500).collect::<String>()
+    )
+}
+
+/// What the shipping scenario's order loop has done so far.
+#[derive(Debug, Default)]
+pub struct OrderLog {
+    /// Trace ids of the orders placed, oldest first.
+    pub placed: Vec<String>,
+    pub failures: u32,
+    pub last_error: Option<String>,
+}
+
+/// Whether `story` is a slow story blaming shipping that lasted at least `min_ns`.
+pub fn is_slow_shipping_story(story: &Value, min_ns: u64) -> bool {
+    story["kind"] == "slow"
+        && story["root_cause"]["service"] == "shipping"
+        && story["duration_ns"].as_u64().is_some_and(|d| d >= min_ns)
+}
+
+/// Polls the stories of the orders in `orders` (a story's id is its trace id) until one is a
+/// slow story blaming shipping lasting at least `min_ns`. Returns it and the wait.
+pub async fn wait_for_own_slow_story(
+    api: &Api,
+    orders: &Mutex<OrderLog>,
+    min_ns: u64,
+    timeout: Duration,
+) -> anyhow::Result<(Value, Duration)> {
+    let start = Instant::now();
+    let mut last_seen: Vec<String> = Vec::new();
+    let mut last_err: Option<String> = None;
+    while start.elapsed() < timeout {
+        let placed = orders.lock().expect("order log lock").placed.clone();
+        last_seen.clear();
+        for trace in &placed {
+            match api.story_of_trace(trace).await {
+                Ok(Some(story)) if is_slow_shipping_story(&story, min_ns) => {
+                    return Ok((story, start.elapsed()));
+                }
+                Ok(Some(story)) => last_seen.push(format!(
+                    "{trace}: {} | {} | {} ns",
+                    story["kind"], story["root_cause"]["service"], story["duration_ns"]
+                )),
+                Ok(None) => last_seen.push(format!("{trace}: no story")),
+                Err(e) => {
+                    eprintln!("[e2e] poll error (continuing): {e}");
+                    last_err = Some(e.to_string());
+                }
+            }
+        }
+        tokio::time::sleep(POLL_EVERY).await;
+    }
+    let o = orders.lock().expect("order log lock");
+    anyhow::bail!(
+        "none of the {} orders placed became a slow story blaming shipping lasting >= {min_ns} ns \
+         within {timeout:?}; {} orders failed (last error: {:?}); last poll error: {last_err:?}; \
+         stories of the orders:\n{}",
+        o.placed.len(),
+        o.failures,
+        o.last_error,
+        last_seen.join("\n")
+    )
 }
 
 pub struct Api {
@@ -249,12 +325,6 @@ impl Api {
             .unwrap_or_default())
     }
 
-    /// One group with its latest example stories (`{"group": {...}, "examples": [...]}`).
-    pub async fn group_detail(&self, fingerprint: &str, since: &str) -> anyhow::Result<Value> {
-        self.get(&format!("/api/v1/story-groups/{fingerprint}?since={since}"))
-            .await
-    }
-
     pub async fn log_alerts(&self, query: &str) -> anyhow::Result<Vec<Value>> {
         Ok(self
             .get(&format!("/api/v1/log-alerts?{query}"))
@@ -291,6 +361,19 @@ impl Api {
             .await?
             .error_for_status()?;
         Ok(res.json().await?)
+    }
+
+    /// The story of the trace `trace_id` (a story's id is its trace id); `None` while it has none.
+    pub async fn story_of_trace(&self, trace_id: &str) -> anyhow::Result<Option<Value>> {
+        let res = self
+            .http
+            .get(format!("{}/api/v1/stories/{trace_id}", self.base))
+            .send()
+            .await?;
+        if res.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        Ok(Some(res.error_for_status()?.json().await?))
     }
 
     pub async fn story(&self, id: &str) -> anyhow::Result<Value> {
@@ -411,74 +494,6 @@ pub async fn wait_for_group_sum(
     }
     anyhow::bail!(
         "matching story groups never reached {min_new} stories within {timeout:?} (last poll error: {last_err:?}); last groups seen:\n{}",
-        last_seen.join("\n")
-    )
-}
-
-/// The longest example story in a group detail (`GET /story-groups/{fp}`) newer than `after_ns`
-/// whose duration is at least `min_ns`, as `(story_id, duration_ns)`.
-pub fn slow_example_after(detail: &Value, after_ns: i64, min_ns: u64) -> Option<(String, u64)> {
-    detail["examples"]
-        .as_array()?
-        .iter()
-        .filter(|e| e["ts_ns"].as_i64().unwrap_or(0) > after_ns)
-        .filter_map(|e| {
-            Some((
-                e["story_id"].as_str()?.to_string(),
-                e["duration_ns"].as_u64()?,
-            ))
-        })
-        .filter(|(_, d)| *d >= min_ns)
-        .max_by_key(|(_, d)| *d)
-}
-
-/// Polls story groups matching `filter` until one satisfying `pred` has an example story after
-/// `after_ns` lasting at least `min_ns`. A group's sample story is only its latest, which can be
-/// a spontaneous short one, so the examples are checked instead. Returns the group, that story's
-/// id and the wait.
-pub async fn wait_for_slow_story(
-    api: &Api,
-    filter: &str,
-    after_ns: i64,
-    min_ns: u64,
-    timeout: Duration,
-    pred: impl Fn(&Value) -> bool,
-) -> anyhow::Result<(Value, String, Duration)> {
-    let start = Instant::now();
-    let mut last_seen: Vec<String> = Vec::new();
-    let mut last_err: Option<String> = None;
-    while start.elapsed() < timeout {
-        let since = since_flip(after_ns);
-        match api.groups(&format!("since={since}&{filter}")).await {
-            Ok(groups) => {
-                last_seen = describe_groups(&groups);
-                for g in groups
-                    .into_iter()
-                    .filter(|g| g["last_seen_ns"].as_i64().unwrap_or(0) > after_ns && pred(g))
-                {
-                    let fp = g["fingerprint"].as_str().unwrap_or_default().to_string();
-                    match api.group_detail(&fp, &since).await {
-                        Ok(d) => {
-                            if let Some((id, _)) = slow_example_after(&d, after_ns, min_ns) {
-                                return Ok((g, id, start.elapsed()));
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[e2e] poll error (continuing): {e}");
-                            last_err = Some(e.to_string());
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("[e2e] poll error (continuing): {e}");
-                last_err = Some(e.to_string());
-            }
-        }
-        tokio::time::sleep(POLL_EVERY).await;
-    }
-    anyhow::bail!(
-        "no story lasting >= {min_ns} ns in a matching group within {timeout:?} (last poll error: {last_err:?}); last groups seen:\n{}",
         last_seen.join("\n")
     )
 }
@@ -621,8 +636,9 @@ pub fn deliveries_of<'a>(received: &'a [Received], alert_id: &str) -> Vec<&'a Re
         .collect()
 }
 
-/// Fails fast when no checkout endpoint can flag a `delay_s` trace as slow: the assembler needs
-/// ≥ 50 baseline traces and a duration above max(1.5 × p99, p99 + 100 ms) over the last 60 min.
+/// Fails fast when the `user_checkout_single` endpoint, the one `order_root_span` gives the
+/// shipping scenario's orders, cannot flag a `delay_s` trace as slow: the assembler needs ≥ 50
+/// baseline traces and a duration above max(1.5 × p99, p99 + 100 ms) over the last 60 min.
 pub async fn ensure_checkout_baseline_detects(
     clickhouse: &str,
     delay_s: f64,
@@ -631,7 +647,7 @@ pub async fn ensure_checkout_baseline_detects(
         "SELECT endpoint_name, count() AS n, quantile(0.99)(duration_ns) / 1e9 AS p99, \
          n >= 50 AND {delay_s} > greatest(p99 * 1.5, p99 + 0.1) AS ok FROM tayga.trace_summaries FINAL \
          WHERE ts > now() - INTERVAL 60 MINUTE AND is_error = 0 AND endpoint_service = 'load-generator' \
-         AND endpoint_name LIKE 'user_checkout%' AND trace_id NOT IN (SELECT trace_id FROM \
+         AND endpoint_name = 'user_checkout_single' AND trace_id NOT IN (SELECT trace_id FROM \
          tayga.error_stories WHERE kind = 'slow' AND ts > now() - INTERVAL 70 MINUTE) \
          GROUP BY endpoint_name FORMAT TSVWithNames"
     );
@@ -814,6 +830,10 @@ mod tests {
     fn the_order_ships_outside_the_us_and_carries_the_user() {
         let o = intl_order("u-1");
         assert_eq!(o["userId"], "u-1");
+        assert_eq!(
+            o["userCurrency"], "CAD",
+            "the load generator's Canadian person pays in CAD"
+        );
         let country = o["address"]["country"].as_str().unwrap().to_uppercase();
         // `ship_order` in the demo's shipping service treats these as domestic.
         assert!(
@@ -850,6 +870,48 @@ mod tests {
             (Some("10"), Some("25"))
         );
         assert!(span.get("parentSpanId").is_none(), "the trace's root");
+    }
+
+    #[test]
+    fn only_a_long_enough_slow_story_blaming_shipping_counts() {
+        let story = |kind: &str, service: &str, d: u64| serde_json::json!({"kind": kind, "root_cause": {"service": service}, "duration_ns": d});
+        assert!(is_slow_shipping_story(
+            &story("slow", "shipping", 5_100_000_000),
+            4_500_000_000
+        ));
+        assert!(!is_slow_shipping_story(
+            &story("slow", "shipping", 600_000_000),
+            4_500_000_000
+        ));
+        assert!(!is_slow_shipping_story(
+            &story("slow", "checkout", 5_100_000_000),
+            4_500_000_000
+        ));
+        assert!(!is_slow_shipping_story(
+            &story("error", "shipping", 5_100_000_000),
+            4_500_000_000
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_failed_request_reports_its_status_and_body() {
+        let app =
+            Router::new().fallback(|| async { (StatusCode::BAD_REQUEST, "invalid currency") });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let res = reqwest::get(format!("http://{addr}/api/checkout"))
+            .await
+            .unwrap();
+        let err = ensure_success(res, "checkout")
+            .await
+            .unwrap_err()
+            .to_string();
+        server.abort();
+        assert!(
+            err.contains("checkout: HTTP 400") && err.contains("invalid currency"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -925,18 +987,5 @@ mod tests {
         let groups = [group("1", 2, 10, "x")];
         assert!(sum_matching_groups(&groups, 60, |_| true).is_none());
         assert!(sum_matching_groups(&[], 0, |_| true).is_none());
-    }
-
-    #[test]
-    fn slow_example_must_be_after_the_flip_and_long_enough() {
-        let detail = serde_json::json!({ "examples": [
-            { "story_id": "latest", "ts_ns": 300, "duration_ns": 579_000_000_u64 },
-            { "story_id": "slow", "ts_ns": 200, "duration_ns": 5_100_000_000_u64 },
-            { "story_id": "old", "ts_ns": 10, "duration_ns": 9_000_000_000_u64 },
-        ]});
-        let (id, d) = slow_example_after(&detail, 100, 4_500_000_000).unwrap();
-        assert_eq!((id.as_str(), d), ("slow", 5_100_000_000));
-        assert!(slow_example_after(&detail, 250, 4_500_000_000).is_none());
-        assert!(slow_example_after(&serde_json::json!({}), 0, 1).is_none());
     }
 }

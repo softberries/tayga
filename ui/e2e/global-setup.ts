@@ -3,6 +3,8 @@ import { request, type FullConfig } from '@playwright/test'
 /** Longest wait for a stack started moments ago (`make up`) to have the data the specs read. */
 const READY_TIMEOUT_MS = 5 * 60_000
 const POLL_MS = 5_000
+/** Per request, so one hung read cannot stretch the wait past READY_TIMEOUT_MS. */
+const REQUEST_TIMEOUT_MS = 10_000
 
 const nonEmpty = (b: unknown): boolean => Array.isArray(b) && b.length > 0
 
@@ -21,10 +23,18 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
   try {
     for (;;) {
       const pending: string[] = []
+      let unauthorized = 0
       for (const c of CHECKS) {
-        const res = await api.get(c.path).catch(() => null)
-        const ok = res !== null && res.ok() && c.ready(await res.json())
-        if (!ok) pending.push(c.path)
+        const res = await api.get(c.path, { timeout: REQUEST_TIMEOUT_MS }).catch(() => null)
+        if (res?.status() === 401) unauthorized += 1
+        // A non-JSON 200 (an HTML error page, say) counts as not ready.
+        const body: unknown = res !== null && res.ok() ? await res.json().catch(() => undefined) : undefined
+        if (body === undefined || !c.ready(body)) pending.push(c.path)
+      }
+      if (unauthorized === CHECKS.length) {
+        // Auth is on: these anonymous reads cannot see the data, so there is nothing to wait for.
+        console.log(`[global-setup] ${baseURL} requires sign-in (401); not waiting for data`)
+        return
       }
       if (pending.length === 0) {
         console.log(`[global-setup] ${baseURL} has data after ${Math.round((Date.now() - started) / 1000)} s`)
