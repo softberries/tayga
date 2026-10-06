@@ -69,12 +69,12 @@ impl IngestMetrics {
         );
         registry.register(
             "tayga_ingest_service_routed_items",
-            "Spans/logs without a valid trace id, routed by service",
+            "Spans/logs without a valid trace id, routed by service, in requests Kafka accepted",
             m.service_routed_items.clone(),
         );
         registry.register(
             "tayga_ingest_oversized_dropped",
-            "Single spans/logs dropped for exceeding the record budget, per topic",
+            "Single spans/logs dropped for exceeding the record budget, per topic, in accepted requests",
             m.oversized_dropped.clone(),
         );
         registry.register(
@@ -90,7 +90,7 @@ impl IngestMetrics {
         m
     }
 
-    /// Count the conversion outcome of one request.
+    /// Count the conversion outcome of one request, once Kafka accepted it.
     pub fn record_conversion(&self, converted: &Converted) {
         self.service_routed_items
             .inc_by(converted.routed_by_service as u64);

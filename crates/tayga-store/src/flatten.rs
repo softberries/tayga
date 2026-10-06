@@ -343,4 +343,29 @@ mod tests {
         assert_eq!(rows[0].body, "body1");
         assert_eq!(rows[1].body, "body2");
     }
+
+    /// Pins the `log_id` hash (xxh3 over trace id, span id, `ts` little endian and body): hits
+    /// are deduplicated by it, so a change would count every replayed log again.
+    #[test]
+    fn log_id_is_pinned() {
+        let req = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: res(),
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![LogRecord {
+                        time_unix_nano: 1_700_000_000_000_000_000,
+                        trace_id: vec![1; 16],
+                        span_id: vec![2; 8],
+                        body: Some(AnyValue {
+                            value: Some(Value::StringValue("golden".into())),
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        assert_eq!(log_rows(&req)[0].log_id, 14_242_169_506_540_122_053);
+    }
 }

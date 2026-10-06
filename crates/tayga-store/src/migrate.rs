@@ -45,6 +45,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
         11,
         include_str!("../migrations/0011_notifier_deliveries.sql"),
     ),
+    (
+        12,
+        include_str!("../migrations/0012_log_alert_publications.sql"),
+    ),
 ];
 
 pub fn split_statements(sql: &str) -> Vec<String> {

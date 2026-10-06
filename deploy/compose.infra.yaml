@@ -31,6 +31,9 @@ services:
         hard: 262144
     volumes:
       - clickhouse-data:/var/lib/clickhouse
+      # The read-only `grafana` user (deploy/clickhouse/users.d/grafana-readonly.xml). A directory
+      # mount: single-file mounts went stale on Docker Desktop.
+      - ${TAYGA_ROOT}/deploy/clickhouse/users.d:/etc/clickhouse-server/users.d:ro
     healthcheck:
       test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
       interval: 5s

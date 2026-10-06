@@ -78,6 +78,12 @@ describe('chart specs', () => {
     }
   })
 
+  it('charts the writer and logminer commit failures', () => {
+    const metrics = CHARTS.find((c) => c.id === 'commit-failures')?.series.map((x) => x.metric)
+    expect(metrics).toEqual(['tayga_writer_commit_failures_total', 'tayga_logminer_commit_failures_total'])
+    expect(CHARTS.find((c) => c.id === 'writer')?.unit).toBe('rows committed per second')
+  })
+
   it('give each chart at most six lines (the theme palette size)', () => {
     for (const c of CHARTS) expect(c.series.length).toBeLessThanOrEqual(6)
   })

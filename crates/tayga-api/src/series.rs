@@ -2,11 +2,14 @@
 //! `histogram_quantile`-equivalent quantiles. Timestamps in the output are bucket starts in
 //! Unix milliseconds.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tayga_store::metrics_store::MetricPointRow;
 
 /// A series' identity: its scrape job and its sorted label set.
 type SeriesKey = (String, Vec<(String, String)>);
+
+/// A counter increase: `(bucket, increase, elapsed_ms)`.
+type Increase = (i64, f64, i64);
 
 fn bucket_of(ts_ms: i64, step_ms: i64) -> i64 {
     ts_ms - ts_ms.rem_euclid(step_ms)
@@ -31,9 +34,23 @@ fn last_per_bucket(
     out
 }
 
+fn has_instance(key: &SeriesKey) -> bool {
+    key.1.iter().any(|(k, _)| k == "instance")
+}
+
+/// The series' identity without its `instance` label.
+fn without_instance((job, labels): &SeriesKey) -> SeriesKey {
+    let rest = labels
+        .iter()
+        .filter(|(k, _)| k != "instance")
+        .cloned()
+        .collect();
+    (job.clone(), rest)
+}
+
 /// Counter increases between consecutive buckets of one series, as
 /// `(bucket, increase, elapsed_ms)`. A drop is a reset: the new value is the increase.
-fn increases(buckets: &BTreeMap<i64, f64>) -> impl Iterator<Item = (i64, f64, i64)> + '_ {
+fn increases(buckets: &BTreeMap<i64, f64>) -> impl Iterator<Item = Increase> + '_ {
     buckets
         .iter()
         .zip(buckets.iter().skip(1))
@@ -43,23 +60,65 @@ fn increases(buckets: &BTreeMap<i64, f64>) -> impl Iterator<Item = (i64, f64, i6
         })
 }
 
+/// Every series' counter increases (see [`increases`]). An unlabelled series whose job and other
+/// labels also occur with an `instance` label is the same target before and after a spell of
+/// several replicas, possibly scraping a different replica each time: it pairs only adjacent
+/// buckets, so two replicas' counters are never subtracted from each other across the spell.
+fn series_increases(points: &[MetricPointRow], step_secs: u32) -> Vec<(SeriesKey, Vec<Increase>)> {
+    let step_ms = i64::from(step_secs.max(1)) * 1000;
+    let series = last_per_bucket(points, step_secs);
+    let replicated: BTreeSet<SeriesKey> = series
+        .keys()
+        .filter(|k| has_instance(k))
+        .map(without_instance)
+        .collect();
+    series
+        .iter()
+        .map(|(key, buckets)| {
+            let adjacent_only = !has_instance(key) && replicated.contains(key);
+            let incs = increases(buckets)
+                .filter(|(_, _, elapsed_ms)| !adjacent_only || *elapsed_ms <= step_ms)
+                .collect();
+            (key.clone(), incs)
+        })
+        .collect()
+}
+
 /// Per-second counter rate per step, summed over series. Each series contributes its increase
 /// since its previous sampled bucket divided by the time between them, which is the step
 /// when there is no gap.
 pub fn rate(points: &[MetricPointRow], step_secs: u32) -> Vec<(i64, f64)> {
     let mut sum: BTreeMap<i64, f64> = BTreeMap::new();
-    for buckets in last_per_bucket(points, step_secs).values() {
-        for (t, inc, elapsed_ms) in increases(buckets) {
+    for (_, incs) in series_increases(points, step_secs) {
+        for (t, inc, elapsed_ms) in incs {
             *sum.entry(t).or_default() += inc * 1000.0 / elapsed_ms as f64;
         }
     }
     sum.into_iter().collect()
 }
 
-/// Last value per step, summed over series.
-pub fn gauge(points: &[MetricPointRow], step_secs: u32) -> Vec<(i64, f64)> {
+/// Whether a gauge counts once over replicas, with its largest replica's value: a lag is the
+/// slowest replica's, a template count is held by every replica, and `up` is 1 while any
+/// replica answers. Every other gauge is summed over replicas.
+fn max_over_instances(metric: &str) -> bool {
+    metric == "up" || metric.ends_with("_data_lag_seconds") || metric.ends_with("_templates")
+}
+
+/// Last value per step, summed over series. For a [`max_over_instances`] metric, series that
+/// differ only in their `instance` label (one scrape target with several replicas, see
+/// `recorder::endpoints`) first count once, with the largest value.
+pub fn gauge(points: &[MetricPointRow], metric: &str, step_secs: u32) -> Vec<(i64, f64)> {
+    let merge = max_over_instances(metric);
+    let mut by_set: BTreeMap<SeriesKey, BTreeMap<i64, f64>> = BTreeMap::new();
+    for (key, buckets) in last_per_bucket(points, step_secs) {
+        let key = if merge { without_instance(&key) } else { key };
+        let slot = by_set.entry(key).or_default();
+        for (t, v) in buckets {
+            slot.entry(t).and_modify(|m| *m = m.max(v)).or_insert(v);
+        }
+    }
     let mut sum: BTreeMap<i64, f64> = BTreeMap::new();
-    for buckets in last_per_bucket(points, step_secs).values() {
+    for buckets in by_set.values() {
         for (t, v) in buckets {
             *sum.entry(*t).or_default() += v;
         }
@@ -85,11 +144,11 @@ pub fn quantile(
 ) -> Vec<(i64, Option<f64>)> {
     // step -> le -> summed increase.
     let mut steps: BTreeMap<i64, Vec<(f64, f64)>> = BTreeMap::new();
-    for ((_, labels), buckets) in last_per_bucket(bucket_points, step_secs) {
+    for ((_, labels), incs) in series_increases(bucket_points, step_secs) {
         let Some(le) = parse_le(&labels) else {
             continue;
         };
-        for (t, inc, _) in increases(&buckets) {
+        for (t, inc, _) in incs {
             steps.entry(t).or_default().push((le, inc));
         }
     }
@@ -237,7 +296,83 @@ mod tests {
             p(14, &[("g", "a")], f64::NAN),
         ];
         // Bucket 0: a's last is 7, b's is 1 -> 8. Bucket 10: a's last finite value is 4.
-        assert_eq!(gauge(&pts, 10), vec![(0, 8.0), (10_000, 4.0)]);
+        assert_eq!(
+            gauge(&pts, "tayga_writer_buffered", 10),
+            vec![(0, 8.0), (10_000, 4.0)]
+        );
+    }
+
+    #[test]
+    fn gauge_takes_the_largest_replica_and_sums_other_label_sets() {
+        let pts = vec![
+            p(0, &[("instance", "10.0.0.7:9100")], 4.0),
+            p(0, &[("instance", "10.0.0.9:9100")], 9.0),
+            p(0, &[("g", "a"), ("instance", "10.0.0.7:9100")], 1.0),
+            p(0, &[("g", "a"), ("instance", "10.0.0.9:9100")], 2.0),
+            p(10, &[], 5.0),
+        ];
+        // Bucket 0: max(4, 9) + max(1, 2). Bucket 10: one unlabelled series (one replica).
+        assert_eq!(
+            gauge(&pts, "tayga_logminer_data_lag_seconds", 10),
+            vec![(0, 11.0), (10_000, 5.0)]
+        );
+        // Any other gauge is summed over replicas: 4 + 9 + 1 + 2.
+        assert_eq!(
+            gauge(&pts, "tayga_logminer_inflight", 10),
+            vec![(0, 16.0), (10_000, 5.0)]
+        );
+    }
+
+    #[test]
+    fn only_lag_template_and_up_gauges_take_the_largest_replica() {
+        for m in [
+            "up",
+            "tayga_logminer_data_lag_seconds",
+            "tayga_logminer_templates",
+        ] {
+            assert!(max_over_instances(m), "{m}");
+        }
+        for m in [
+            "tayga_logminer_inflight",
+            "tayga_logminer_templates_total",
+            "upstream",
+            "tayga_data_lag_seconds_bucket",
+        ] {
+            assert!(!max_over_instances(m), "{m}");
+        }
+    }
+
+    const I7: (&str, &str) = ("instance", "10.0.0.7:9100");
+    const I9: (&str, &str) = ("instance", "10.0.0.9:9100");
+
+    #[test]
+    fn an_unlabelled_series_does_not_pair_across_a_labelled_spell() {
+        // One replica (unlabelled, A = 1000), two (labelled), one again (unlabelled, B = 10:
+        // another replica's counter). True rates: 0 at 10 s, 0.5 at 30 s, 0 at 40 s. Pairing
+        // A with B would add a "reset" of 10 / 30 s at 40 s.
+        let pts = vec![
+            p(0, &[], 1000.0),
+            p(10, &[], 1000.0),
+            p(20, &[I7], 1000.0),
+            p(30, &[I7], 1000.0),
+            p(20, &[I9], 5.0),
+            p(30, &[I9], 10.0),
+            p(40, &[], 10.0),
+        ];
+        assert_eq!(rate(&pts, 10), vec![(10_000, 0.0), (30_000, 0.5)]);
+    }
+
+    #[test]
+    fn an_unlabelled_histogram_does_not_pair_across_a_labelled_spell() {
+        let mut pts = Vec::new();
+        for (ts, inst, c) in [(0, None, 1000.0), (20, Some(I7), 5.0), (40, None, 10.0)] {
+            for le in ["0.1", "+Inf"] {
+                let mut labels = vec![("le", le)];
+                labels.extend(inst);
+                pts.push(p(ts, &labels, c));
+            }
+        }
+        assert!(quantile(&pts, 0.5, 10).is_empty());
     }
 
     fn hist(ts_s: i64, counts: &[(&str, f64)]) -> Vec<MetricPointRow> {

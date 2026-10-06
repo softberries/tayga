@@ -66,6 +66,11 @@ pub enum ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if let ApiError::Unavailable(e) = &self
+            && crate::timeout::is_clickhouse_timeout(e)
+        {
+            return crate::timeout::storage_timeout();
+        }
         let (status, message) = match self {
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
@@ -590,6 +595,18 @@ mod tests {
         let (status, json) = get(repo, &format!("/api/v1/stories/{id}")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["root_cause"]["service"], "payment");
+    }
+
+    #[test]
+    fn a_clickhouse_timeout_is_the_json_504_other_failures_stay_503() {
+        let timeout = anyhow::Error::new(clickhouse::error::Error::BadResponse(
+            "Code: 159. DB::Exception: Timeout exceeded: elapsed 15.0 seconds".into(),
+        ))
+        .context("query failed");
+        let res = ApiError::Unavailable(timeout).into_response();
+        assert_eq!(res.status(), StatusCode::GATEWAY_TIMEOUT);
+        let other = ApiError::Unavailable(anyhow::anyhow!("connection refused")).into_response();
+        assert_eq!(other.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

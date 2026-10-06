@@ -2,6 +2,7 @@
 //! A scenario passes only when its group has new stories after the flip (see `wait_for_group`).
 
 use serde_json::Value;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tayga_e2e::*;
 
@@ -10,15 +11,14 @@ fn s(v: &Value, key: &str) -> String {
 }
 
 macro_rules! scenario {
-    ($name:ident, $flag:literal, $variant:literal, $q:literal, $min:literal, $label:literal, $pred:expr) => {
+    ($name:ident, $flag:literal, $variant:literal, $q:literal, $min:literal, $timeout:expr, $label:literal, $pred:expr) => {
         #[tokio::test]
         #[ignore = "end-to-end: requires `make up`"]
         async fn $name() -> anyhow::Result<()> {
             let api = Api::new(API);
             let flipped = now_ns();
             let _flag = FlagGuard::set($flag, $variant)?;
-            let (_g, waited) =
-                wait_for_group(&api, $q, flipped, $min, SCENARIO_TIMEOUT, $pred).await?;
+            let (_g, waited) = wait_for_group(&api, $q, flipped, $min, $timeout, $pred).await?;
             report($label, waited);
             Ok(())
         }
@@ -84,24 +84,37 @@ scenario!(
     "on",
     "kind=error&service=product-catalog",
     3,
+    SCENARIO_TIMEOUT,
     "productCatalogFailure",
     |g| s(g, "summary").contains("Product Catalog Fail Feature Flag Enabled")
 );
 
-scenario!(
-    ad_failure_blames_ad,
-    "adFailure",
-    "on",
-    "kind=error&service=ad",
-    3,
-    "adFailure",
-    |g| s(g, "summary").contains("GetAds failed")
-);
+/// The stories split across one group per calling endpoint (`frontend-web GET /api/data`,
+/// `load-generator user_get_ads`, ...), so the count is summed over the GetAds groups.
+#[tokio::test]
+#[ignore = "end-to-end: requires `make up`"]
+async fn ad_failure_blames_ad() -> anyhow::Result<()> {
+    let api = Api::new(API);
+    let flipped = now_ns();
+    let _flag = FlagGuard::set("adFailure", "on")?;
+    let (_g, waited) = wait_for_group_sum(
+        &api,
+        "kind=error&service=ad",
+        flipped,
+        3,
+        AD_FAILURE_TIMEOUT,
+        |g| s(g, "summary").contains("GetAds failed"),
+    )
+    .await?;
+    report("adFailure", waited);
+    Ok(())
+}
 
-/// The flag only delays international orders, which are rare in the load generator's traffic,
-/// so this waits up to `SHIPPING_TIMEOUT` (600 s) rather than `SCENARIO_TIMEOUT`. The group's
-/// sample story is its latest, which may be a spontaneous sub-second one, so the wait runs until
-/// an example story after the flip carries the injected 5 s delay.
+/// Places its own international orders (one every `ORDER_EVERY`) instead of waiting for the
+/// load generator's rare ones, and passes only when one of those traces becomes a slow story
+/// blaming shipping that carries the injected 5 s delay. The baseline pre-check still fails fast
+/// when `user_checkout_single`, the orders' endpoint, cannot flag a 5 s trace. The story's group
+/// is only printed, as a diagnostic.
 #[tokio::test]
 #[ignore = "end-to-end: requires `make up`"]
 async fn shipping_slowdown_produces_slow_story_blaming_shipping() -> anyhow::Result<()> {
@@ -109,20 +122,56 @@ async fn shipping_slowdown_produces_slow_story_blaming_shipping() -> anyhow::Res
     let api = Api::new(API);
     let flipped = now_ns();
     let _flag = FlagGuard::set("intlShippingSlowdown", "5sec")?;
-    let (g, story_id, waited) = wait_for_slow_story(
-        &api,
-        "kind=slow&service=shipping",
-        flipped,
-        4_500_000_000,
-        SHIPPING_TIMEOUT,
-        |g| s(g, "rc_service") == "shipping",
-    )
-    .await?;
+    let log = Arc::new(Mutex::new(OrderLog::default()));
+    // Its own international orders; the 5 s delay needs a client timeout above it.
+    let orders = tokio::spawn({
+        let log = log.clone();
+        async move {
+            let http = reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .expect("client builds");
+            loop {
+                match place_intl_order(&http, FRONTEND).await {
+                    Ok(trace) => {
+                        println!("[e2e] intlShippingSlowdown: order placed, trace {trace}");
+                        log.lock().expect("order log lock").placed.push(trace);
+                    }
+                    Err(e) => {
+                        eprintln!("[e2e] order failed (continuing): {e:#}");
+                        let mut l = log.lock().expect("order log lock");
+                        l.failures += 1;
+                        l.last_error = Some(format!("{e:#}"));
+                    }
+                }
+                tokio::time::sleep(ORDER_EVERY).await;
+            }
+        }
+    });
+    let found = wait_for_own_slow_story(&api, &log, 4_500_000_000, SHIPPING_TIMEOUT).await;
+    orders.abort();
+    let (story, waited) = found?;
     report("intlShippingSlowdown", waited);
+    let fingerprint = s(&story, "fingerprint");
     println!(
-        "[e2e] intlShippingSlowdown: delayed story {story_id} in group {}",
-        s(&g, "fingerprint")
+        "[e2e] intlShippingSlowdown: own order {} is a {:.1} s slow story blaming shipping, group {fingerprint}",
+        s(&story, "trace_id"),
+        story["duration_ns"].as_u64().unwrap_or(0) as f64 / 1e9
     );
+    // Diagnostic only: whether that group is listed under the shipping filter since the flip.
+    match api
+        .groups(&format!(
+            "since={}&kind=slow&service=shipping",
+            since_flip(flipped)
+        ))
+        .await
+    {
+        Ok(groups) => println!(
+            "[e2e] intlShippingSlowdown: group listed under kind=slow&service=shipping: {}",
+            groups.iter().any(|g| s(g, "fingerprint") == fingerprint)
+        ),
+        Err(e) => eprintln!("[e2e] group listing failed (diagnostic only): {e:#}"),
+    }
     Ok(())
 }
 

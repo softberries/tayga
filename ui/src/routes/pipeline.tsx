@@ -34,7 +34,7 @@ export function PipelinePage() {
   const lag = useQuery({ ...api.pipelineLag(), refetchInterval: liveInterval, meta: { outage: false } })
 
   const loaded = up.every((r) => r.data !== undefined)
-  // Charts wait for the job statuses, so an empty history shows one notice, not nine.
+  // Charts wait for the job statuses, so an empty history shows one notice, not ten.
   const upPending = up.some((r) => r.isPending)
   const upError = up.find((r) => r.isError)
   // Nothing recorded yet (the recorder writes its first row on its first tick, 15 s apart).

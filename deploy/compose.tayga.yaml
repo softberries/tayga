@@ -64,7 +64,7 @@ services:
     command: ["tayga-logminer"]
     environment: *tayga-env
     restart: unless-stopped
-    # Shutdown flushes pending work, then runs one new-template pass bounded at 20 s.
+    # Shutdown flushes pending work (bounded at 15 s), then runs one new-template pass bounded at 20 s.
     stop_grace_period: 40s
     deploy:
       replicas: ${LOGMINER_REPLICAS:-1}
@@ -128,6 +128,13 @@ services:
     ports:
       - "127.0.0.1:8090:8090"
     restart: unless-stopped
+    healthcheck:
+      # The image has no curl: bash sends GET /healthz (open with auth on) and needs a 200.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8090 && printf 'GET /healthz HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && head -n1 <&3 | grep -q ' 200 '"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
     depends_on:
       redpanda:
         condition: service_healthy

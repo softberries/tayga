@@ -53,3 +53,36 @@ impl Sink for KafkaSink {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rdkafka::ClientConfig;
+    use tayga_model::envelope::Kind;
+
+    #[tokio::test]
+    async fn a_full_local_queue_is_queue_full_backpressure() {
+        let producer: FutureProducer = ClientConfig::new()
+            .set("bootstrap.servers", "127.0.0.1:1")
+            .set("queue.buffering.max.messages", "1")
+            .create()
+            .unwrap();
+        // Fill the one-message queue; the broker is unreachable, so the message stays queued.
+        let _queued = producer
+            .send_result(FutureRecord::<(), [u8]>::to("t").payload(&b"x"[..]))
+            .map_err(|(e, _)| e)
+            .unwrap();
+        let sink = KafkaSink::new(producer, "t".into(), "l".into());
+        let err = sink
+            .publish(vec![OutRecord {
+                topic: Topic::Signals,
+                key: vec![1; 16],
+                key_kind: "trace",
+                kind: Kind::Traces,
+                payload: vec![1, 2, 3],
+            }])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SinkError::QueueFull), "{err}");
+    }
+}

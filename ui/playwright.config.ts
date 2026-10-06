@@ -8,6 +8,9 @@ import type { Theme } from './e2e/fixtures'
 // Projects: `perf` measures the budgets alone (the others wait for it, so nothing else loads the
 // machine meanwhile); `dark` and `light` run every spec with the theme stored in localStorage
 // before load; `reduced-motion` and `light-reduced-motion` run them again with prefers-reduced-motion emulated.
+//
+// Global setup waits up to 5 minutes for the stack's data (e2e/global-setup.ts), so a run straight
+// after `make up` does not fail on empty pages.
 const baseURL = process.env.TAYGA_UI_URL ?? 'http://localhost:8090'
 
 const desktop = (theme: Theme, reducedMotion: 'no-preference' | 'reduce' = 'no-preference') => ({
@@ -19,6 +22,7 @@ const desktop = (theme: Theme, reducedMotion: 'no-preference' | 'reduce' = 'no-p
 
 export default defineConfig({
   testDir: './e2e',
+  globalSetup: './e2e/global-setup.ts',
   fullyParallel: true,
   retries: 0,
   timeout: 45_000,

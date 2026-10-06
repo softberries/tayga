@@ -25,6 +25,11 @@ pub struct KafkaSettings {
     /// `MAX_MESSAGE_BYTES` to leave room for the key, headers and record overhead.
     #[serde(default = "default_max_record_bytes")]
     pub max_record_bytes: usize,
+    /// `retention.ms` set when a topic is created (24 h by default; `-1` is unlimited). A writer
+    /// or assembler outage longer than this loses the records it has not consumed yet. Applies
+    /// only when a topic is created: an existing topic keeps its own retention.
+    #[serde(default = "default_retention_ms")]
+    pub retention_ms: i64,
 }
 
 /// Producer `message.max.bytes` and topic `max.message.bytes` (Redpanda's default batch limit).
@@ -46,6 +51,10 @@ fn default_max_record_bytes() -> usize {
     900_000
 }
 
+fn default_retention_ms() -> i64 {
+    86_400_000
+}
+
 impl KafkaSettings {
     /// Rejects settings that would let ingest produce records the broker refuses.
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -64,6 +73,11 @@ impl KafkaSettings {
             self.partitions > 0,
             "kafka.partitions must be positive (got {})",
             self.partitions
+        );
+        anyhow::ensure!(
+            self.retention_ms == -1 || self.retention_ms > 0,
+            "kafka.retention_ms must be -1 (unlimited) or positive (got {})",
+            self.retention_ms
         );
         Ok(())
     }
@@ -148,12 +162,10 @@ async fn create_topics(s: &KafkaSettings, names: &[&str]) -> anyhow::Result<()> 
         .set("bootstrap.servers", &s.brokers)
         .create()?;
     let max_message_bytes = MAX_MESSAGE_BYTES.to_string();
+    let retention_ms = s.retention_ms.to_string();
     let topics: Vec<NewTopic> = names
         .iter()
-        .map(|name| {
-            NewTopic::new(name, s.partitions, TopicReplication::Fixed(1))
-                .set("max.message.bytes", &max_message_bytes)
-        })
+        .map(|name| new_topic(name, s.partitions, &max_message_bytes, &retention_ms))
         .collect();
     for result in admin.create_topics(&topics, &AdminOptions::new()).await? {
         match result {
@@ -162,6 +174,18 @@ async fn create_topics(s: &KafkaSettings, names: &[&str]) -> anyhow::Result<()> 
         }
     }
     Ok(())
+}
+
+/// Config applies only on creation; `create_topics` never alters an existing topic.
+fn new_topic<'a>(
+    name: &'a str,
+    partitions: i32,
+    max_message_bytes: &'a str,
+    retention_ms: &'a str,
+) -> NewTopic<'a> {
+    NewTopic::new(name, partitions, TopicReplication::Fixed(1))
+        .set("max.message.bytes", max_message_bytes)
+        .set("retention.ms", retention_ms)
 }
 
 /// `key_kind` is `RoutingKey::kind_str()`: "trace" or "service".
@@ -193,6 +217,7 @@ mod tests {
         assert_eq!(s.logs_topic, "tayga.logs");
         assert_eq!(s.partitions, 12);
         assert_eq!(s.max_record_bytes, 900_000);
+        assert_eq!(s.retention_ms, 86_400_000);
         assert!(s.max_record_bytes < MAX_MESSAGE_BYTES);
     }
 
@@ -233,7 +258,15 @@ mod tests {
             logs_topic: "l".into(),
             partitions: 3,
             max_record_bytes,
+            retention_ms: 1000,
         }
+    }
+
+    #[test]
+    fn new_topic_sets_retention_and_max_message_bytes() {
+        let t = new_topic("t", 3, "1048576", "86400000");
+        assert!(t.config.contains(&("retention.ms", "86400000")));
+        assert!(t.config.contains(&("max.message.bytes", "1048576")));
     }
 
     #[test]
@@ -261,5 +294,19 @@ mod tests {
         let mut s = settings(1000);
         s.logs_topic = s.topic.clone();
         assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn validate_checks_retention() {
+        for ok in [-1, 1, default_retention_ms()] {
+            let mut s = settings(1000);
+            s.retention_ms = ok;
+            s.validate().unwrap();
+        }
+        for bad in [0, -2] {
+            let mut s = settings(1000);
+            s.retention_ms = bad;
+            assert!(s.validate().is_err(), "{bad}");
+        }
     }
 }

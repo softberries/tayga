@@ -31,11 +31,28 @@ impl Default for WriterMetrics {
 }
 
 impl WriterMetrics {
+    /// Counts one stored batch by its commit: a committed batch adds its rows and one batch; a
+    /// refused commit counts only as a commit failure, because its records are read again and
+    /// their rows counted on that flush.
+    pub fn record_flush(&self, spans: usize, logs: usize, committed: bool) {
+        if !committed {
+            self.commit_failures.inc();
+            return;
+        }
+        self.batches_committed.inc();
+        self.rows_inserted
+            .get_or_create(&KindLabel::new("spans"))
+            .inc_by(spans as u64);
+        self.rows_inserted
+            .get_or_create(&KindLabel::new("logs"))
+            .inc_by(logs as u64);
+    }
+
     pub fn register(registry: &mut Registry) -> Self {
         let m = Self::default();
         registry.register(
             "tayga_writer_rows_inserted",
-            "Rows inserted into ClickHouse",
+            "Rows stored and committed (a refused commit's rows are counted when they are read again)",
             m.rows_inserted.clone(),
         );
         registry.register(
@@ -81,5 +98,31 @@ mod tests {
         assert!(out.contains("# TYPE tayga_writer_batch_seconds histogram"));
         assert!(out.contains("tayga_writer_batch_seconds_bucket{le=\"0.04\"} 1"));
         assert!(out.contains("tayga_writer_batch_seconds_count 1"));
+    }
+
+    #[test]
+    fn rows_count_only_for_a_committed_batch() {
+        let m = WriterMetrics::default();
+        let rows = |kind: &str| m.rows_inserted.get_or_create(&KindLabel::new(kind)).get();
+        m.record_flush(3, 2, false);
+        assert_eq!(
+            (
+                rows("spans"),
+                rows("logs"),
+                m.commit_failures.get(),
+                m.batches_committed.get()
+            ),
+            (0, 0, 1, 0)
+        );
+        m.record_flush(3, 2, true);
+        assert_eq!(
+            (
+                rows("spans"),
+                rows("logs"),
+                m.commit_failures.get(),
+                m.batches_committed.get()
+            ),
+            (3, 2, 1, 1)
+        );
     }
 }

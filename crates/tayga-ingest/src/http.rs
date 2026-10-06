@@ -168,9 +168,8 @@ where
             return (StatusCode::BAD_REQUEST, e).into_response();
         }
     };
-    let converted = to_records(req, now_unix_nano(), ingest.max_record_bytes);
-    ingest.metrics.record_conversion(&converted);
-    let records = converted.records;
+    let mut converted = to_records(req, now_unix_nano(), ingest.max_record_bytes);
+    let records = std::mem::take(&mut converted.records);
     let count = records.len();
     if count > 0 {
         let published = Published::of(&records);
@@ -181,6 +180,8 @@ where
         }
         ingest.metrics.record_published(kind, &published);
     }
+    // Counted once the request is accepted (or had nothing left to publish).
+    ingest.metrics.record_conversion(&converted);
     encode(fmt, &response)
 }
 
@@ -382,5 +383,69 @@ mod tests {
         let body = prost::Message::encode_to_vec(&two_trace_request());
         let status = post_to(sink, "/v1/traces", "application/x-protobuf", false, body).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn http_conversion_counters_count_only_accepted_requests() {
+        let mut req = two_trace_request();
+        req.resource_spans[0].scope_spans[0].spans[0].trace_id = vec![];
+        let body = prost::Message::encode_to_vec(&req);
+        let metrics = IngestMetrics::default();
+        let post = |sink: Arc<FakeSink>| {
+            router(
+                sink,
+                TEST_MAX_RECORD_BYTES,
+                metrics.clone(),
+                Arc::new(Registry::default()),
+            )
+            .oneshot(
+                Request::post("/v1/traces")
+                    .header(header::CONTENT_TYPE, "application/x-protobuf")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+        };
+        let failing = Arc::new(FakeSink {
+            fail: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            post(failing).await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(metrics.service_routed_items.get(), 0);
+        assert_eq!(
+            post(Arc::new(FakeSink::default())).await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(metrics.service_routed_items.get(), 1);
+    }
+
+    /// OTLP/JSON as the OTLP spec writes it (camelCase, hex ids, nanos and `intValue` as
+    /// strings, enums as numbers), not as this crate's own serde writes it.
+    const OTLP_JSON_TRACE: &str = r#"{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"checkout"}}]},"scopeSpans":[{"scope":{"name":"manual"},"spans":[{"traceId":"5b8efff798038103d269b633813fc60c","spanId":"eee19b7ec3c1b174","name":"PlaceOrder","kind":2,"startTimeUnixNano":"1544712660000000000","endTimeUnixNano":"1544712661000000000","attributes":[{"key":"http.status_code","value":{"intValue":"500"}}],"status":{"code":2}}]}]}]}"#;
+
+    #[tokio::test]
+    async fn http_accepts_canonical_otlp_json() {
+        let sink = Arc::new(FakeSink::default());
+        assert_eq!(
+            post_to(
+                sink.clone(),
+                "/v1/traces",
+                "application/json",
+                false,
+                OTLP_JSON_TRACE.as_bytes().to_vec()
+            )
+            .await,
+            StatusCode::OK
+        );
+        let published = sink.published.lock().unwrap();
+        assert_eq!(published.len(), 1);
+        let key: String = published[0]
+            .key
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(key, "5b8efff798038103d269b633813fc60c");
     }
 }

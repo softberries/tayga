@@ -213,6 +213,21 @@ impl ChRepo {
         }
     }
 
+    /// Sends `max_execution_time` = `secs` with every query, so ClickHouse stops a read that runs
+    /// longer (error 159; the route answers 504). `0` sends nothing (no limit).
+    pub fn with_max_execution_time(self, secs: u64) -> Self {
+        if secs == 0 {
+            return self;
+        }
+        let value = secs.to_string();
+        Self {
+            client: self
+                .client
+                .with_setting("max_execution_time", value.as_str()),
+            store: self.store.with_setting("max_execution_time", &value),
+        }
+    }
+
     /// Stories per bucket and kind under a group filter.
     async fn kind_buckets(&self, f: &GroupFilter) -> anyhow::Result<StoriesSeries> {
         let kind = f.kind.as_deref().unwrap_or_default();
@@ -399,15 +414,19 @@ impl Repo for ChRepo {
         let Some(group) = self.groups(&f, fingerprint).await?.into_iter().next() else {
             return Ok(None);
         };
-        let examples: Vec<StorySummaryRow> = self
-            .client
-            .query(
-                "SELECT story_id, toUnixTimestamp64Nano(ts) AS ts_ns, trace_id, duration_ns, summary \
-                 FROM error_stories FINAL WHERE fingerprint = toUInt64(?) ORDER BY ts DESC LIMIT 20",
-            )
-            .bind(fingerprint)
-            .fetch_all()
-            .await?;
+        // The group's newest stories inside the window (row-list rule: up to `upper`).
+        let examples: Vec<StorySummaryRow> = bind_rows(
+            self.client
+                .query(
+                    "SELECT story_id, toUnixTimestamp64Nano(ts) AS ts_ns, trace_id, duration_ns, summary \
+                     FROM error_stories FINAL WHERE fingerprint = toUInt64(?) \
+                     AND ts >= toDateTime(?) AND ts < toDateTime(?) ORDER BY ts DESC LIMIT 20",
+                )
+                .bind(fingerprint),
+            window,
+        )
+        .fetch_all()
+        .await?;
         Ok(Some(GroupDetail { group, examples }))
     }
 
@@ -624,17 +643,37 @@ impl Repo for ChRepo {
         }))
     }
 
+    /// A trace shows no templates until its logs are stored (writer lag; transient).
     async fn trace_log_templates(&self, trace_id: &str) -> anyhow::Result<Vec<TraceLogTemplate>> {
+        // The trace's log time range: `logs` has a bloom index on `trace_id`, and a hit carries
+        // its log's own `ts`, so bounding the hits by it lets ClickHouse skip other days' parts
+        // (8.8M rows read unbounded vs 8.1k bounded, live 2026-10-06). No stored log, no links.
+        let range: Vec<(i64, i64)> = self
+            .client
+            .query(
+                "SELECT toUnixTimestamp64Nano(min(ts)), toUnixTimestamp64Nano(max(ts)) FROM logs \
+                 WHERE trace_id = ? HAVING count() > 0",
+            )
+            .bind(trace_id)
+            .fetch_all()
+            .await?;
+        let Some(&(first_ns, last_ns)) = range.first() else {
+            return Ok(Vec::new());
+        };
         let rows: Vec<TraceTemplateRow> = self
             .client
             .query(
                 "SELECT toString(h.log_id) AS log_id, toString(h.template_id) AS template_id, t.template AS template, \
                  toUnixTimestamp64Nano(h.ts) AS ts_ns \
-                 FROM (SELECT log_id, template_id, ts FROM log_template_hits WHERE trace_id = ? LIMIT 1 BY log_id) AS h \
+                 FROM (SELECT log_id, template_id, ts FROM log_template_hits WHERE trace_id = ? \
+                 AND ts >= fromUnixTimestamp64Nano(?) AND ts <= fromUnixTimestamp64Nano(?) \
+                 LIMIT 1 BY log_id) AS h \
                  INNER JOIN (SELECT template_id, template FROM log_templates FINAL) AS t ON t.template_id = h.template_id \
                  ORDER BY h.ts, h.log_id LIMIT 1000",
             )
             .bind(trace_id)
+            .bind(first_ns)
+            .bind(last_ns)
             .fetch_all()
             .await?;
         let Some(trace_ns) = rows.iter().map(|r| r.ts_ns).min() else {
@@ -739,12 +778,15 @@ impl Repo for ChRepo {
         let spans: Vec<CountBucketRow> = bind_capped(bind_bucket(q, step), window)
             .fetch_all()
             .await?;
-        // The lag recorded last before the window's end, if recent enough then.
+        // Per replica (`instance`; one series without it), the lag recorded last before the
+        // window's end within the freshness bound; the slowest of those.
         let lag: Vec<f64> = self
             .client
             .query(
-                "SELECT value FROM metric_samples WHERE metric = ? AND isFinite(value) \
-                 AND ts > toDateTime(?) - toIntervalSecond(?) AND ts < toDateTime(?) ORDER BY ts DESC LIMIT 1",
+                "SELECT v FROM (SELECT argMax(value, ts) AS v FROM metric_samples \
+                 WHERE metric = ? AND isFinite(value) \
+                 AND ts > toDateTime(?) - toIntervalSecond(?) AND ts < toDateTime(?) \
+                 GROUP BY labels['instance']) ORDER BY v DESC LIMIT 1",
             )
             .bind(DATA_LAG_METRIC)
             .bind(window.end)
@@ -926,6 +968,22 @@ impl Repo for ChRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn max_execution_time_is_sent_with_every_query_unless_zero() {
+        let s = ClickHouseSettings {
+            url: "http://127.0.0.1:1".into(),
+            database: "tayga".into(),
+        };
+        let repo = ChRepo::new(&s).with_max_execution_time(15);
+        assert_eq!(repo.client.get_setting("max_execution_time"), Some("15"));
+        assert_eq!(
+            repo.store.client().get_setting("max_execution_time"),
+            Some("15")
+        );
+        let off = ChRepo::new(&s).with_max_execution_time(0);
+        assert_eq!(off.client.get_setting("max_execution_time"), None);
+    }
 
     fn group(fp: &str) -> StoryGroupRow {
         StoryGroupRow {

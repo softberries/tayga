@@ -313,7 +313,7 @@ async fn pipeline_series<R: Repo>(
     } else if sq.kind == SeriesKind::Rate {
         some(series::rate(&pts, step))
     } else {
-        some(series::gauge(&pts, step))
+        some(series::gauge(&pts, &sq.metric, step))
     };
     Ok(Json(SeriesView {
         metric: sq.metric,
