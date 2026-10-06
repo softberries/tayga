@@ -778,12 +778,15 @@ impl Repo for ChRepo {
         let spans: Vec<CountBucketRow> = bind_capped(bind_bucket(q, step), window)
             .fetch_all()
             .await?;
-        // The lag recorded last before the window's end, if recent enough then; with several replicas (one tick, one ts), the slowest.
+        // Per replica (`instance`; one series without it), the lag recorded last before the
+        // window's end within the freshness bound; the slowest of those.
         let lag: Vec<f64> = self
             .client
             .query(
-                "SELECT value FROM metric_samples WHERE metric = ? AND isFinite(value) \
-                 AND ts > toDateTime(?) - toIntervalSecond(?) AND ts < toDateTime(?) ORDER BY ts DESC, value DESC LIMIT 1",
+                "SELECT v FROM (SELECT argMax(value, ts) AS v FROM metric_samples \
+                 WHERE metric = ? AND isFinite(value) \
+                 AND ts > toDateTime(?) - toIntervalSecond(?) AND ts < toDateTime(?) \
+                 GROUP BY labels['instance']) ORDER BY v DESC LIMIT 1",
             )
             .bind(DATA_LAG_METRIC)
             .bind(window.end)

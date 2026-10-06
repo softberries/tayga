@@ -4,6 +4,7 @@
 use crate::openmetrics;
 use crate::routes::{ApiMetrics, JobLabel};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -92,27 +93,41 @@ pub struct Endpoint {
     pub instance: Option<String>,
 }
 
-/// The scrapes of `url` given its host's resolved `addrs`. At most one distinct address: the URL
-/// as configured, unlabelled, so one replica records exactly what it did before. Several: one URL
-/// per address, sorted, labelled `instance="<ip>:<port>"`. Scraping by address also keeps the
-/// HTTP client from reusing one pooled connection to one replica.
-pub fn endpoints(url: &str, addrs: &[SocketAddr]) -> Vec<Endpoint> {
-    let mut addrs = addrs.to_vec();
-    addrs.sort_unstable();
-    addrs.dedup();
+/// The addresses a target is scraped at: IPv4 only when there is any (a dual-stack name would
+/// otherwise count each replica twice), else IPv6; sorted, without duplicates.
+fn distinct(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
+    let any_v4 = addrs.iter().any(SocketAddr::is_ipv4);
+    let mut out: Vec<SocketAddr> = addrs
+        .iter()
+        .copied()
+        .filter(|a| a.is_ipv4() == any_v4)
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// The scrapes of `url` given its host's resolved `addrs` (see [`distinct`]). At most one
+/// address and not `sticky`: the URL as configured, unlabelled, so one replica records exactly
+/// what it did before. Several, or one of a `sticky` target (one that has resolved to several
+/// before, so its series keep their `instance` label when it scales down): one URL per address,
+/// labelled `instance="<ip>:<port>"`. Unresolved: the URL as configured. Scraping by address
+/// also keeps the HTTP client from reusing one pooled connection to one replica.
+pub fn endpoints(url: &str, addrs: &[SocketAddr], sticky: bool) -> Vec<Endpoint> {
+    let addrs = distinct(addrs);
     let as_configured = || {
         vec![Endpoint {
             url: url.to_string(),
             instance: None,
         }]
     };
-    if addrs.len() <= 1 {
+    if addrs.is_empty() || (addrs.len() == 1 && !sticky) {
         return as_configured();
     }
     let Ok(parsed) = reqwest::Url::parse(url) else {
         return as_configured();
     };
-    addrs
+    let labelled: Vec<Endpoint> = addrs
         .into_iter()
         .filter_map(|a| {
             let mut u = parsed.clone();
@@ -122,7 +137,11 @@ pub fn endpoints(url: &str, addrs: &[SocketAddr]) -> Vec<Endpoint> {
                 instance: Some(a.to_string()),
             })
         })
-        .collect()
+        .collect();
+    if labelled.is_empty() {
+        return as_configured();
+    }
+    labelled
 }
 
 fn instance_labels(instance: Option<&str>) -> Vec<(String, String)> {
@@ -170,22 +189,39 @@ fn push_exposition(
     rows.push(up(job, instance, ts, 1.0));
 }
 
+/// `fetch.resolve(url)`, bounded by [`FETCH_TIMEOUT`]; a lookup that does not finish in time
+/// resolves to nothing, so the target is scraped at its configured URL.
+async fn resolve_bounded<F: Fetch>(fetch: &F, url: &str) -> Vec<SocketAddr> {
+    tokio::time::timeout(FETCH_TIMEOUT, fetch.resolve(url))
+        .await
+        .unwrap_or_else(|_| {
+            tracing::debug!(url, "metric target lookup timed out");
+            Vec::new()
+        })
+}
+
 /// One tick's rows: every target resolved, every resolved address fetched concurrently (see
 /// [`endpoints`]), plus the API's own exposition. A failed scrape contributes only `up` = 0 and
-/// increments `scrape_failures{job}`.
+/// increments `scrape_failures{job}`. `multi` holds the target URLs that have resolved to
+/// several addresses in this process; it grows here and keeps their labelling sticky.
 pub async fn collect<F: Fetch>(
     fetch: &F,
     targets: &[Target],
     api_text: &str,
     metrics: &ApiMetrics,
     ts: i64,
+    multi: &mut HashSet<String>,
 ) -> Vec<MetricSampleRow> {
-    let resolved = futures::future::join_all(targets.iter().map(|t| fetch.resolve(&t.url))).await;
-    let scrapes: Vec<(&Target, Endpoint)> = targets
-        .iter()
-        .zip(resolved)
-        .flat_map(|(t, addrs)| endpoints(&t.url, &addrs).into_iter().map(move |e| (t, e)))
-        .collect();
+    let resolved =
+        futures::future::join_all(targets.iter().map(|t| resolve_bounded(fetch, &t.url))).await;
+    let mut scrapes: Vec<(&Target, Endpoint)> = Vec::new();
+    for (t, addrs) in targets.iter().zip(resolved) {
+        let eps = endpoints(&t.url, &addrs, multi.contains(&t.url));
+        if eps.len() > 1 {
+            multi.insert(t.url.clone());
+        }
+        scrapes.extend(eps.into_iter().map(|e| (t, e)));
+    }
     let results = futures::future::join_all(scrapes.iter().map(|(_, e)| fetch.fetch(&e.url))).await;
     let mut rows = Vec::new();
     for ((t, e), result) in scrapes.iter().zip(results) {
@@ -238,6 +274,7 @@ where
                 return;
             }
         };
+        let mut multi = HashSet::new();
         let mut tick = tokio::time::interval(every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -246,7 +283,7 @@ where
                 _ = tick.tick() => {}
             }
             let ts = now_ms();
-            let rows = collect(&fetch, &targets, &registry_text(), &metrics, ts).await;
+            let rows = collect(&fetch, &targets, &registry_text(), &metrics, ts, &mut multi).await;
             if let Err(e) = store.insert_metric_samples(&rows).await {
                 tracing::warn!(error = %e, rows = rows.len(), "metric samples insert failed; tick dropped");
             }
@@ -258,7 +295,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     #[tokio::test]
     async fn record_secs_zero_turns_the_recorder_off() {
@@ -285,6 +322,8 @@ mod tests {
     struct FakeFetch {
         bodies: HashMap<String, Result<String, String>>,
         addrs: HashMap<String, Vec<SocketAddr>>,
+        /// `resolve` never completes, as a DNS lookup that hangs.
+        hang: bool,
     }
 
     impl Fetch for FakeFetch {
@@ -297,6 +336,9 @@ mod tests {
         }
 
         async fn resolve(&self, url: &str) -> Vec<SocketAddr> {
+            if self.hang {
+                std::future::pending::<()>().await;
+            }
             self.addrs.get(url).cloned().unwrap_or_default()
         }
     }
@@ -334,7 +376,15 @@ mod tests {
         let metrics = ApiMetrics::default();
         let api_text = "# TYPE x counter\nx_total 3\n# EOF\n";
 
-        let rows = collect(&fetch, &targets, api_text, &metrics, 1_700_000_000_000).await;
+        let rows = collect(
+            &fetch,
+            &targets,
+            api_text,
+            &metrics,
+            1_700_000_000_000,
+            &mut HashSet::new(),
+        )
+        .await;
 
         assert!(rows.iter().all(|r| r.ts == 1_700_000_000_000));
         let logminer = rows_of(&rows, "tayga-logminer");
@@ -375,7 +425,7 @@ mod tests {
     #[test]
     fn one_address_keeps_the_url_and_several_get_an_instance_each() {
         let url = "http://tayga-logminer:9100/metrics";
-        let one = endpoints(url, &[addr("10.0.0.7:9100")]);
+        let one = endpoints(url, &[addr("10.0.0.7:9100")], false);
         assert_eq!(
             one,
             [Endpoint {
@@ -383,7 +433,7 @@ mod tests {
                 instance: None
             }]
         );
-        assert_eq!(endpoints(url, &[]), one, "unresolved: as configured");
+        assert_eq!(endpoints(url, &[], false), one, "unresolved: as configured");
         let two = endpoints(
             url,
             &[
@@ -391,6 +441,7 @@ mod tests {
                 addr("10.0.0.7:9100"),
                 addr("10.0.0.9:9100"),
             ],
+            false,
         );
         assert_eq!(
             two,
@@ -429,9 +480,18 @@ mod tests {
                 url.to_string(),
                 vec![addr("10.0.0.7:9100"), addr("10.0.0.9:9100")],
             )]),
+            ..Default::default()
         };
         let metrics = ApiMetrics::default();
-        let rows = collect(&fetch, &targets, "# EOF\n", &metrics, 1).await;
+        let rows = collect(
+            &fetch,
+            &targets,
+            "# EOF\n",
+            &metrics,
+            1,
+            &mut HashSet::new(),
+        )
+        .await;
         let inst = |i: &str| vec![("instance".to_string(), i.to_string())];
         let logminer = rows_of(&rows, "tayga-logminer");
         assert_eq!(logminer.len(), 3, "{logminer:?}");
@@ -454,6 +514,119 @@ mod tests {
             job: "tayga-logminer".into(),
         };
         assert_eq!(metrics.scrape_failures.get_or_create(&job).get(), 1);
+    }
+
+    #[test]
+    fn ipv4_addresses_win_over_ipv6() {
+        let url = "http://localhost:9100/metrics";
+        assert_eq!(
+            endpoints(url, &[addr("127.0.0.1:9100"), addr("[::1]:9100")], false),
+            [Endpoint {
+                url: url.into(),
+                instance: None
+            }]
+        );
+        let v6 = endpoints(url, &[addr("[::2]:9100"), addr("[::1]:9100")], false);
+        assert_eq!(
+            v6.iter().map(|e| e.url.as_str()).collect::<Vec<_>>(),
+            ["http://[::1]:9100/metrics", "http://[::2]:9100/metrics"]
+        );
+        assert_eq!(v6[0].instance.as_deref(), Some("[::1]:9100"));
+    }
+
+    #[test]
+    fn a_sticky_target_labels_its_single_address() {
+        let url = "http://tayga-logminer:9100/metrics";
+        assert_eq!(
+            endpoints(url, &[addr("10.0.0.7:9100")], true),
+            [Endpoint {
+                url: "http://10.0.0.7:9100/metrics".into(),
+                instance: Some("10.0.0.7:9100".into())
+            }]
+        );
+    }
+
+    /// One logminer target resolving to `addrs`; the configured URL and every address answer.
+    fn logminer_fetch(addrs: &[&str]) -> (Vec<Target>, FakeFetch) {
+        let url = "http://tayga-logminer:9100/metrics";
+        let body = || Ok("# TYPE x counter\nx_total 3\n# EOF\n".to_string());
+        let mut bodies = HashMap::from([(url.to_string(), body())]);
+        for a in addrs {
+            bodies.insert(format!("http://{a}/metrics"), body());
+        }
+        let fetch = FakeFetch {
+            bodies,
+            addrs: HashMap::from([(url.to_string(), addrs.iter().map(|a| addr(a)).collect())]),
+            ..Default::default()
+        };
+        let targets = vec![Target {
+            job: "tayga-logminer".into(),
+            url: url.into(),
+        }];
+        (targets, fetch)
+    }
+
+    fn logminer_labels(rows: &[MetricSampleRow]) -> Vec<Vec<(String, String)>> {
+        rows_of(rows, "tayga-logminer")
+            .into_iter()
+            .map(|r| r.labels.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn once_several_replicas_are_seen_the_target_stays_labelled() {
+        let metrics = ApiMetrics::default();
+        let mut multi = HashSet::new();
+        let (targets, one) = logminer_fetch(&["10.0.0.7:9100"]);
+        let rows = collect(&one, &targets, "# EOF\n", &metrics, 1, &mut multi).await;
+        assert_eq!(
+            logminer_labels(&rows),
+            [vec![], vec![]],
+            "only one address seen: unlabelled"
+        );
+        let (_, two) = logminer_fetch(&["10.0.0.7:9100", "10.0.0.9:9100"]);
+        collect(&two, &targets, "# EOF\n", &metrics, 2, &mut multi).await;
+        let rows = collect(&one, &targets, "# EOF\n", &metrics, 3, &mut multi).await;
+        let inst = vec![("instance".to_string(), "10.0.0.7:9100".to_string())];
+        assert_eq!(logminer_labels(&rows), [inst.clone(), inst]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hanging_lookup_falls_back_to_the_configured_url() {
+        let (targets, mut fetch) = logminer_fetch(&[]);
+        fetch.hang = true;
+        let metrics = ApiMetrics::default();
+        let rows = collect(
+            &fetch,
+            &targets,
+            "# EOF\n",
+            &metrics,
+            1,
+            &mut HashSet::new(),
+        )
+        .await;
+        let logminer = rows_of(&rows, "tayga-logminer");
+        assert_eq!(logminer.len(), 2, "{logminer:?}");
+        assert!(logminer.iter().all(|r| r.labels.is_empty()));
+        assert!(logminer.iter().any(|r| r.metric == "up" && r.value == 1.0));
+    }
+
+    #[tokio::test]
+    async fn http_resolve_handles_bad_urls_and_localhost() {
+        let http = HttpFetch::new().unwrap();
+        assert!(http.resolve("not a url").await.is_empty());
+        assert!(
+            http.resolve("unknown://host/metrics").await.is_empty(),
+            "no port"
+        );
+        let local = http.resolve("http://localhost:9100/metrics").await;
+        assert!(!local.is_empty());
+        assert!(
+            local
+                .iter()
+                .all(|a| a.port() == 9100 && a.ip().is_loopback()),
+            "{local:?}"
+        );
     }
 
     #[test]

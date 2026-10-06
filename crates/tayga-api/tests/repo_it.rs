@@ -1770,7 +1770,7 @@ async fn trace_links_need_the_traces_logs_and_stay_in_their_time_range() {
 
 #[tokio::test]
 #[ignore = "requires ClickHouse: make it, or TAYGA_IT_CLICKHOUSE against the live stack"]
-async fn overview_data_lag_is_the_slowest_replica_of_the_newest_tick() {
+async fn overview_data_lag_is_the_slowest_replica() {
     let s = settings();
     migrate(&s).await.unwrap();
     let store = Store::new(&s);
@@ -1782,6 +1782,7 @@ async fn overview_data_lag_is_the_slowest_replica_of_the_newest_tick() {
         labels: vec![("instance".into(), instance.into())],
         value,
     };
+    let repo = ChRepo::new(&s);
     let inserted = store
         .insert_metric_samples(&[
             lag(now_ms - 20_000, "10.0.0.7:9100", 30.0),
@@ -1789,8 +1790,19 @@ async fn overview_data_lag_is_the_slowest_replica_of_the_newest_tick() {
             lag(now_ms - 5_000, "10.0.0.9:9100", 7.5),
         ])
         .await;
-    let o = ChRepo::new(&s).overview(last(3600)).await;
+    let newest_tick = repo.overview(last(3600)).await;
+    // A replica whose newest lag is older than the others' but still fresh counts; one whose
+    // newest lag is older than the freshness bound (300 s) does not.
+    let more = store
+        .insert_metric_samples(&[
+            lag(now_ms - 60_000, "10.0.0.11:9100", 12.0),
+            lag(now_ms - 400_000, "10.0.0.12:9100", 99.0),
+        ])
+        .await;
+    let per_replica = repo.overview(last(3600)).await;
     drop_database(&s).await;
     inserted.unwrap();
-    assert_eq!(o.unwrap().data_lag_secs, Some(7.5));
+    more.unwrap();
+    assert_eq!(newest_tick.unwrap().data_lag_secs, Some(7.5));
+    assert_eq!(per_replica.unwrap().data_lag_secs, Some(12.0));
 }
