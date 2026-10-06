@@ -311,7 +311,6 @@ pub fn is_silent(
 pub fn silence_alert(
     input: &SilenceInput,
     template: &str,
-    minutes: u32,
     baseline_per_window: f64,
     now_ns: i64,
 ) -> Alert {
@@ -326,7 +325,9 @@ pub fn silence_alert(
         template_id: input.template_id,
         service: input.service.clone(),
         template: template.to_string(),
-        started_at_ns: since.saturating_add(i64::from(minutes).saturating_mul(MIN_NS)),
+        // The silence began at the template's last hit (or first sighting), so `last_at −
+        // started_at` is how long it has been quiet.
+        started_at_ns: since,
         last_at_ns: now_ns,
         window_count: 0,
         peak_count: 0,
@@ -813,36 +814,23 @@ mod tests {
     #[test]
     fn silence_alert_id_is_stable_per_period() {
         let t = 100 * MIN_NS;
-        let a = silence_alert(
-            &silence_input(Some(t), Some(t + 20 * MIN_NS)),
-            "x",
-            10,
-            0.0,
-            1,
-        );
-        let b = silence_alert(
-            &silence_input(Some(t), Some(t + 30 * MIN_NS)),
-            "x",
-            10,
-            0.0,
-            2,
-        );
+        let a = silence_alert(&silence_input(Some(t), Some(t + 20 * MIN_NS)), "x", 0.0, 1);
+        let b = silence_alert(&silence_input(Some(t), Some(t + 30 * MIN_NS)), "x", 0.0, 2);
         assert_eq!(a.alert_id, b.alert_id);
         assert_eq!(a.kind, AlertKind::Silence);
-        assert_eq!(a.started_at_ns, t + 10 * MIN_NS);
+        assert_eq!(a.started_at_ns, t);
         assert_eq!((a.last_at_ns, b.last_at_ns), (1, 2));
         assert_eq!(a.window_count, 0);
         let t2 = t + 40 * MIN_NS; // a new hit, then silent again: a new period
         let c = silence_alert(
             &silence_input(Some(t2), Some(t2 + 20 * MIN_NS)),
             "x",
-            10,
             0.0,
             3,
         );
         assert_ne!(a.alert_id, c.alert_id);
-        let d = silence_alert(&silence_input(None, Some(t)), "x", 10, 0.0, 3);
-        assert_eq!(d.started_at_ns, 15 * MIN_NS);
+        let d = silence_alert(&silence_input(None, Some(t)), "x", 0.0, 3);
+        assert_eq!(d.started_at_ns, 5 * MIN_NS);
     }
 
     #[test]

@@ -872,7 +872,7 @@ fn silent_alerts(
             let &(_, minutes) = settings.iter().find(|(id, _)| *id == i.template_id)?;
             is_silent(minutes, i.first_seen_ns, i.t_last_ns, i.s_last_ns, clock_ns).then_some(())?;
             let template = miner.template(i.template_id)?;
-            Some(silence_alert(i, &template, minutes, 0.0, now))
+            Some(silence_alert(i, &template, 0.0, now))
         })
         .collect()
 }
