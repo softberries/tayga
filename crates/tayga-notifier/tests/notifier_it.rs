@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tayga_e2e::MockWebhook;
 use tayga_notifier::config::{Target, TargetKind, WebhookUrl};
-use tayga_notifier::deliver::{Deliverer, Resolution, Sender};
+use tayga_notifier::deliver::{Breakers, Deliverer, Resolution, Sender};
 use tayga_notifier::metrics::NotifierMetrics;
 use tayga_notifier::payload::{AlertKind, AlertMsg, slack_payload, webhook_payload};
 use tayga_store::ClickHouseSettings;
@@ -54,6 +54,8 @@ struct Process {
     store: Store,
     sender: Sender,
     metrics: NotifierMetrics,
+    /// In memory, like the binary's: a restart starts closed.
+    breakers: Breakers,
 }
 
 impl Process {
@@ -62,6 +64,7 @@ impl Process {
             store: Store::new(s),
             sender: Sender::new(Duration::from_secs(5)).unwrap(),
             metrics: NotifierMetrics::default(),
+            breakers: Breakers::new(Duration::from_secs(300)),
         }
     }
 
@@ -72,6 +75,7 @@ impl Process {
             sender: &self.sender,
             metrics: &self.metrics,
             max_attempts: 8,
+            breakers: &self.breakers,
         };
         let (_tx, rx) = watch::channel(false);
         let webhook = webhook_payload(a, "http://localhost:8090");

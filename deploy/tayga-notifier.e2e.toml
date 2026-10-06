@@ -11,6 +11,7 @@ kinds = ["new", "spike", "silence"]
 max_attempts = 8
 timeout_secs = 10
 max_age_secs = 3600
+breaker_cooldown_secs = 300
 
 [[notifier.targets]]
 name = "e2e-mock"

@@ -18,11 +18,19 @@ pub const RETRY: &str = "retry";
 pub const DUPLICATE: &str = "duplicate";
 /// Skipped as older than `max_age_secs` (a retained backlog); nothing was sent.
 pub const STALE: &str = "stale";
+/// One attempt made while the target's breaker was open (no backoff ladder follows). The
+/// attempt's resolution is counted as well, as `delivered` or `failed`.
+pub const BREAKER: &str = "breaker";
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct DeliveryLabels {
     pub target: String,
     pub result: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct TargetLabel {
+    pub target: String,
 }
 
 #[derive(Clone)]
@@ -32,6 +40,8 @@ pub struct NotifierMetrics {
     pub delivery_seconds: Histogram,
     /// Deliveries (alert × target) started and not yet resolved.
     pub pending: Gauge,
+    /// 1 while the target's circuit breaker is open, else 0.
+    pub breaker_open: Family<TargetLabel, Gauge>,
 }
 
 impl Default for NotifierMetrics {
@@ -41,6 +51,7 @@ impl Default for NotifierMetrics {
             // 10 ms .. ~20 s, past the 10 s request timeout.
             delivery_seconds: Histogram::new(exponential_buckets(0.01, 2.0, 12)),
             pending: Gauge::default(),
+            breaker_open: Family::default(),
         }
     }
 }
@@ -52,7 +63,8 @@ impl NotifierMetrics {
             "tayga_notifier_deliveries",
             "Delivery results per target. delivered and failed are deliveries; retry counts failed \
              attempts that are retried; duplicate counts re-publishes of an alert already \
-             resolved, not deliveries; stale counts alerts skipped as older than max_age_secs",
+             resolved, not deliveries; stale counts alerts skipped as older than max_age_secs; \
+             breaker counts attempts made while the target's breaker was open",
             m.deliveries.clone(),
         );
         registry.register(
@@ -65,7 +77,21 @@ impl NotifierMetrics {
             "Deliveries started and not yet resolved",
             m.pending.clone(),
         );
+        registry.register(
+            "tayga_notifier_breaker_open",
+            "1 while the target's circuit breaker is open: each new alert gets one attempt to it, \
+             without the backoff ladder",
+            m.breaker_open.clone(),
+        );
         m
+    }
+
+    pub fn set_breaker_open(&self, target: &str, open: bool) {
+        self.breaker_open
+            .get_or_create(&TargetLabel {
+                target: target.to_string(),
+            })
+            .set(i64::from(open));
     }
 
     pub fn count(&self, target: &str, result: &str) {
@@ -83,12 +109,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exports_the_three_series() {
+    fn exports_every_series() {
         let mut registry = Registry::default();
         let m = NotifierMetrics::register(&mut registry);
         m.count("ops-slack", DELIVERED);
         m.delivery_seconds.observe(0.03);
         m.pending.inc();
+        m.set_breaker_open("ops-slack", true);
         let text = tayga_common::metrics::render(&registry);
         assert!(
             text.contains(
@@ -99,6 +126,10 @@ mod tests {
         assert!(text.contains("# TYPE tayga_notifier_delivery_seconds histogram"));
         assert!(text.contains("tayga_notifier_delivery_seconds_count 1"));
         assert!(text.contains("tayga_notifier_pending 1"));
+        assert!(
+            text.contains("tayga_notifier_breaker_open{target=\"ops-slack\"} 1"),
+            "{text}"
+        );
         assert!(
             text.contains(
                 "duplicate counts re-publishes of an alert already resolved, not deliveries"

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tayga_kafka::KafkaSettings;
 use tayga_notifier::config::{NotifierSettings, TargetKind};
-use tayga_notifier::deliver::{Deliverer, Sender};
+use tayga_notifier::deliver::{Breakers, Deliverer, Sender};
 use tayga_notifier::metrics::{NotifierMetrics, STALE};
 use tayga_notifier::payload::{AlertMsg, slack_payload, webhook_payload};
 use tayga_notifier::route::{Route, may_commit, route};
@@ -81,14 +81,18 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
         ?targets,
         ?kinds,
         max_attempts = cfg.max_attempts,
+        breaker_cooldown_secs = cfg.breaker_cooldown_secs,
         "tayga-notifier consuming"
     );
 
+    // In memory: a restart starts every target's breaker closed.
+    let breakers = Breakers::new(Duration::from_secs(cfg.breaker_cooldown_secs));
     let deliverer = Deliverer {
         log: &store,
         sender: &sender,
         metrics: &metrics,
         max_attempts: cfg.max_attempts,
+        breakers: &breakers,
     };
     let mut main_stop = stop_rx.clone();
     loop {

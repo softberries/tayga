@@ -77,6 +77,10 @@ pub struct NotifierSettings {
     /// Alerts whose `last_at` is older than this are skipped (and committed): a first start with
     /// targets must not deliver the whole retained backlog of `tayga.alerts`.
     pub max_age_secs: u64,
+    /// How long a target's circuit breaker stays open after it gave up on a retryable error.
+    /// While open, each new alert gets one attempt to that target and no backoff ladder, so a
+    /// dead target cannot hold the records behind it past `max_age_secs`. In memory only.
+    pub breaker_cooldown_secs: u64,
     pub targets: Vec<Target>,
     pub alerts_topic: String,
     pub metrics_addr: SocketAddr,
@@ -90,6 +94,7 @@ impl Default for NotifierSettings {
             max_attempts: 8,
             timeout_secs: 10,
             max_age_secs: 3_600,
+            breaker_cooldown_secs: 300,
             targets: Vec::new(),
             alerts_topic: "tayga.alerts".to_string(),
             metrics_addr: SocketAddr::from(([0, 0, 0, 0], 9100)),
@@ -111,6 +116,10 @@ impl NotifierSettings {
         anyhow::ensure!(
             self.max_age_secs > 0,
             "notifier.max_age_secs must be positive"
+        );
+        anyhow::ensure!(
+            self.breaker_cooldown_secs > 0,
+            "notifier.breaker_cooldown_secs must be positive"
         );
         anyhow::ensure!(
             is_http_url(&self.public_url),
@@ -172,6 +181,7 @@ mod tests {
         assert_eq!(s.kinds, AlertKind::ALL);
         assert_eq!((s.max_attempts, s.timeout_secs), (8, 10));
         assert_eq!(s.max_age_secs, 3_600);
+        assert_eq!(s.breaker_cooldown_secs, 300);
         assert!(s.targets.is_empty());
         assert_eq!(s.alerts_topic, "tayga.alerts");
         assert_eq!(s.metrics_addr.port(), 9100);
@@ -201,6 +211,7 @@ mod tests {
         assert_eq!(s.kinds, AlertKind::ALL);
         assert_eq!((s.max_attempts, s.timeout_secs), (8, 10));
         assert_eq!(s.max_age_secs, 3_600);
+        assert_eq!(s.breaker_cooldown_secs, 300);
     }
 
     /// `make e2e-notifier` mounts this file; the e2e crate's mock listens on port 18099 and
@@ -296,6 +307,13 @@ mod tests {
                 ..NotifierSettings::default()
             })
             .contains("max_age_secs")
+        );
+        assert!(
+            bad(NotifierSettings {
+                breaker_cooldown_secs: 0,
+                ..NotifierSettings::default()
+            })
+            .contains("breaker_cooldown_secs")
         );
         assert!(
             bad(NotifierSettings {

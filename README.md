@@ -285,6 +285,7 @@ Both values are log timestamps, not the wall clock. So a pipeline outage, where 
 | `max_attempts` | Attempts per alert and target | 8 |
 | `timeout_secs` | Timeout per request, 1 to 15 | 10 |
 | `max_age_secs` | Alerts whose `last_at` is older are skipped and committed (`result="stale"`), so a first start with targets does not deliver the backlog retained on the topic | 3600 |
+| `breaker_cooldown_secs` | How long a target's circuit breaker stays open after it gave up on a retryable error (see Retries). Must be positive | 300 |
 
 ```toml
 [[notifier.targets]]
@@ -343,7 +344,16 @@ Template text is escaped for Slack, so `<*>` is not read as a link. Tayga only p
 - The wait after the n-th failed attempt is the larger of 1 s × 2^(n−1) and the response's `Retry-After` (delta-seconds or an HTTP date), capped at 300 s.
 - After `max_attempts` attempts the delivery is marked failed.
 
-Records are handled one at a time, and each waits for all its targets. A target that keeps failing therefore holds back the alerts behind it until it gives up. With the defaults and no `Retry-After`, that takes about 2 minutes of backoff (1 + 2 + … + 64 s) plus the request timeouts. The consumer's `max.poll.interval.ms` is raised to 40 minutes, so even waits at the `Retry-After` cap do not trigger a rebalance.
+Records are handled one at a time, and each waits for all its targets. With the defaults and no `Retry-After`, a target that keeps failing takes about 2 minutes of backoff (1 + 2 + … + 64 s) plus up to 8 request timeouts before it gives up. The consumer's `max.poll.interval.ms` is raised to 40 minutes, so even waits at the `Retry-After` cap do not trigger a rebalance.
+
+**Circuit breaker per target.** Paying that ladder on every alert would let the backlog grow past `max_age_secs` after roughly 17 to 28 alerts (3600 s at 127 to 207 s each); the live stack has seen over 100 alerts in an hour. From then on every record would be skipped as `stale` for every target, healthy ones included. A breaker per target prevents this:
+- When a target gives up on a retryable error (429, 5xx, a network error or a timeout), its breaker opens for `breaker_cooldown_secs` (300 s).
+- While it is open, each new alert gets exactly one attempt to that target, without backoff. A 2xx closes the breaker. A retryable failure marks that alert `failed` for the target, with its attempt recorded, and keeps the breaker open for another cooldown.
+- A permanent error (a 4xx) does not open or close it.
+- When the cooldown passes with no new alert, the breaker closes, and the next alert runs the full ladder again.
+- The state is kept in memory, so a restart starts every target closed.
+
+So, after its first ladder, a dead target costs each record one attempt: almost nothing for a fast 5xx, and at most `timeout_secs` (10 s) for a host that does not answer. Healthy targets keep pace and are not skipped as stale. The price is that alerts sent while a target's breaker is open are not retried to it: they are marked `failed` after one attempt and are not delivered there later. `max_age_secs` still applies per record, judged when the record is read, so a backlog that is old for another reason, such as a notifier that was down for over an hour, is skipped as before.
 
 **Dedup and offsets.** Delivery state is kept per `(alert_id, target)` in `notifier_deliveries`:
 - migration 0011, `ReplacingMergeTree(updated)`, 30-day TTL;
@@ -362,9 +372,10 @@ The logminer re-publishes an alert every time it updates it. Once the target has
 
 | Metric | Meaning |
 |---|---|
-| `tayga_notifier_deliveries_total{target,result}` | `result` is `delivered`, `failed`, `retry`, `duplicate` (a re-publish of an alert already resolved, not a send) or `stale` (older than `max_age_secs`) |
+| `tayga_notifier_deliveries_total{target,result}` | `result` is `delivered`, `failed`, `retry`, `duplicate` (a re-publish of an alert already resolved, not a send), `stale` (older than `max_age_secs`) or `breaker` (an attempt made while the target's breaker was open; its outcome is also counted as `delivered` or `failed`) |
 | `tayga_notifier_delivery_seconds` | Histogram of each HTTP attempt |
 | `tayga_notifier_pending` | Deliveries started and not yet resolved |
+| `tayga_notifier_breaker_open{target}` | 1 while the target's breaker is open, else 0. Updated when an alert is delivered to the target, so after an idle cooldown it can read 1 until the next alert |
 
 The Pipeline page shows `tayga-notifier` as a job, and its consumer lag on `tayga.alerts` next to the other groups.
 

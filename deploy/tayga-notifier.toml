@@ -18,6 +18,9 @@ timeout_secs = 10
 # Alerts last updated longer ago than this are skipped: a first start with
 # targets does not deliver the retained backlog.
 max_age_secs = 3600
+# After a target gives up on a retryable error, its breaker stays open this
+# long: each new alert gets one attempt to it, without the backoff ladder.
+breaker_cooldown_secs = 300
 
 # [[notifier.targets]]
 # name = "ops-slack"

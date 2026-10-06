@@ -13,11 +13,19 @@
 //!   finds no resolved row and is sent again;
 //! - `notifier_deliveries` rows expire after 30 days (TTL), so an alert id re-published after
 //!   that is delivered again.
+//!
+//! Records are handled one at a time, so a target that keeps failing would make every record
+//! wait out its whole backoff ladder, and the backlog would pass `max_age_secs` for every
+//! target. A per-target circuit breaker ([`BreakerState`]) bounds that: after a target gives up
+//! on a retryable error it is open for `breaker_cooldown_secs`, and each new alert gets one
+//! attempt to it and no ladder. Breaker state is in memory; a restart starts every target closed.
 
 use crate::config::{REDACTED, Target, WebhookUrl};
-use crate::metrics::{DELIVERED, DUPLICATE, FAILED, NotifierMetrics, RETRY};
+use crate::metrics::{BREAKER, DELIVERED, DUPLICATE, FAILED, NotifierMetrics, RETRY};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::future::Future;
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 use tayga_common::retry::retry_until;
 use tayga_store::notifier::{DeliveryRow, STATUS_DELIVERED, STATUS_FAILED, STATUS_PENDING};
@@ -209,6 +217,80 @@ impl DeliveryLog for Store {
     }
 }
 
+/// What a resolved delivery tells a target's breaker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakerEvent {
+    /// A 2xx: the target works again.
+    Delivered,
+    /// Gave up on a retryable error (429, 5xx, network, timeout): the ladder was exhausted, or
+    /// the one attempt made while open failed.
+    RetryableGiveUp,
+    /// Gave up on a permanent error (a 4xx): the target answered, so it says nothing about the
+    /// target's health; one bad payload must not cut the next alert's ladder short.
+    PermanentGiveUp,
+}
+
+/// One target's circuit breaker, a pure state machine over an injected clock.
+///
+/// - closed: a delivery runs the whole backoff ladder (up to `max_attempts`);
+/// - open (until `open_until`): a delivery gets exactly one attempt.
+///
+/// A retryable give-up opens it, or keeps it open, for `cooldown` from now; a delivery closes
+/// it; a permanent give-up leaves it as it is. Once the cooldown has passed with no new
+/// failure it reads as closed, and the next delivery runs the ladder again.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BreakerState {
+    open_until: Option<Instant>,
+}
+
+impl BreakerState {
+    pub fn is_open(&self, now: Instant) -> bool {
+        self.open_until.is_some_and(|until| now < until)
+    }
+
+    pub fn on(&mut self, event: BreakerEvent, now: Instant, cooldown: Duration) {
+        match event {
+            BreakerEvent::Delivered => self.open_until = None,
+            BreakerEvent::RetryableGiveUp => self.open_until = Some(now + cooldown),
+            BreakerEvent::PermanentGiveUp => {}
+        }
+    }
+}
+
+/// Breaker state of every target, in memory: a restart starts every target closed.
+pub struct Breakers {
+    cooldown: Duration,
+    states: Mutex<HashMap<String, BreakerState>>,
+}
+
+impl Breakers {
+    pub fn new(cooldown: Duration) -> Self {
+        Self {
+            cooldown,
+            states: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, BreakerState>> {
+        // The state is a plain value; a panic elsewhere cannot leave it half-written.
+        self.states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub fn is_open(&self, target: &str, now: Instant) -> bool {
+        self.lock().get(target).is_some_and(|b| b.is_open(now))
+    }
+
+    /// Applies `event`; returns whether the breaker is open afterwards.
+    pub fn on(&self, target: &str, event: BreakerEvent, now: Instant) -> bool {
+        let mut states = self.lock();
+        let b = states.entry(target.to_string()).or_default();
+        b.on(event, now, self.cooldown);
+        b.is_open(now)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolution {
     Delivered,
@@ -224,11 +306,13 @@ pub struct Deliverer<'a, L> {
     pub sender: &'a Sender,
     pub metrics: &'a NotifierMetrics,
     pub max_attempts: u32,
+    pub breakers: &'a Breakers,
 }
 
 impl<L: DeliveryLog> Deliverer<'_, L> {
     /// Delivers `body` for `alert_id` to `target` once: until delivered, a permanent error, or
-    /// `max_attempts`, recording the state after every attempt.
+    /// `max_attempts` (one attempt while the target's breaker is open), recording the state
+    /// after every attempt.
     pub async fn deliver(
         &self,
         alert_id: &str,
@@ -254,6 +338,9 @@ impl<L: DeliveryLog> Deliverer<'_, L> {
             Next::Attempt { done } => done,
         };
         let _pending = PendingGuard::new(self.metrics);
+        // Read once: a breaker that opens or closes meanwhile applies from the next alert.
+        let open = self.breakers.is_open(name, Instant::now());
+        self.metrics.set_breaker_open(name, open);
         let mut last_error = prior.map(|p| p.last_error).unwrap_or_default();
         let row = |status, attempts, last_error: &str| DeliveryRow {
             alert_id: alert_id.to_string(),
@@ -276,19 +363,25 @@ impl<L: DeliveryLog> Deliverer<'_, L> {
                 .delivery_seconds
                 .observe(started.elapsed().as_secs_f64());
             done += 1;
+            if open {
+                self.metrics.count(name, BREAKER);
+            }
             match classify(resp.status, resp.retry_after.as_deref()) {
                 Outcome::Delivered => {
                     self.record(&row(STATUS_DELIVERED, done, ""), &stop).await;
                     self.metrics.count(name, DELIVERED);
+                    self.breaker(name, BreakerEvent::Delivered);
                     tracing::info!(alert_id, target = name, attempts = done, "alert delivered");
                     return Resolution::Delivered;
                 }
                 Outcome::Permanent(error) => {
+                    self.breaker(name, BreakerEvent::PermanentGiveUp);
                     return self.give_up(row(STATUS_FAILED, done, &error), &stop).await;
                 }
                 Outcome::Retry(retry_after) => {
                     last_error = resp.error;
-                    if done >= self.max_attempts {
+                    if open || done >= self.max_attempts {
+                        self.breaker(name, BreakerEvent::RetryableGiveUp);
                         return self
                             .give_up(row(STATUS_FAILED, done, &last_error), &stop)
                             .await;
@@ -315,6 +408,22 @@ impl<L: DeliveryLog> Deliverer<'_, L> {
                     }
                 }
             }
+        }
+    }
+
+    /// Applies `event` to the target's breaker and mirrors it in `tayga_notifier_breaker_open`.
+    fn breaker(&self, name: &str, event: BreakerEvent) {
+        let was_open = self.breakers.is_open(name, Instant::now());
+        let open = self.breakers.on(name, event, Instant::now());
+        self.metrics.set_breaker_open(name, open);
+        if open && !was_open {
+            tracing::warn!(
+                target = name,
+                cooldown_s = self.breakers.cooldown.as_secs(),
+                "breaker open: new alerts get one attempt to this target, without backoff"
+            );
+        } else if was_open && !open {
+            tracing::info!(target = name, "breaker closed");
         }
     }
 
@@ -547,14 +656,20 @@ mod tests {
         log: MemLog,
         sender: Sender,
         metrics: NotifierMetrics,
+        breakers: Breakers,
     }
 
     impl Fixture {
         fn new() -> Self {
+            Self::with_cooldown(Duration::from_secs(300))
+        }
+
+        fn with_cooldown(cooldown: Duration) -> Self {
             Self {
                 log: MemLog::default(),
                 sender: Sender::new(Duration::from_secs(5)).unwrap(),
                 metrics: NotifierMetrics::default(),
+                breakers: Breakers::new(cooldown),
             }
         }
 
@@ -564,7 +679,17 @@ mod tests {
                 sender: &self.sender,
                 metrics: &self.metrics,
                 max_attempts,
+                breakers: &self.breakers,
             }
+        }
+
+        fn breaker_gauge(&self, target: &str) -> i64 {
+            self.metrics
+                .breaker_open
+                .get_or_create(&crate::metrics::TargetLabel {
+                    target: target.into(),
+                })
+                .get()
         }
 
         fn count(&self, target: &str, result: &str) -> u64 {
@@ -850,5 +975,184 @@ mod tests {
             assert!(!text.contains("/services/"), "{text}");
         }
         assert!(last.last_error.len() <= ERROR_MAX);
+    }
+
+    #[test]
+    fn breaker_state_machine() {
+        use BreakerEvent::*;
+        let cooldown = Duration::from_secs(300);
+        let t0 = Instant::now();
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+        let mut b = BreakerState::default();
+        assert!(!b.is_open(t0), "starts closed");
+        b.on(PermanentGiveUp, t0, cooldown);
+        assert!(!b.is_open(t0), "a 4xx does not open it");
+        b.on(Delivered, t0, cooldown);
+        assert!(!b.is_open(t0));
+
+        b.on(RetryableGiveUp, at(10), cooldown);
+        assert!(b.is_open(at(10)) && b.is_open(at(309)));
+        assert!(!b.is_open(at(310)), "closed once the cooldown has passed");
+        // A failed one-shot attempt while open keeps it open for another cooldown.
+        b.on(RetryableGiveUp, at(200), cooldown);
+        assert!(b.is_open(at(499)) && !b.is_open(at(500)));
+        b.on(PermanentGiveUp, at(250), cooldown);
+        assert!(b.is_open(at(499)), "a 4xx while open changes nothing");
+        b.on(Delivered, at(260), cooldown);
+        assert!(!b.is_open(at(260)), "a delivery closes it");
+
+        let all = Breakers::new(cooldown);
+        assert!(all.on("dead", RetryableGiveUp, t0));
+        assert!(
+            all.is_open("dead", at(1)) && !all.is_open("ok", at(1)),
+            "per target"
+        );
+        assert!(!all.on("dead", Delivered, at(2)));
+        assert!(!all.is_open("dead", at(2)));
+    }
+
+    /// Delivers one record to every target concurrently, as `main.rs` does.
+    async fn deliver_record(
+        d: &Deliverer<'_, MemLog>,
+        alert_id: &str,
+        targets: &[Target],
+    ) -> Vec<Resolution> {
+        let body = serde_json::json!({ "alert_id": alert_id });
+        futures::future::join_all(
+            targets
+                .iter()
+                .map(|t| d.deliver(alert_id, t, &body, running())),
+        )
+        .await
+    }
+
+    /// One target answers 503 forever: the first record runs its ladder and opens the breaker,
+    /// every later record gets one attempt to it, so the healthy target keeps pace.
+    #[tokio::test]
+    async fn a_dead_target_does_not_hold_back_a_healthy_one() {
+        const RECORDS: usize = 30;
+        // Short timings through the config: max_attempts 3 makes a ladder 1 s + 2 s of backoff.
+        let cfg = crate::config::NotifierSettings {
+            max_attempts: 3,
+            breaker_cooldown_secs: 300,
+            ..crate::config::NotifierSettings::default()
+        };
+        let dead = mock(&[503; 200]).await;
+        let ok = mock(&[]).await;
+        let f = Fixture::with_cooldown(Duration::from_secs(cfg.breaker_cooldown_secs));
+        let d = f.deliverer(cfg.max_attempts);
+        let targets = [hook("dead", &dead.url()), hook("ok", &ok.url())];
+        let ladder: Duration = (1..cfg.max_attempts)
+            .map(|n| retry_wait(n, Duration::ZERO))
+            .sum();
+        assert_eq!(ladder, Duration::from_secs(3));
+
+        let started = Instant::now();
+        let mut slowest_after_first = Duration::ZERO;
+        for i in 0..RECORDS {
+            let record = Instant::now();
+            let r = deliver_record(&d, &format!("r{i}"), &targets).await;
+            assert_eq!(r, [Resolution::Failed, Resolution::Delivered], "record {i}");
+            if i > 0 {
+                slowest_after_first = slowest_after_first.max(record.elapsed());
+            }
+        }
+        let took = started.elapsed();
+
+        assert_eq!(
+            ok.received().len(),
+            RECORDS,
+            "the healthy target got every record"
+        );
+        assert_eq!(
+            dead.received().len(),
+            cfg.max_attempts as usize + RECORDS - 1,
+            "one ladder, then one attempt per record"
+        );
+        assert!(
+            took < ladder * 2,
+            "{took:?}: one ladder per record would take {:?}",
+            ladder * RECORDS as u32
+        );
+        assert!(
+            slowest_after_first < Duration::from_millis(500),
+            "{slowest_after_first:?}"
+        );
+
+        // While open: the (alert, target) is failed with its one attempt recorded.
+        let rows = f.log.rows();
+        let last = rows.iter().rev().find(|r| r.target == "dead").unwrap();
+        assert_eq!(
+            (last.status, last.attempts, last.last_error.as_str()),
+            (STATUS_FAILED, 1, "HTTP 503")
+        );
+        assert_eq!(f.count("dead", BREAKER), RECORDS as u64 - 1);
+        assert_eq!(f.count("dead", FAILED), RECORDS as u64);
+        assert_eq!(f.count("dead", RETRY), u64::from(cfg.max_attempts) - 1);
+        assert_eq!(f.count("ok", DELIVERED), RECORDS as u64);
+        assert_eq!(f.count("ok", BREAKER), 0);
+        assert_eq!((f.breaker_gauge("dead"), f.breaker_gauge("ok")), (1, 0));
+        assert_eq!(f.metrics.pending.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_delivery_while_open_closes_the_breaker() {
+        // Ladder of 2 fails, the one attempt while open fails, then the target recovers.
+        let m = mock(&[503, 503, 503]).await;
+        let f = Fixture::new();
+        let d = f.deliverer(2);
+        let target = [hook("hook", &m.url())];
+        assert_eq!(
+            deliver_record(&d, "b1", &target).await,
+            [Resolution::Failed]
+        );
+        assert_eq!(f.breaker_gauge("hook"), 1);
+        assert_eq!(
+            deliver_record(&d, "b2", &target).await,
+            [Resolution::Failed]
+        );
+        assert_eq!(
+            f.breaker_gauge("hook"),
+            1,
+            "a failure while open keeps it open"
+        );
+        assert_eq!(
+            deliver_record(&d, "b3", &target).await,
+            [Resolution::Delivered]
+        );
+        assert_eq!(f.breaker_gauge("hook"), 0, "a delivery closes it");
+        assert_eq!(
+            f.count("hook", BREAKER),
+            2,
+            "b2 and b3 were sent while open"
+        );
+        // Closed again: a 503 is retried on the ladder.
+        let m2 = mock(&[503]).await;
+        let again = [hook("hook", &m2.url())];
+        assert_eq!(
+            deliver_record(&d, "b4", &again).await,
+            [Resolution::Delivered]
+        );
+        assert_eq!(m2.received().len(), 2);
+        assert_eq!(f.count("hook", BREAKER), 2);
+    }
+
+    #[tokio::test]
+    async fn a_permanent_error_does_not_open_the_breaker() {
+        let m = mock(&[400, 503]).await;
+        let f = Fixture::new();
+        let d = f.deliverer(8);
+        let target = [hook("hook", &m.url())];
+        assert_eq!(
+            deliver_record(&d, "p1", &target).await,
+            [Resolution::Failed]
+        );
+        assert_eq!(f.breaker_gauge("hook"), 0);
+        // The next alert still gets its ladder: the 503 is retried.
+        assert_eq!(
+            deliver_record(&d, "p2", &target).await,
+            [Resolution::Delivered]
+        );
+        assert_eq!(m.received().len(), 3);
     }
 }
