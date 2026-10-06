@@ -171,7 +171,7 @@ pub struct GroupFilter {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AlertFilter {
     pub window: Window,
-    /// `new` or `spike`.
+    /// `new`, `spike` or `silence`.
     pub kind: Option<String>,
     pub service: Option<String>,
 }
@@ -274,8 +274,11 @@ pub fn alert_filter(
     if let Some(k) = &kind
         && k != "new"
         && k != "spike"
+        && k != "silence"
     {
-        return Err(format!("invalid kind {k:?}: expected new or spike"));
+        return Err(format!(
+            "invalid kind {k:?}: expected new, spike or silence"
+        ));
     }
     Ok(AlertFilter {
         window,

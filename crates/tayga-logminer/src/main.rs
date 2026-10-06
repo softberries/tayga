@@ -35,6 +35,8 @@ const MIN_NS: i64 = 60_000_000_000;
 /// Seasonal comparators: the spike window 1 day and 7 days earlier (spec 7a §2.3).
 const SEASONAL_SHIFTS_SECS: [u32; 2] = [86_400, 7 * 86_400];
 const KEY_WATERMARK: &str = "new_template_watermark_ns";
+/// Liveness stamp for `tayga-devtools remine`: written after every detection pass.
+const KEY_HEARTBEAT: &str = "logminer_heartbeat_ns";
 const KEY_MASKING_VERSION: &str = "masking_version";
 const KEY_EPOCH_START: &str = "masking_epoch_start_ns";
 /// Timeout of one `fetch_watermarks` call per detection tick.
@@ -794,6 +796,10 @@ async fn detect(
             }
         }
         Err(e) => tracing::warn!(error = %e, "detection failed"),
+    }
+    if let Err(e) = store.state_put(KEY_HEARTBEAT, now).await {
+        metrics.state_save_failures.inc();
+        tracing::warn!(error = %e, "saving the heartbeat failed");
     }
     metrics
         .detect_seconds

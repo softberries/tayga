@@ -83,6 +83,7 @@ pub struct NewCandidate {
 pub enum AlertKind {
     New,
     Spike,
+    Silence,
 }
 
 impl AlertKind {
@@ -90,6 +91,7 @@ impl AlertKind {
         match self {
             AlertKind::New => "new",
             AlertKind::Spike => "spike",
+            AlertKind::Silence => "silence",
         }
     }
 }

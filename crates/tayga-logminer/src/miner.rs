@@ -9,6 +9,7 @@ use tayga_store::rows::LogRow;
 /// `log_alerts.kind` (Enum8): 1 new, 2 spike.
 const KIND_NEW: i8 = 1;
 const KIND_SPIKE: i8 = 2;
+const KIND_SILENCE: i8 = 3;
 
 pub struct Miner {
     drain: Drain,
@@ -113,6 +114,7 @@ pub fn alert_row(a: &Alert, version: u64) -> LogAlertRow {
         kind: match a.kind {
             AlertKind::New => KIND_NEW,
             AlertKind::Spike => KIND_SPIKE,
+            AlertKind::Silence => KIND_SILENCE,
         },
         template_id: a.template_id,
         service: a.service.clone(),
@@ -134,6 +136,7 @@ pub fn alert_from_row(r: &LogAlertRow) -> Option<Alert> {
     let kind = match r.kind {
         KIND_NEW => AlertKind::New,
         KIND_SPIKE => AlertKind::Spike,
+        KIND_SILENCE => AlertKind::Silence,
         _ => return None,
     };
     Some(Alert {
@@ -399,6 +402,11 @@ mod tests {
         let mut n = a;
         n.kind = AlertKind::New;
         assert_eq!(alert_row(&n, 1).kind, KIND_NEW);
+        n.kind = AlertKind::Silence;
+        let row = alert_row(&n, 1);
+        assert_eq!(row.kind, KIND_SILENCE);
+        assert_eq!(alert_from_row(&row).unwrap().kind, AlertKind::Silence);
+        assert_eq!(alert_json(&n)["kind"], "silence");
         let mut bad = row;
         bad.kind = 0;
         assert_eq!(alert_from_row(&bad), None);

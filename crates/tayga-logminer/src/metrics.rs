@@ -138,7 +138,7 @@ impl LogminerMetrics {
                 .get_or_create(&ReasonLabel::new(PRE_EPOCH_MATCH)),
         );
         // Export both series at 0 so the family is visible before the first alert.
-        for kind in [AlertKind::New, AlertKind::Spike] {
+        for kind in [AlertKind::New, AlertKind::Spike, AlertKind::Silence] {
             drop(m.alerts.get_or_create(&KindLabel::new(kind.as_str())));
         }
         m
