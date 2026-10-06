@@ -30,7 +30,7 @@ use tayga_logminer::ownership::Ownership;
 use tayga_model::envelope::{Envelope, HEADER_KIND, Kind};
 use tayga_store::ClickHouseSettings;
 use tayga_store::flatten::rows_from_envelope;
-use tayga_store::logs::{LogHitRow, SeasonalWindow};
+use tayga_store::logs::{LogHitRow, NewCandidateRow, SeasonalWindow};
 use tayga_store::store::Store;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
@@ -441,6 +441,8 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
         consumer: &consumer,
         topic,
         metrics: &metrics,
+        producer: &producer,
+        alerts_topic: &cfg.alerts_topic,
     };
     // Set when shutdown interrupted a flush: nothing was committed, records are re-read on restart.
     let mut interrupted = false;
@@ -582,13 +584,16 @@ async fn load_watermark(
 ///
 /// 1. Pending work is flushed and committed: hits and templates are stored, then the offsets
 ///    committed. This normally runs right after the revoke (the revoke callback returns, `recv`
-///    times out within 200 ms because a revoked consumer receives nothing until the next assign),
-///    while the group still accepts the commit. If the commit is refused (the group already moved
-///    on), the partition's new owner re-reads the records from the last committed offset: hits
-///    are idempotent by `log_id` and template ids are stable hashes, so the re-read only repeats
-///    work. Dropping pending work instead would be safe under the eager protocol but would lose
-///    records of partitions kept under the cooperative one, whose position is not rewound.
-/// 2. On an assignment, the miner is reloaded and the state reset ([`LoopState::reassign`]).
+///    times out within 200 ms because a revoked consumer receives nothing until the next assign).
+///    The commit may be refused, or it may succeed after the reassignment and overwrite the new
+///    owner's committed offset. Either way nothing is lost, because offsets are only committed
+///    for stored records: at worst records are read again, and the re-read only repeats work
+///    (hits are idempotent by `log_id`, template ids are stable hashes). Dropping pending work
+///    instead would be safe under the eager protocol but would lose records of partitions kept
+///    under the cooperative one, whose position is not rewound.
+/// 2. On a revoke, one bounded new-template pass for the services owned so far
+///    ([`announce_on_revoke`]), before an assignment clears ownership.
+/// 3. On an assignment, the miner is reloaded and the state reset ([`LoopState::reassign`]).
 ///    The flush comes first: the reload discards the old miner's unflushed template changes.
 async fn on_rebalance(
     ctx: &Ctx<'_>,
@@ -605,6 +610,9 @@ async fn on_rebalance(
         if !flush(ctx, &mut st.miner, batch, &mut st.seen, Some(stop)).await? {
             return Ok(false);
         }
+    }
+    if changes.iter().any(|c| matches!(c, Change::Revoke(_))) {
+        announce_on_revoke(ctx, &cfg.detect(), st).await;
     }
     if !changes.iter().any(|c| matches!(c, Change::Assign(_))) {
         return Ok(true);
@@ -685,6 +693,8 @@ struct Ctx<'a> {
     consumer: &'a LogConsumer,
     topic: &'a str,
     metrics: &'a LogminerMetrics,
+    producer: &'a FutureProducer,
+    alerts_topic: &'a str,
 }
 
 /// Inserts hits, then the templates changed since the last flush, then commits offsets.
@@ -731,8 +741,10 @@ async fn flush(
         tpl.add_partition_offset(ctx.topic, partition, Offset::Offset(offset))?;
     }
     if let Err(e) = ctx.consumer.commit(&tpl, CommitMode::Sync) {
-        // Typically a revoked partition after a rebalance; its new owner re-reads the records
-        // and the hits are deduplicated by `log_id`.
+        // Typically a revoked partition after a rebalance. A refused commit, or a late one that
+        // overwrites the new owner's offset, only makes records read again: offsets are
+        // committed after their records are stored, so nothing is lost (hits deduplicate by
+        // `log_id`).
         tracing::warn!(error = %e, "offset commit failed");
     }
     ctx.metrics.templates.set(miner.len() as i64);
@@ -1049,13 +1061,20 @@ async fn detect(
     st.tracker.spikes.expire(detect_cfg, now);
 }
 
-/// The data time the watermark may advance to after a pass with this owned set: `None` (hold)
-/// while nothing is owned. After a restart or a rebalance the first pass can run before the
-/// first log is mined; the pass clock then comes from the store's latest hit (every service,
-/// every partition), and advancing to it would skip the templates of the backlog this replica
-/// has yet to mine.
-fn watermark_target(owned: &[String], pass_clock_ns: i64) -> Option<i64> {
-    (!owned.is_empty()).then_some(pass_clock_ns)
+/// The data time the watermark may advance to after a pass: `None` (hold) while nothing is
+/// owned and a backlog may remain, that is with no usable partition snapshot or an assigned
+/// partition behind. After a restart or a rebalance the first pass can run before the first log
+/// is mined; the pass clock then comes from the store's latest hit (every service, every
+/// partition), and advancing to it would skip the templates of the backlog this replica has yet
+/// to mine. With every assigned partition caught up there is no backlog: an idle replica
+/// advances, so its `:p<N>` keys do not go stale.
+fn watermark_target(
+    owned: &[String],
+    partitions: Option<&BTreeMap<i32, (i64, bool)>>,
+    pass_clock_ns: i64,
+) -> Option<i64> {
+    let backlog = partitions.is_none_or(|m| m.values().any(|&(_, caught_up)| !caught_up));
+    (!owned.is_empty() || !backlog).then_some(pass_clock_ns)
 }
 
 /// Masking epoch at startup: `(epoch start, whether to store the version and start)`.
@@ -1288,26 +1307,118 @@ async fn find_alerts(
         );
     }
     out.extend(silence_pass(store, miner, tracker, owned, data_now, now, metrics).await);
+    out.extend(new_template_alerts(store, cfg, miner, clock, owned, now, metrics).await?);
+    Ok((
+        out,
+        watermark_target(owned, clock.partitions.as_ref(), data_now),
+    ))
+}
+
+/// New-template alerts of `owned` services: templates first seen after the watermark (less the
+/// margin) that pass [`is_new`] and are not a pre-epoch status split.
+async fn new_template_alerts(
+    store: &Store,
+    cfg: &DetectConfig,
+    miner: &Miner,
+    clock: &NewTemplateClock,
+    owned: &[String],
+    now: i64,
+    metrics: &LogminerMetrics,
+) -> anyhow::Result<Vec<(Alert, bool)>> {
     let since = new_template_since(clock.watermark);
-    let candidates = store.new_template_candidates(since, owned).await?;
-    for r in candidates {
-        let c = NewCandidate {
+    let rows = store.new_template_candidates(since, owned).await?;
+    let mut out = Vec::new();
+    for c in new_candidates(cfg, miner, rows, since, clock.epoch_start, metrics) {
+        let window = minutes_covering(c.first_seen_ns, now, cfg.new_template_recent_min);
+        let examples = examples(store, c.template_id, window).await;
+        out.push((new_alert(&c, examples, now), true));
+    }
+    Ok(out)
+}
+
+/// The candidate rows that are new templates.
+fn new_candidates(
+    cfg: &DetectConfig,
+    miner: &Miner,
+    rows: Vec<NewCandidateRow>,
+    since: i64,
+    epoch_start: i64,
+    metrics: &LogminerMetrics,
+) -> Vec<NewCandidate> {
+    rows.into_iter()
+        .map(|r| NewCandidate {
             template_id: r.template_id,
             service: r.service,
             template: r.template,
             first_seen_ns: r.first_seen_ns,
             service_oldest_ns: r.service_oldest_ns,
-        };
-        if !is_new(cfg, &c, since, clock.epoch_start)
-            || suppressed_pre_epoch(miner, &c, clock.epoch_start, metrics)
-        {
-            continue;
-        }
-        let window = minutes_covering(c.first_seen_ns, now, cfg.new_template_recent_min);
-        let examples = examples(store, c.template_id, window).await;
-        out.push((new_alert(&c, examples, now), true));
+        })
+        .filter(|c| {
+            is_new(cfg, c, since, epoch_start)
+                && !suppressed_pre_epoch(miner, c, epoch_start, metrics)
+        })
+        .collect()
+}
+
+/// Longest the new-template pass at a revoke may take; the rebalance goes on after it.
+const REVOKE_PASS_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// One bounded new-template pass for the services owned before a revoke, after the revoke's
+/// flush stored their last templates (review I1). Ownership is learned only from mined records:
+/// once a commit of the old owner succeeds, the new owner never mines those records, so a
+/// template first seen after the last pass would be a candidate on no replica if its service
+/// then went quiet. The alerts are stored and published as in a pass; one the new owner raises
+/// as well collapses by its `alert_id` (`hash("new", template_id)`). The watermark is not moved.
+/// A failure or timeout is logged and counted in `write_failures`, and the rebalance goes on.
+async fn announce_on_revoke(ctx: &Ctx<'_>, cfg: &DetectConfig, st: &mut LoopState) {
+    let now = now_ns();
+    let owned = st.tracker.ownership.owned(now);
+    if owned.is_empty() {
+        return;
     }
-    Ok((out, watermark_target(owned, data_now)))
+    let pass = async {
+        let alerts = new_template_alerts(
+            ctx.store,
+            cfg,
+            &st.miner,
+            &st.clock,
+            &owned,
+            now,
+            ctx.metrics,
+        )
+        .await?;
+        let stored = publish_alerts(
+            ctx.store,
+            ctx.producer,
+            ctx.alerts_topic,
+            &alerts,
+            now,
+            ctx.metrics,
+        )
+        .await;
+        anyhow::ensure!(stored, "storing the alerts failed");
+        anyhow::Ok(alerts.len())
+    };
+    match tokio::time::timeout(REVOKE_PASS_TIMEOUT, pass).await {
+        Ok(Ok(alerts)) => {
+            tracing::info!(
+                services = owned.len(),
+                alerts,
+                "new-template pass at revoke"
+            );
+        }
+        Ok(Err(e)) => {
+            ctx.metrics.write_failures.inc();
+            tracing::warn!(error = %e, "new-template pass at revoke failed");
+        }
+        Err(_) => {
+            ctx.metrics.write_failures.inc();
+            tracing::warn!(
+                timeout_secs = REVOKE_PASS_TIMEOUT.as_secs(),
+                "new-template pass at revoke timed out"
+            );
+        }
+    }
 }
 
 /// Silence alerts of this pass. A failed lookup is logged and skips silence only, so it cannot
@@ -2027,21 +2138,238 @@ mod tests {
     }
 
     #[test]
-    fn the_watermark_holds_while_nothing_is_owned() {
+    fn the_watermark_holds_while_nothing_is_owned_and_a_backlog_may_remain() {
         // After a restart the first pass runs before the first mined log: the pass clock is the
         // store's latest hit, far ahead of the backlog still to mine.
         let mut ownership = Ownership::new(60);
-        let watermark = 100 * MIN_NS;
-        let store_latest = 500 * MIN_NS;
-        let target = watermark_target(&ownership.owned(500 * MIN_NS), store_latest);
-        assert_eq!(target, None);
-        assert_eq!(watermark.max(target.unwrap_or(watermark)), watermark);
-        // Once a log is mined, the pass may advance.
-        ownership.touch("api", 500 * MIN_NS);
+        let latest = 500 * MIN_NS;
+        let none = ownership.owned(latest);
+        assert_eq!(watermark_target(&none, None, latest), None, "no snapshot");
+        let behind = parts(&[(0, 100 * MIN_NS, false), (1, 400 * MIN_NS, true)]);
+        assert_eq!(watermark_target(&none, Some(&behind), latest), None);
+        // Every assigned partition caught up (with or without data): an idle replica advances.
         assert_eq!(
-            watermark_target(&ownership.owned(500 * MIN_NS), store_latest),
-            Some(store_latest)
+            watermark_target(&none, Some(&BTreeMap::new()), latest),
+            Some(latest)
         );
+        let caught_up = parts(&[(1, 400 * MIN_NS, true)]);
+        assert_eq!(
+            watermark_target(&none, Some(&caught_up), latest),
+            Some(latest)
+        );
+        // Once a log is mined, the pass may advance (the pass clock itself holds for a backlog).
+        ownership.touch("api", latest);
+        assert_eq!(
+            watermark_target(&ownership.owned(latest), Some(&behind), 100 * MIN_NS),
+            Some(100 * MIN_NS)
+        );
+    }
+
+    fn candidate_row(id: u64, first_seen_ns: i64) -> NewCandidateRow {
+        NewCandidateRow {
+            template_id: id,
+            service: "api".into(),
+            template: format!("template {id} <*>"),
+            first_seen_ns,
+            service_oldest_ns: 0,
+        }
+    }
+
+    #[test]
+    fn a_template_first_seen_after_the_last_pass_is_a_new_candidate() {
+        let cfg = DetectConfig::default();
+        let miner = Miner::new(DrainConfig::default());
+        let m = LogminerMetrics::default();
+        let watermark = 1_000 * MIN_NS;
+        let since = new_template_since(watermark);
+        let rows = vec![
+            candidate_row(1, since - MIN_NS),
+            candidate_row(2, watermark + MIN_NS),
+        ];
+        let picked = new_candidates(&cfg, &miner, rows, since, 0, &m);
+        assert_eq!(
+            picked.iter().map(|c| c.template_id).collect::<Vec<_>>(),
+            [2]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_new_template_pass_at_revoke_is_counted_and_does_not_block() {
+        let store = unreachable_store();
+        let consumer = offline_consumer();
+        let metrics = LogminerMetrics::default();
+        let producer = offline_producer();
+        let ctx = test_ctx(&store, &consumer, &producer, &metrics, "tayga.alerts");
+        let mut st = state();
+        st.clock.assigned = vec![0];
+        st.tracker.ownership.touch("api", now_ns());
+        let (_tx, mut stop) = watch::channel(false);
+        let started = Instant::now();
+        let done = on_rebalance(
+            &ctx,
+            &LogminerSettings::default(),
+            &[Change::Revoke(vec![0])],
+            &mut st,
+            &mut stop,
+        )
+        .await
+        .unwrap();
+        assert!(done);
+        assert_eq!(metrics.write_failures.get(), 1);
+        assert!(started.elapsed() < REVOKE_PASS_TIMEOUT);
+    }
+
+    fn live_ch() -> ClickHouseSettings {
+        ClickHouseSettings {
+            url: std::env::var("TAYGA_IT_CLICKHOUSE")
+                .unwrap_or_else(|_| "http://localhost:18123".into()),
+            database: format!("tayga_it_{}", rand::random::<u32>()),
+        }
+    }
+
+    async fn live_store() -> (ClickHouseSettings, Store) {
+        let s = live_ch();
+        tayga_store::migrate::migrate(&s).await.unwrap();
+        let store = Store::new(&s);
+        (s, store)
+    }
+
+    async fn drop_db(s: &ClickHouseSettings, store: &Store) {
+        store
+            .client()
+            .query(&format!("DROP DATABASE `{}`", s.database))
+            .execute()
+            .await
+            .unwrap();
+    }
+
+    /// Review I1: a template mined and flushed after the last pass, by a replica whose
+    /// partition is then revoked, is announced during the revoke.
+    #[tokio::test]
+    #[ignore = "requires ClickHouse and Kafka: TAYGA_IT_CLICKHOUSE, TAYGA_IT_KAFKA"]
+    async fn a_template_first_seen_after_the_last_pass_is_announced_at_revoke() {
+        let (s, store) = live_store().await;
+        let kafka: KafkaSettings = serde_json::from_value(serde_json::json!({
+            "brokers": std::env::var("TAYGA_IT_KAFKA").unwrap_or_else(|_| "localhost:19092".into()),
+        }))
+        .unwrap();
+        let alerts_topic = format!("tayga-it-alerts-{}", rand::random::<u32>());
+        tayga_kafka::ensure_topic(&KafkaSettings {
+            topic: alerts_topic.clone(),
+            partitions: 1,
+            ..kafka.clone()
+        })
+        .await
+        .unwrap();
+        let now = now_ns();
+        let last_pass = now - 10 * MIN_NS;
+        let old = template_row(
+            1,
+            "api",
+            "user <*> logged in",
+            now - 2 * 86_400 * 1_000_000_000,
+        );
+        let fresh = template_row(2, "api", "payment provider <*> unreachable", now - MIN_NS);
+        store.upsert_templates(&[old, fresh]).await.unwrap();
+
+        let consumer = offline_consumer();
+        let producer = tayga_kafka::producer(&kafka).unwrap();
+        let metrics = LogminerMetrics::default();
+        let ctx = test_ctx(&store, &consumer, &producer, &metrics, &alerts_topic);
+        let mut st = state();
+        st.clock.assigned = vec![0];
+        st.clock.watermark = last_pass;
+        st.tracker.ownership.touch("api", now);
+        let (_tx, mut stop) = watch::channel(false);
+        let done = on_rebalance(
+            &ctx,
+            &LogminerSettings::default(),
+            &[Change::Revoke(vec![0])],
+            &mut st,
+            &mut stop,
+        )
+        .await
+        .unwrap();
+
+        let ids: Vec<String> = store
+            .client()
+            .query("SELECT alert_id FROM log_alerts FINAL WHERE kind = 'new' ORDER BY alert_id")
+            .fetch_all()
+            .await
+            .unwrap();
+        let expected = new_alert(&candidate(2, "api", "", now - MIN_NS), vec![], now).alert_id;
+        let admin: rdkafka::admin::AdminClient<rdkafka::client::DefaultClientContext> =
+            rdkafka::ClientConfig::new()
+                .set("bootstrap.servers", &kafka.brokers)
+                .create()
+                .unwrap();
+        admin
+            .delete_topics(&[&alerts_topic], &rdkafka::admin::AdminOptions::new())
+            .await
+            .unwrap();
+        drop_db(&s, &store).await;
+        assert!(done);
+        assert_eq!(ids, [expected]);
+        assert_eq!(metrics.write_failures.get(), 0);
+        assert_eq!(
+            st.clock.watermark, last_pass,
+            "the revoke pass does not move it"
+        );
+    }
+
+    /// Review M1/M2: `detect` holds the watermark while nothing is owned and a backlog may
+    /// remain, and an idle, caught-up replica advances it and saves its partition keys.
+    #[tokio::test]
+    #[ignore = "requires ClickHouse: TAYGA_IT_CLICKHOUSE"]
+    async fn detect_holds_with_a_backlog_and_advances_when_idle() {
+        let (s, store) = live_store().await;
+        let now = now_ns();
+        let hit_ts = now - MIN_NS;
+        store
+            .insert_log_hits(&[LogHitRow {
+                log_id: 1,
+                template_id: 1,
+                service: "other".into(),
+                ts: hit_ts,
+                severity_number: 9,
+                trace_id: String::new(),
+                span_id: String::new(),
+            }])
+            .await
+            .unwrap();
+        let producer = offline_producer();
+        let metrics = LogminerMetrics::default();
+        let cfg = LogminerSettings::default();
+        let mut st = state();
+        let watermark = now - 30 * MIN_NS;
+        st.clock.watermark = watermark;
+        st.clock.assigned = vec![0, 1];
+        let saved = |store: &Store| {
+            let store = store.clone();
+            async move { store.state_get_prefix(KEY_WATERMARK).await.unwrap() }
+        };
+
+        // Restart: no snapshot yet, nothing owned.
+        detect(&store, &producer, &cfg, &mut st, &metrics).await;
+        assert_eq!(st.clock.watermark, watermark);
+        assert!(saved(&store).await.is_empty());
+        assert!(store.state_get(&st.heartbeat_key).await.unwrap().is_some());
+        // A partition behind: still held.
+        st.clock.partitions = Some(parts(&[(0, watermark, false)]));
+        detect(&store, &producer, &cfg, &mut st, &metrics).await;
+        assert_eq!(st.clock.watermark, watermark);
+        assert!(saved(&store).await.is_empty());
+        // Every partition caught up, no data: advance to the store's latest hit and save.
+        st.clock.partitions = Some(BTreeMap::new());
+        detect(&store, &producer, &cfg, &mut st, &metrics).await;
+        let got = saved(&store).await;
+        drop_db(&s, &store).await;
+        assert_eq!(st.clock.watermark, hit_ts);
+        assert_eq!(
+            got,
+            [(watermark_key(0), hit_ts), (watermark_key(1), hit_ts)]
+        );
+        assert_eq!(metrics.state_save_failures.get(), 0);
     }
 
     fn owned(v: &[&str]) -> Vec<String> {
@@ -2091,9 +2419,34 @@ mod tests {
         assert!(restore_spikes(&store, &cfg, &mut t, &[]).await.is_ok());
     }
 
+    fn offline_kafka() -> KafkaSettings {
+        serde_json::from_str(r#"{"brokers":"127.0.0.1:1"}"#).unwrap()
+    }
+
     fn offline_consumer() -> LogConsumer {
-        let kafka: KafkaSettings = serde_json::from_str(r#"{"brokers":"127.0.0.1:1"}"#).unwrap();
-        tayga_kafka::consumer_with_context(&kafka, GROUP, Rebalances::new("tayga.logs")).unwrap()
+        tayga_kafka::consumer_with_context(&offline_kafka(), GROUP, Rebalances::new("tayga.logs"))
+            .unwrap()
+    }
+
+    fn offline_producer() -> FutureProducer {
+        tayga_kafka::producer(&offline_kafka()).unwrap()
+    }
+
+    fn test_ctx<'a>(
+        store: &'a Store,
+        consumer: &'a LogConsumer,
+        producer: &'a FutureProducer,
+        metrics: &'a LogminerMetrics,
+        alerts_topic: &'a str,
+    ) -> Ctx<'a> {
+        Ctx {
+            store,
+            consumer,
+            topic: "tayga.logs",
+            metrics,
+            producer,
+            alerts_topic,
+        }
     }
 
     #[tokio::test]
@@ -2101,12 +2454,8 @@ mod tests {
         let store = unreachable_store();
         let consumer = offline_consumer();
         let metrics = LogminerMetrics::default();
-        let ctx = Ctx {
-            store: &store,
-            consumer: &consumer,
-            topic: "tayga.logs",
-            metrics: &metrics,
-        };
+        let producer = offline_producer();
+        let ctx = test_ctx(&store, &consumer, &producer, &metrics, "tayga.alerts");
         let cfg = LogminerSettings::default();
         let mut st = state();
         st.clock.assigned = vec![0, 1];
@@ -2143,12 +2492,8 @@ mod tests {
         let store = unreachable_store();
         let consumer = offline_consumer();
         let metrics = LogminerMetrics::default();
-        let ctx = Ctx {
-            store: &store,
-            consumer: &consumer,
-            topic: "tayga.logs",
-            metrics: &metrics,
-        };
+        let producer = offline_producer();
+        let ctx = test_ctx(&store, &consumer, &producer, &metrics, "tayga.alerts");
         let mut st = state();
         st.clock.assigned = vec![0, 1, 2];
         let (_tx, mut stop) = watch::channel(false);
