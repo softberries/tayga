@@ -26,6 +26,27 @@ pub const NEW_TEMPLATE_TIMEOUT: Duration = Duration::from_secs(180);
 pub const PROBE_WARMUP: Duration = Duration::from_secs(15 * 60);
 /// First run only: how long to wait for the probe service's seed template to age past the warmup.
 pub const PROBE_WARMUP_TIMEOUT: Duration = Duration::from_secs(17 * 60);
+/// How long a fresh probe body may take to show up as a template (ingest, Kafka, logminer flush).
+pub const TEMPLATE_TIMEOUT: Duration = Duration::from_secs(120);
+/// The silence threshold the silence scenario sets on its probe template.
+pub const SILENCE_MINUTES: u32 = 2;
+/// The silence scenario keeps the probe service logging at this pace, so its log time moves on.
+pub const SILENCE_KEEPALIVE: Duration = Duration::from_secs(20);
+/// `SILENCE_MINUTES` of quiet, plus up to a 60 s detection pass, plus slack for the
+/// per-partition clock that holds detection back to the slowest assigned partition.
+pub const SILENCE_TIMEOUT: Duration = Duration::from_secs(6 * 60);
+/// Set by `make e2e-notifier`: the silence scenario then also checks the notifier's delivery.
+pub const NOTIFIER_CHECK_ENV: &str = "TAYGA_E2E_NOTIFIER";
+/// Host port of the notifier check's mock webhook; `deploy/tayga-notifier.e2e.toml` points the
+/// `e2e-mock` target at `http://host.docker.internal:18099/hook`.
+pub const NOTIFIER_MOCK_PORT: u16 = 18099;
+/// Target name of the mock in `deploy/tayga-notifier.e2e.toml`.
+pub const NOTIFIER_MOCK_TARGET: &str = "e2e-mock";
+/// How long the notifier may take to deliver an alert to the mock once it exists.
+pub const DELIVERY_TIMEOUT: Duration = Duration::from_secs(120);
+/// After `docker restart tayga-notifier`, how long to watch for a resend. The logminer
+/// re-publishes a silence alert on every 60 s pass, so this covers at least two re-publishes.
+pub const RESEND_WATCH: Duration = Duration::from_secs(150);
 pub const POLL_EVERY: Duration = Duration::from_secs(5);
 /// Spec §15 target for flag-to-story latency; reported, not asserted.
 pub const TARGET_LATENCY: Duration = Duration::from_secs(60);
@@ -127,6 +148,26 @@ impl Api {
             .as_array()
             .cloned()
             .unwrap_or_default())
+    }
+
+    /// `PUT /log-templates/{id}/silence`; returns the stored setting.
+    pub async fn put_silence(
+        &self,
+        template_id: &str,
+        enabled: bool,
+        minutes: u32,
+    ) -> anyhow::Result<Value> {
+        let res = self
+            .http
+            .put(format!(
+                "{}/api/v1/log-templates/{template_id}/silence",
+                self.base
+            ))
+            .json(&serde_json::json!({ "enabled": enabled, "minutes": minutes }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(res.json().await?)
     }
 
     pub async fn story(&self, id: &str) -> anyhow::Result<Value> {
@@ -414,6 +455,49 @@ pub async fn wait_for_service_warmup(
     }
 }
 
+/// The id of the template whose text is exactly `body`.
+pub fn template_id_of(templates: &[Value], body: &str) -> Option<String> {
+    templates
+        .iter()
+        .find(|t| t["template"].as_str() == Some(body))
+        .and_then(|t| t["template_id"].as_str().map(str::to_string))
+}
+
+/// Polls `service`'s templates matching `word` until one's text is exactly `body`. Returns its id.
+pub async fn wait_for_template(
+    api: &Api,
+    service: &str,
+    word: &str,
+    body: &str,
+    timeout: Duration,
+) -> anyhow::Result<String> {
+    let start = Instant::now();
+    let query = format!("service={service}&q={word}&since=1h");
+    loop {
+        match api.log_templates(&query).await {
+            Ok(t) => {
+                if let Some(id) = template_id_of(&t, body) {
+                    return Ok(id);
+                }
+            }
+            Err(e) => eprintln!("[e2e] poll error (continuing): {e}"),
+        }
+        anyhow::ensure!(
+            start.elapsed() < timeout,
+            "no template {body:?} in {service} after {timeout:?}"
+        );
+        tokio::time::sleep(POLL_EVERY).await;
+    }
+}
+
+/// The requests the mock received for `alert_id`.
+pub fn deliveries_of<'a>(received: &'a [Received], alert_id: &str) -> Vec<&'a Received> {
+    received
+        .iter()
+        .filter(|r| r.body["alert_id"].as_str() == Some(alert_id))
+        .collect()
+}
+
 /// Fails fast when no checkout endpoint can flag a `delay_s` trace as slow: the assembler needs
 /// ≥ 50 baseline traces and a duration above max(1.5 × p99, p99 + 100 ms) over the last 60 min.
 pub async fn ensure_checkout_baseline_detects(
@@ -588,6 +672,32 @@ mod tests {
         let started = Instant::now();
         assert_eq!(post().await.unwrap().status(), 200);
         assert!(started.elapsed() >= Duration::from_millis(300));
+    }
+
+    #[test]
+    fn template_id_needs_the_exact_text() {
+        let t = [
+            serde_json::json!({ "template_id": "1", "template": "abc probe marker" }),
+            serde_json::json!({ "template_id": "2", "template": "abc probe probe marker" }),
+        ];
+        assert_eq!(
+            template_id_of(&t, "abc probe probe marker").as_deref(),
+            Some("2")
+        );
+        assert!(template_id_of(&t, "abc marker").is_none());
+    }
+
+    #[test]
+    fn deliveries_are_counted_per_alert_id() {
+        let r = |id: &str| Received {
+            path: "/hook".into(),
+            content_type: None,
+            body: serde_json::json!({ "alert_id": id }),
+            status: 200,
+        };
+        let got = [r("a"), r("b"), r("a")];
+        assert_eq!(deliveries_of(&got, "a").len(), 2);
+        assert_eq!(deliveries_of(&got, "c").len(), 0);
     }
 
     #[test]

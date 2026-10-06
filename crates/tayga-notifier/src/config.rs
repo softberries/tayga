@@ -178,27 +178,44 @@ mod tests {
         s.validate().unwrap();
     }
 
-    #[test]
-    fn the_deploy_file_has_no_targets() {
+    fn deploy_file(name: &str) -> NotifierSettings {
         #[derive(Deserialize)]
         struct Root {
             notifier: NotifierSettings,
         }
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../deploy/tayga-notifier.toml"
-        );
+        let path = format!("{}/../../deploy/{name}", env!("CARGO_MANIFEST_DIR"));
         let root: Root = config::Config::builder()
-            .add_source(config::File::new(path, config::FileFormat::Toml))
+            .add_source(config::File::new(&path, config::FileFormat::Toml))
             .build()
             .unwrap()
             .try_deserialize()
             .unwrap();
-        let s = root.notifier;
-        s.validate().unwrap();
+        root.notifier.validate().unwrap();
+        root.notifier
+    }
+
+    #[test]
+    fn the_deploy_file_has_no_targets() {
+        let s = deploy_file("tayga-notifier.toml");
         assert!(s.targets.is_empty());
         assert_eq!(s.kinds, AlertKind::ALL);
         assert_eq!((s.max_attempts, s.timeout_secs), (8, 10));
+        assert_eq!(s.max_age_secs, 3_600);
+    }
+
+    /// `make e2e-notifier` mounts this file; the e2e crate's mock listens on port 18099 and
+    /// checks deliveries for the `e2e-mock` target.
+    #[test]
+    fn the_e2e_file_targets_the_host_mock() {
+        let s = deploy_file("tayga-notifier.e2e.toml");
+        assert_eq!(s.targets.len(), 1);
+        let t = &s.targets[0];
+        assert_eq!(
+            (t.name.as_str(), &t.kind),
+            ("e2e-mock", &TargetKind::Webhook)
+        );
+        assert_eq!(t.url.expose(), "http://host.docker.internal:18099/hook");
+        assert_eq!(s.kinds, AlertKind::ALL);
         assert_eq!(s.max_age_secs, 3_600);
     }
 

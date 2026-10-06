@@ -2,6 +2,7 @@
 //! A scenario passes only when its group has new stories after the flip (see `wait_for_group`).
 
 use serde_json::Value;
+use std::time::{Duration, Instant};
 use tayga_e2e::*;
 
 fn s(v: &Value, key: &str) -> String {
@@ -243,5 +244,165 @@ async fn new_template_from_probe() -> anyhow::Result<()> {
         traces.iter().any(|t| s(t, "trace_id") == trace_hex),
         "example_traces {traces:?} should contain {trace_hex}"
     );
+    Ok(())
+}
+
+/// Spec §5 (plan 7b): two fresh probe templates A and B; silence on A with `SILENCE_MINUTES`;
+/// B keeps the probe service logging every `SILENCE_KEEPALIVE` while A stays quiet, so A goes
+/// silent in log time. Each run adds two probe templates (see `new_template_from_probe` for the
+/// Drain capacity this uses). With `TAYGA_E2E_NOTIFIER=1` (`make e2e-notifier`, which points
+/// the notifier at a mock on the host) it also checks that the alert is delivered exactly once,
+/// and still once after `docker restart tayga-notifier`. Silence on A is switched off at the end.
+#[tokio::test]
+#[ignore = "end-to-end: requires `make up`"]
+async fn silence_alert_and_delivery() -> anyhow::Result<()> {
+    use std::net::SocketAddr;
+    use tayga_devtools::emit::{
+        PROBE_REPEATS, PROBE_SERVICE, emit_log, probe_body, random_probe_repeats, random_trace_id,
+        random_word,
+    };
+    const INGEST: &str = "http://localhost:14318";
+    let api = Api::new(API);
+    let notifier_check = std::env::var(NOTIFIER_CHECK_ENV).is_ok_and(|v| v == "1");
+    // Started first, so the notifier never meets a closed port for the alert under test.
+    let mock = if notifier_check {
+        Some(MockWebhook::start(SocketAddr::from(([0, 0, 0, 0], NOTIFIER_MOCK_PORT)), &[]).await?)
+    } else {
+        None
+    };
+
+    let (word_a, word_b) = (random_word(12), random_word(12));
+    let repeats_a = random_probe_repeats();
+    // A different token count for B keeps the two in different Drain length nodes.
+    let repeats_b = if repeats_a == *PROBE_REPEATS.end() {
+        repeats_a - 1
+    } else {
+        repeats_a + 1
+    };
+    let (body_a, body_b) = (
+        probe_body(&word_a, repeats_a),
+        probe_body(&word_b, repeats_b),
+    );
+    let started = Instant::now();
+    emit_log(INGEST, PROBE_SERVICE, &body_a, &random_trace_id(), 9).await?;
+    emit_log(INGEST, PROBE_SERVICE, &body_b, &random_trace_id(), 9).await?;
+    let mut last_b = Instant::now();
+    let id_a = wait_for_template(&api, PROBE_SERVICE, &word_a, &body_a, TEMPLATE_TIMEOUT).await?;
+    wait_for_template(&api, PROBE_SERVICE, &word_b, &body_b, TEMPLATE_TIMEOUT).await?;
+    println!(
+        "[e2e] silence: templates A={id_a} and B after {:.0}s",
+        started.elapsed().as_secs_f64()
+    );
+
+    let enabled_at = now_ns();
+    api.put_silence(&id_a, true, SILENCE_MINUTES).await?;
+    let outcome = async {
+        let since_enable = Instant::now();
+        let query = format!("kind=silence&service={PROBE_SERVICE}&since=1h");
+        let alert = loop {
+            if last_b.elapsed() >= SILENCE_KEEPALIVE {
+                emit_log(INGEST, PROBE_SERVICE, &body_b, &random_trace_id(), 9).await?;
+                last_b = Instant::now();
+            }
+            match api.log_alerts(&query).await {
+                Ok(alerts) => {
+                    if let Some(a) = alerts.into_iter().find(|a| {
+                        s(a, "template_id") == id_a
+                            && a["last_at_ns"].as_i64().is_some_and(|n| n > enabled_at)
+                    }) {
+                        break a;
+                    }
+                }
+                Err(e) => eprintln!("[e2e] poll error (continuing): {e}"),
+            }
+            anyhow::ensure!(
+                since_enable.elapsed() < SILENCE_TIMEOUT,
+                "no silence alert for template {id_a} within {SILENCE_TIMEOUT:?}"
+            );
+            tokio::time::sleep(POLL_EVERY).await;
+        };
+        let quiet_s = (s_i64(&alert, "last_at_ns") - s_i64(&alert, "started_at_ns")) / 1_000_000_000;
+        println!(
+            "[e2e] silence: alert {} after {:.0}s from enabling (started_at to last_at {quiet_s}s, {:.0}s from the first emit)",
+            s(&alert, "alert_id"),
+            since_enable.elapsed().as_secs_f64(),
+            started.elapsed().as_secs_f64()
+        );
+        anyhow::ensure!(
+            quiet_s >= i64::from(SILENCE_MINUTES) * 60,
+            "a silence alert's started_at is the last hit, so last_at - started_at >= minutes: {alert}"
+        );
+        if let Some(mock) = &mock {
+            check_single_delivery(mock, &s(&alert, "alert_id"), &id_a).await?;
+        }
+        anyhow::Ok(())
+    }
+    .await;
+    // Switch silence off, also after a failure, so A's alert lapses instead of being refreshed.
+    let reset = api.put_silence(&id_a, false, SILENCE_MINUTES).await;
+    outcome?;
+    reset?;
+    Ok(())
+}
+
+fn s_i64(v: &Value, key: &str) -> i64 {
+    v[key].as_i64().unwrap_or_default()
+}
+
+/// The mock gets exactly one delivery for `alert_id`, and still one after a notifier restart
+/// during which the logminer keeps re-publishing the alert.
+async fn check_single_delivery(
+    mock: &MockWebhook,
+    alert_id: &str,
+    template_id: &str,
+) -> anyhow::Result<()> {
+    let waiting = Instant::now();
+    let first = loop {
+        if let Some(r) = deliveries_of(&mock.received(), alert_id).first() {
+            break (*r).clone();
+        }
+        anyhow::ensure!(
+            waiting.elapsed() < DELIVERY_TIMEOUT,
+            "no delivery of {alert_id} within {DELIVERY_TIMEOUT:?}; the mock got {} requests",
+            mock.received().len()
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
+    println!(
+        "[e2e] notifier: delivered after {:.0}s: {}",
+        waiting.elapsed().as_secs_f64(),
+        first.body
+    );
+    anyhow::ensure!(
+        first.content_type.as_deref() == Some("application/json"),
+        "content type {:?}",
+        first.content_type
+    );
+    anyhow::ensure!(
+        first.body["kind"] == "silence"
+            && first.body["template_id"] == template_id
+            && s(&first.body, "summary").contains("has been silent for")
+            && first.body["last_at"].is_string(),
+        "unexpected payload {}",
+        first.body
+    );
+
+    let restart = std::process::Command::new("docker")
+        .args(["restart", "tayga-notifier"])
+        .output()?;
+    anyhow::ensure!(
+        restart.status.success(),
+        "docker restart tayga-notifier: {}",
+        String::from_utf8_lossy(&restart.stderr)
+    );
+    println!("[e2e] notifier: restarted; watching {RESEND_WATCH:?} for a resend");
+    tokio::time::sleep(RESEND_WATCH).await;
+    let got = mock.received();
+    let n = deliveries_of(&got, alert_id).len();
+    println!(
+        "[e2e] notifier: {n} delivery of {alert_id} ({} requests in all)",
+        got.len()
+    );
+    anyhow::ensure!(n == 1, "{alert_id} was delivered {n} times");
     Ok(())
 }
