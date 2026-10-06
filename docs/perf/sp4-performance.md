@@ -12,7 +12,7 @@ Hardware and software:
 | ClickHouse | 26.8.15.10 | `SELECT version()` |
 | GPU | Apple M3 Max, wgpu backend Metal, integrated, compute shaders yes, `SHADER_INT64` yes | wgpu 30.0.1 `Adapter::get_info`, `features`, `get_downlevel_capabilities` |
 
-Corpus: `fixtures/log_corpus.jsonl.gz`, 50,000 `logs` rows of the last hour from 17 services, 2026-10-06 18:50:23 to 19:13:01 UTC (first and last line). Exported read-only with:
+Corpus: `fixtures/log_corpus.jsonl.gz`, the oldest 50,000 rows of the last hour (18:50:23–19:13:01 UTC, 22 min), from 17 services. Exported read-only with:
 
 ```sh
 curl -s 'http://localhost:18123/?database=tayga' --data-binary "SELECT service_name AS service, toUnixTimestamp64Nano(l.ts) AS ts_ns, severity_number AS sev, body FROM logs AS l WHERE l.ts > now() - INTERVAL 1 HOUR ORDER BY l.ts LIMIT 50000 FORMAT JSONEachRow" | gzip -9 > fixtures/log_corpus.jsonl.gz
@@ -22,6 +22,8 @@ The export was scanned for `password|passwd|authorization|bearer |secret|api[_-]
 
 ## Live load
 
+The hardware table above and the Live load and ClickHouse sections are copied from spec §2.1, §2.6 and §2.7 (`docs/superpowers/specs/2026-10-06-tayga-sp4-performance-design.md`), observed on 2026-10-06, and cannot be reproduced from the benches; the spec has the queries and commands.
+
 Sample of 2026-10-06, between 18:30 and 19:00 UTC, 60 s.
 
 | Measure | Value | Source |
@@ -29,7 +31,7 @@ Sample of 2026-10-06, between 18:30 and 19:00 UTC, 60 s.
 | Logs mined | 2,456 in 61 s = **40 lines/s** | `tayga_logminer_logs_mined_total` delta |
 | `tayga.logs` records | 473 in 61 s, so **5.2 logs per record**: the miner's real batch | `tayga_ingest_log_records_published_total{topic="tayga.logs"}` delta |
 | CPU (average of 30 `docker stats` samples, % of one core) | ClickHouse 21.1, ingest 1.81, assembler 1.55, **logminer 1.07**, writer 0.75, api 0.21 | `docker stats --no-stream` |
-| Drain's share of the logminer | 40 × 2.7 µs = 0.11 ms/s, about 0.011 % of a core and **about 1 % of the logminer's own CPU** | 2.3 × live rate |
+| Drain's share of the logminer | 40 lines/s × 2.818 µs per line (the `drain_add` row of the Drain breakdown below) = 0.113 ms/s, about 0.011 % of a core and **about 1 % of the logminer's own CPU** (0.011 / 1.07) | live rate × bench µs per line |
 
 The logminer's CPU is fixed overhead: Kafka polling, the 200 ms `recv` timeout loop and the 60 s detection pass. ClickHouse is the largest consumer.
 
@@ -67,9 +69,9 @@ Isolated re-runs on the same data (read-only, `use_query_cache=0`, best of 3, CP
 
 ## Benchmarks
 
-Baseline, criterion, release build, one thread. Time and throughput are criterion's middle value of the confidence interval. The `convert`, `flatten` and `assemble` element counts are derived (time × throughput), not printed by criterion.
+Baseline, criterion, release build, one thread. Time and throughput are criterion's point estimate: the middle value of the confidence interval, not the median. The `convert`, `flatten` and `assemble` element counts are derived (time × throughput), not printed by criterion.
 
-| Bench | Elements | Time (median) | Throughput (median) |
+| Bench | Elements | Time (estimate) | Throughput (estimate) |
 |---|---|---|---|
 | `stages/split` | 50,000 lines | 26.972 ms | 1.8538 Melem/s |
 | `stages/tokens` | 50,000 lines | 122.88 ms | 406.89 Kelem/s |
@@ -100,6 +102,8 @@ From `stages` (50,000 lines per iteration).
 | of which split and `String` allocation only | 0.539 | 19.1 % |
 | masking (`tokens` − `split`) | 1.919 | 68.1 % |
 | tree (`drain_add` − `tokens`) | 0.360 | 12.8 % |
+
+`tokens − split` also includes the per-token allocation difference between the two benches.
 
 Spike (spec §2.3): masking 70 %, tree 11 %. Masking dominates, as in the spike.
 

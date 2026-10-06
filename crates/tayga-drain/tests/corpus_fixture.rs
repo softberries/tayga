@@ -7,7 +7,7 @@ use std::collections::HashSet;
 #[test]
 fn the_corpus_has_real_demo_logs() {
     let lines = corpus::load();
-    assert!(lines.len() >= 1_000, "{} lines", lines.len());
+    assert_eq!(lines.len(), 50_000);
     let services: HashSet<&str> = lines.iter().map(|l| l.service.as_str()).collect();
-    assert!(services.len() >= 10, "{services:?}");
+    assert!(services.len() >= 17, "{services:?}");
 }

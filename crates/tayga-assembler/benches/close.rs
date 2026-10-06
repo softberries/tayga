@@ -30,6 +30,16 @@ fn close(c: &mut Criterion) {
         .map(|e| trace_id_of(e).map(|t| t.to_hex()))
         .collect();
     let sizes: Vec<usize> = envelopes.iter().map(|e| e.encode().len()).collect();
+    // The timed loop assumes no trace closes for size reasons during `ingest`.
+    let now = Instant::now();
+    let mut w = Windows::new(cfg());
+    for (i, env) in envelopes.iter().enumerate() {
+        assert!(
+            w.ingest(0, i as i64, ids[i].as_deref(), env, sizes[i], now)
+                .is_empty(),
+            "a size-triggered close at envelope {i}: the bench would drop it"
+        );
+    }
     let mut g = c.benchmark_group("assemble");
     g.throughput(Throughput::Elements(envelopes.len() as u64));
     g.sample_size(20);

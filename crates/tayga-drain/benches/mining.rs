@@ -4,7 +4,7 @@
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 use tayga_drain::drain::{Drain, DrainConfig};
-use tayga_drain::preprocess::tokens;
+use tayga_drain::preprocess::{MAX_TOKENS, tokens};
 
 #[path = "../tests/corpus/mod.rs"]
 mod corpus;
@@ -21,7 +21,7 @@ fn stages(c: &mut Criterion) {
                 let v: Vec<String> = l
                     .body
                     .split_ascii_whitespace()
-                    .take(65)
+                    .take(MAX_TOKENS + 1)
                     .map(str::to_string)
                     .collect();
                 black_box(v);
