@@ -1,13 +1,16 @@
-# HELP tayga_ingest_records_published Kafka records published.
+# HELP tayga_ingest_records_published Kafka records published, one logical copy: logs count their signals-topic records.
 # TYPE tayga_ingest_records_published counter
 tayga_ingest_records_published_total{kind="traces"} 235231
 tayga_ingest_records_published_total{kind="logs"} 118985
+# HELP tayga_ingest_log_records_published Kafka records carrying logs, by destination topic.
+# TYPE tayga_ingest_log_records_published counter
+tayga_ingest_log_records_published_total{topic="tayga.signals"} 118985
+tayga_ingest_log_records_published_total{topic="tayga.logs"} 61204
 # HELP tayga_ingest_service_routed_items Spans/logs without a valid trace id, routed by service.
 # TYPE tayga_ingest_service_routed_items counter
 tayga_ingest_service_routed_items_total 16830
-# HELP tayga_ingest_oversized_dropped Single spans/logs dropped for exceeding the record budget.
+# HELP tayga_ingest_oversized_dropped Single spans/logs dropped for exceeding the record budget, per topic.
 # TYPE tayga_ingest_oversized_dropped counter
-tayga_ingest_oversized_dropped_total 0
 # HELP tayga_ingest_publish_failures Requests answered UNAVAILABLE/503 because Kafka delivery failed.
 # TYPE tayga_ingest_publish_failures counter
 tayga_ingest_publish_failures_total 0

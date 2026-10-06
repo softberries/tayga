@@ -53,7 +53,7 @@ async fn publish<S: Sink>(
         return Ok(());
     }
     let count = records.len();
-    let published = Published::of(&records, signal == "logs");
+    let published = Published::of(&records);
     sink.publish(records).await.map_err(|e| {
         metrics.publish_failures.inc();
         tracing::warn!(signal, records = count, error = %e, "otlp/grpc export failed: kafka publish");
@@ -221,7 +221,7 @@ pub(crate) mod tests {
             .map(|r| r.topic)
             .collect();
         assert_eq!(topics, vec![Topic::Signals, Topic::Logs]);
-        for topic in ["signals", "logs"] {
+        for topic in ["tayga.signals", "tayga.logs"] {
             let n = metrics
                 .log_records_published
                 .get_or_create(&TopicLabel {

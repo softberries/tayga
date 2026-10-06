@@ -53,7 +53,11 @@ async fn main() -> anyhow::Result<()> {
 
     let (stop_tx, stop_rx) = watch::channel(());
     let mut registry = Registry::default();
-    let metrics = IngestMetrics::register(&mut registry);
+    let metrics = IngestMetrics::register(
+        &mut registry,
+        &settings.kafka.topic,
+        &settings.kafka.logs_topic,
+    );
     let registry = Arc::new(registry);
     let grpc = OtlpGrpc::new(
         sink.clone(),

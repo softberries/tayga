@@ -56,6 +56,11 @@ impl KafkaSettings {
             self.max_record_bytes
         );
         anyhow::ensure!(
+            self.logs_topic != self.topic,
+            "kafka.logs_topic must differ from kafka.topic (both are {:?})",
+            self.topic
+        );
+        anyhow::ensure!(
             self.partitions > 0,
             "kafka.partitions must be positive (got {})",
             self.partitions
@@ -248,6 +253,13 @@ mod tests {
     fn validate_rejects_non_positive_partitions() {
         let mut s = settings(1000);
         s.partitions = 0;
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_logs_topic_equal_to_topic() {
+        let mut s = settings(1000);
+        s.logs_topic = s.topic.clone();
         assert!(s.validate().is_err());
     }
 }

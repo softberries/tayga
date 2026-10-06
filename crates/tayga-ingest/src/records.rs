@@ -47,8 +47,10 @@ pub struct Converted {
     /// Spans/logs routed by service name because their trace id was missing or invalid.
     pub routed_by_service: usize,
     /// Spans/logs dropped because a record holding only that item exceeds the byte budget.
-    /// Logs are counted once per topic they were dropped from.
+    /// Counted for the signals topic; see `dropped_oversized_logs_topic` for the other copy.
     pub dropped_oversized: usize,
+    /// Logs dropped from the service-keyed copy on the logs topic.
+    pub dropped_oversized_logs_topic: usize,
 }
 
 pub fn now_unix_nano() -> u64 {
@@ -90,7 +92,7 @@ pub fn log_records(
         now_unix_nano,
         max_record_bytes,
     );
-    out.dropped_oversized += by_service.dropped_oversized;
+    out.dropped_oversized_logs_topic = by_service.dropped_oversized;
     out.records.extend(by_service.records);
     out
 }
@@ -667,6 +669,7 @@ mod tests {
         let logs = (0..60).map(|i| log(7, format!("{i:0>100}"))).collect();
         let out = log_records(logs_req(vec![("cart", logs)]), 1, 1_500);
         assert_eq!(out.dropped_oversized, 0);
+        assert_eq!(out.dropped_oversized_logs_topic, 0);
         for topic in [Topic::Signals, Topic::Logs] {
             let recs: Vec<_> = out.records.iter().filter(|r| r.topic == topic).collect();
             assert!(recs.len() > 1, "{topic:?} not chunked");
@@ -685,7 +688,8 @@ mod tests {
             vec![log(7, "x".repeat(10_000)), log(7, "ok".into())],
         )]);
         let out = log_records(req, 1, 2_000);
-        assert_eq!(out.dropped_oversized, 2);
+        assert_eq!(out.dropped_oversized, 1);
+        assert_eq!(out.dropped_oversized_logs_topic, 1);
         assert_eq!(out.records.len(), 2);
         assert!(out.records.iter().all(|r| log_count(&r.payload) == 1));
     }

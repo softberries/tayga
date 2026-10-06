@@ -173,7 +173,7 @@ where
     let records = converted.records;
     let count = records.len();
     if count > 0 {
-        let published = Published::of(&records, kind == "logs");
+        let published = Published::of(&records);
         if let Err(e) = ingest.sink.publish(records).await {
             ingest.metrics.publish_failures.inc();
             tracing::warn!(records = count, error = %e, "otlp/http export failed: kafka publish");
@@ -325,7 +325,7 @@ mod tests {
     async fn http_counts_published_and_rejected() {
         use tayga_common::metrics::KindLabel;
         let mut registry = Registry::default();
-        let metrics = IngestMetrics::register(&mut registry);
+        let metrics = IngestMetrics::register(&mut registry, "tayga.signals", "tayga.logs");
         let app = router(
             Arc::new(FakeSink::default()),
             TEST_MAX_RECORD_BYTES,
