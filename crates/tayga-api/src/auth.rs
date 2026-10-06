@@ -369,7 +369,7 @@ fn not_json() -> Response {
     )
 }
 
-fn is_json(headers: &HeaderMap) -> bool {
+pub(crate) fn is_json(headers: &HeaderMap) -> bool {
     headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -1088,6 +1088,62 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "forged cookie");
+    }
+
+    fn silence_put(headers: &[(header::HeaderName, &str)]) -> Request<Body> {
+        let mut req = Request::put("/api/v1/log-templates/42/silence")
+            .header(header::CONTENT_TYPE, "application/json");
+        for (k, v) in headers {
+            req = req.header(k, *v);
+        }
+        req.body(Body::from(r#"{"enabled":true,"minutes":10}"#))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn silence_put_needs_a_session_or_basic() {
+        let app = app(auth());
+        let (status, _, body) = send(&app, silence_put(&[])).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body, r#"{"error":"unauthorized"}"#);
+        // Auth is judged before the content type.
+        let (status, _, _) = send(
+            &app,
+            Request::put("/api/v1/log-templates/42/silence")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "no content type");
+        for bad in [
+            basic("admin:nope"),
+            basic("root:secret"),
+            "Basic !!!".to_string(),
+        ] {
+            let (status, _, _) = send(&app, silence_put(&[(header::AUTHORIZATION, &bad)])).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{bad}");
+        }
+        let (status, _, _) = send(
+            &app,
+            silence_put(&[(header::COOKIE, "tayga_session=forged.token")]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "forged cookie");
+
+        // Past the middleware the fake repo knows no template 42: 404, not 401.
+        let (status, _, _) = send(
+            &app,
+            silence_put(&[(header::AUTHORIZATION, &basic("admin:secret"))]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "basic");
+        let (_, login_headers, _) = send(&app, login_req("admin", "secret")).await;
+        let (status, _, _) = send(
+            &app,
+            silence_put(&[(header::COOKIE, &cookie_pair(&login_headers))]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "cookie");
     }
 
     #[tokio::test]

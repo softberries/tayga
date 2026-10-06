@@ -1,6 +1,7 @@
 use crate::model::*;
 use crate::params::{AlertFilter, GroupFilter, SeriesQuery, TemplateFilter, TraceFilter, Window};
 use crate::repo::Repo;
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tayga_store::metrics_store::MetricPointRow;
 
@@ -23,6 +24,9 @@ pub struct FakeRepo {
     pub nodes: Vec<NodeView>,
     pub search: SearchView,
     pub metric_points: Vec<MetricPointRow>,
+    /// Template ids `put_silence` accepts.
+    pub known_templates: Vec<String>,
+    pub silence: Mutex<HashMap<String, SilenceSetting>>,
     pub fail: bool,
     pub last_window: Mutex<Option<Window>>,
     pub last_trace_filter: Mutex<Option<TraceFilter>>,
@@ -93,6 +97,18 @@ impl Repo for FakeRepo {
     async fn trace_log_templates(&self, _trace_id: &str) -> anyhow::Result<Vec<TraceLogTemplate>> {
         self.check()?;
         Ok(self.trace_templates.clone())
+    }
+    async fn silence(&self, id: &str) -> anyhow::Result<Option<SilenceSetting>> {
+        self.check()?;
+        Ok(self.silence.lock().unwrap().get(id).copied())
+    }
+    async fn put_silence(&self, id: &str, setting: SilenceSetting) -> anyhow::Result<bool> {
+        self.check()?;
+        if !self.known_templates.iter().any(|t| t == id) {
+            return Ok(false);
+        }
+        self.silence.lock().unwrap().insert(id.into(), setting);
+        Ok(true)
     }
     async fn overview(&self, w: Window) -> anyhow::Result<OverviewView> {
         self.check()?;

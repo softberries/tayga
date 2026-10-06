@@ -1,5 +1,7 @@
 //! JSON API (spec §10).
 
+use crate::auth::is_json;
+use crate::model::{LogTemplateDetail, SilenceSetting};
 use crate::params::{
     Window, alert_filter, group_filter, now_ms, parse_fingerprint, parse_hex_id, template_filter,
     window,
@@ -7,16 +9,17 @@ use crate::params::{
 use crate::repo::Repo;
 use axum::Json;
 use axum::Router;
+use axum::body::Bytes;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, put};
 use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Label for counters split by scrape job.
@@ -57,6 +60,7 @@ impl ApiMetrics {
 pub enum ApiError {
     BadRequest(String),
     NotFound,
+    UnsupportedMediaType,
     Unavailable(anyhow::Error),
 }
 
@@ -65,6 +69,10 @@ impl IntoResponse for ApiError {
         let (status, message) = match self {
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
+            ApiError::UnsupportedMediaType => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "content type must be application/json".to_string(),
+            ),
             ApiError::Unavailable(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "storage unavailable".to_string(),
@@ -147,6 +155,7 @@ pub fn api_router<R: Repo>(repo: Arc<R>, metrics: ApiMetrics) -> Router {
         .route("/api/v1/log-alerts", get(log_alerts::<R>))
         .route("/api/v1/log-templates", get(log_templates::<R>))
         .route("/api/v1/log-templates/{id}", get(log_template::<R>))
+        .route("/api/v1/log-templates/{id}/silence", put(put_silence::<R>))
         .route(
             "/api/v1/traces/{trace_id}/log-templates",
             get(trace_log_templates::<R>),
@@ -263,15 +272,59 @@ async fn log_template<R: Repo>(
     let Query(q) = q.map_err(|r| ApiError::BadRequest(r.body_text()))?;
     let id = parse_fingerprint(&id).map_err(ApiError::BadRequest)?;
     let w = window_of(&q.since, &q.until, "24h")?;
-    match s
+    let Some(detail) = s
         .repo
         .log_template(&id, w)
         .await
         .map_err(|e| s.unavailable(e))?
-    {
-        Some(d) => Ok(Json(d).into_response()),
-        None => Err(ApiError::NotFound),
+    else {
+        return Err(ApiError::NotFound);
+    };
+    let silence = s.repo.silence(&id).await.map_err(|e| s.unavailable(e))?;
+    Ok(Json(TemplateDetailResponse { detail, silence }).into_response())
+}
+
+/// `GET /log-templates/{id}`: the detail plus the template's silence setting.
+#[derive(Serialize)]
+struct TemplateDetailResponse {
+    #[serde(flatten)]
+    detail: LogTemplateDetail,
+    silence: Option<SilenceSetting>,
+}
+
+/// The most minutes a silence threshold can be set to: a day.
+const MAX_SILENCE_MINUTES: u32 = 1440;
+
+/// The API's only write route. It needs `Content-Type: application/json`, which a cross-site
+/// form cannot send and a cross-site fetch cannot send without a CORS preflight (none is
+/// granted); the auth middleware guards it like every other `/api` route.
+async fn put_silence<R: Repo>(
+    State(s): State<AppState<R>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    if !is_json(&headers) {
+        return Err(ApiError::UnsupportedMediaType);
     }
+    let id = parse_fingerprint(&id).map_err(ApiError::BadRequest)?;
+    let setting: SilenceSetting = serde_json::from_slice(&body).map_err(|_| {
+        ApiError::BadRequest("body must be {\"enabled\": bool, \"minutes\": 1..=1440}".into())
+    })?;
+    if !(1..=MAX_SILENCE_MINUTES).contains(&setting.minutes) {
+        return Err(ApiError::BadRequest(format!(
+            "minutes must be 1..={MAX_SILENCE_MINUTES}"
+        )));
+    }
+    if !s
+        .repo
+        .put_silence(&id, setting)
+        .await
+        .map_err(|e| s.unavailable(e))?
+    {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(setting).into_response())
 }
 
 async fn trace_log_templates<R: Repo>(
@@ -293,6 +346,7 @@ mod tests {
     use crate::model::tests::record;
     use crate::model::*;
     use crate::testrepo::FakeRepo;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
@@ -643,9 +697,202 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn silence_kind_passes_the_alert_filter_and_rows_come_back_as_they_are() {
+        let alert = LogAlertView {
+            alert_id: "s1".into(),
+            kind: "silence".into(),
+            template_id: "17393964261140422938".into(),
+            service: "payment".into(),
+            template: "Heartbeat <*>".into(),
+            started_at_ns: 1,
+            last_at_ns: 2,
+            window_count: 0,
+            peak_count: 0,
+            baseline_per_window: 1.5,
+            baseline_day: None,
+            baseline_week: None,
+            active: true,
+            example_traces: vec![],
+        };
+        let repo = Arc::new(FakeRepo {
+            alerts: vec![alert],
+            ..Default::default()
+        });
+        let (status, json) = get_with(
+            repo.clone(),
+            ApiMetrics::default(),
+            "/api/v1/log-alerts?kind=silence",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json[0]["kind"], "silence");
+        assert_eq!(json[0]["window_count"], 0);
+        assert_eq!(json[0]["example_traces"], serde_json::json!([]));
+        let f = repo.last_alert_filter.lock().unwrap().clone().unwrap();
+        assert_eq!(f.kind.as_deref(), Some("silence"));
+    }
+
+    fn put_req(id: &str, content_type: Option<&str>, body: &str) -> Request<Body> {
+        let mut req = Request::put(format!("/api/v1/log-templates/{id}/silence"));
+        if let Some(ct) = content_type {
+            req = req.header("content-type", ct);
+        }
+        req.body(Body::from(body.to_string())).unwrap()
+    }
+
+    async fn send(app: &Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let res = app.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn put_silence_statuses() {
+        let repo = Arc::new(FakeRepo {
+            known_templates: vec!["42".into()],
+            ..Default::default()
+        });
+        let app = api_router(repo.clone(), ApiMetrics::default());
+        let json = Some("application/json");
+        let ok = r#"{"enabled": true, "minutes": 15}"#;
+
+        let (status, body) = send(&app, put_req("42", json, ok)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"enabled": true, "minutes": 15}));
+        // Charset parameters and case are fine; both ends of the range are allowed.
+        for b in [
+            r#"{"enabled": false, "minutes": 1}"#,
+            r#"{"enabled": true, "minutes": 1440}"#,
+        ] {
+            let (status, _) = send(
+                &app,
+                put_req("42", Some("Application/JSON; charset=utf-8"), b),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{b}");
+        }
+
+        for (body, why) in [
+            ("not json", "garbage"),
+            ("", "empty"),
+            ("{}", "missing fields"),
+            (r#"{"enabled": true}"#, "no minutes"),
+            (r#"{"enabled": "yes", "minutes": 5}"#, "enabled not a bool"),
+            (r#"{"enabled": true, "minutes": 0}"#, "zero"),
+            (r#"{"enabled": true, "minutes": 1441}"#, "too many"),
+            (r#"{"enabled": true, "minutes": -1}"#, "negative"),
+            (r#"{"enabled": true, "minutes": 4294967296}"#, "overflow"),
+            (r#"{"enabled": true, "minutes": 1.5}"#, "fraction"),
+        ] {
+            let (status, json) = send(&app, put_req("42", json, body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{why}");
+            assert!(json["error"].is_string(), "{why}");
+        }
+        let (status, _) = send(&app, put_req("notanumber", json, ok)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _) = send(&app, put_req("43", json, ok)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        for ct in [
+            None,
+            Some("text/plain"),
+            Some("application/x-www-form-urlencoded"),
+            Some("multipart/form-data"),
+            Some("application/jsonx"),
+        ] {
+            let (status, _) = send(&app, put_req("42", ct, ok)).await;
+            assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{ct:?}");
+        }
+        // Rejected requests wrote nothing: the last good write stands.
+        assert_eq!(
+            repo.silence.lock().unwrap().get("42").copied(),
+            Some(SilenceSetting {
+                enabled: true,
+                minutes: 1440
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn put_silence_failure_is_503() {
+        let metrics = ApiMetrics::default();
+        let repo = Arc::new(FakeRepo {
+            fail: true,
+            ..Default::default()
+        });
+        let app = api_router(repo, metrics.clone());
+        let (status, json) = send(
+            &app,
+            put_req(
+                "42",
+                Some("application/json"),
+                r#"{"enabled": true, "minutes": 5}"#,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["error"], "storage unavailable");
+        assert_eq!(metrics.repo_errors.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn put_then_get_shows_the_setting() {
+        let repo = Arc::new(FakeRepo {
+            known_templates: vec!["42".into()],
+            template_detail: Some(LogTemplateDetail {
+                template: template_view(),
+                sample: "s".into(),
+                bucket_secs: 60,
+                buckets: vec![],
+                recent: vec![],
+                alerts: vec![],
+            }),
+            ..Default::default()
+        });
+        let app = api_router(repo, ApiMetrics::default());
+        let get = |app: Router| async move {
+            let res = app
+                .oneshot(
+                    Request::get("/api/v1/log-templates/42")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        };
+        let before = get(app.clone()).await;
+        assert!(before["silence"].is_null());
+        assert_eq!(before["sample"], "s", "detail fields stay top-level");
+        let (status, _) = send(
+            &app,
+            put_req(
+                "42",
+                Some("application/json"),
+                r#"{"enabled": true, "minutes": 30}"#,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let after = get(app).await;
+        assert_eq!(
+            after["silence"],
+            serde_json::json!({"enabled": true, "minutes": 30})
+        );
+    }
+
+    #[tokio::test]
     async fn log_templates_json_filter_and_validation() {
         let repo = Arc::new(FakeRepo {
             templates: vec![LogTemplateListItem {
+                silence_enabled: true,
                 template: template_view(),
                 bucket_secs: 60,
                 buckets: vec![(1_790_000_040, 3), (1_790_000_100, 6)],
@@ -661,6 +908,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json[0]["template_id"], "17393964261140422938");
         assert_eq!(json[0]["alerting"], true);
+        assert_eq!(json[0]["silence_enabled"], true);
         assert_eq!(json[0]["count"], 9);
         assert_eq!(json[0]["bucket_secs"], 60);
         assert_eq!(

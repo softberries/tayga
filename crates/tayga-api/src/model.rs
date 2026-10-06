@@ -396,12 +396,22 @@ impl LogTemplateView {
     }
 }
 
+/// A template's silence-alert setting: the body and the answer of
+/// `PUT /log-templates/{id}/silence`, and `silence` of the template detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SilenceSetting {
+    pub enabled: bool,
+    pub minutes: u32,
+}
+
 /// One row of `GET /log-templates`: the template plus its hits per bucket over the window,
 /// for the table's sparkline.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LogTemplateListItem {
     #[serde(flatten)]
     pub template: LogTemplateView,
+    /// Whether "alert when silent" is switched on for the template.
+    pub silence_enabled: bool,
     pub bucket_secs: u32,
     /// (bucket start in unix seconds, distinct hits), ascending; empty buckets are omitted.
     pub buckets: Vec<(u32, u64)>,
@@ -489,7 +499,8 @@ pub struct TraceLogTemplate {
     pub log_id: String,
     pub template_id: String,
     pub template: String,
-    /// `new` or `spike` when that template has an alert active at the trace's time.
+    /// `new` or `spike` when that template has an alert active at the trace's time. Silence
+    /// alerts never count: a hit in the trace shows the template was not silent.
     pub alert: Option<String>,
 }
 
