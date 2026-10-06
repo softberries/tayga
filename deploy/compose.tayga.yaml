@@ -141,3 +141,51 @@ services:
       - ${TAYGA_ROOT}/deploy/locust/tayga_locustfile.py:/usr/src/app/tayga_locustfile.py:ro
     environment:
       - LOCUST_LOCUSTFILE=/usr/src/app/tayga_locustfile.py
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  # Demo memory limits raised for Tayga's long-running stack (the vendored demo's defaults are
+  # sized for short demos; on 2026-10-05 checkout at 95% of 20M and Kafka near 620M stalled
+  # `publish orders` for ~90 s and failed every checkout for six hours).
+  checkout:
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+  product-catalog:
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+  ad:
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+  fraud-detection:
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+  accounting:
+    deploy:
+      resources:
+        limits:
+          memory: 320M
+  kafka:
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+  opensearch:
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+  grafana:
+    deploy:
+      resources:
+        limits:
+          memory: 256M
