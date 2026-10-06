@@ -140,15 +140,7 @@ async fn main() -> anyhow::Result<()> {
     let mut registry = Registry::default();
     let metrics = AssemblerMetrics::register(&mut registry);
     let mut stop = tayga_common::shutdown_flag();
-    let metrics_addr = a.metrics_addr;
-    let metrics_stop = stop.clone();
-    tokio::spawn(async move {
-        if let Err(e) =
-            tayga_common::metrics::serve(metrics_addr, Arc::new(registry), metrics_stop).await
-        {
-            tracing::warn!(error = %e, "metrics server stopped");
-        }
-    });
+    tayga_common::metrics::spawn_server(a.metrics_addr, Arc::new(registry), stop.clone()).await?;
     let clock = Instant::now();
     let mut baselines = Refresh::default();
     load_baselines(

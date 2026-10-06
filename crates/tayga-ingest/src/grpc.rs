@@ -44,12 +44,13 @@ pub fn status_from(e: SinkError) -> Status {
 async fn publish<S: Sink>(
     sink: &S,
     metrics: &IngestMetrics,
-    converted: Converted,
+    mut converted: Converted,
     signal: &'static str,
 ) -> Result<(), Status> {
-    metrics.record_conversion(&converted);
-    let records = converted.records;
+    let records = std::mem::take(&mut converted.records);
     if records.is_empty() {
+        // Nothing left to publish (every item dropped as oversized): the conversion is final.
+        metrics.record_conversion(&converted);
         return Ok(());
     }
     let count = records.len();
@@ -59,6 +60,8 @@ async fn publish<S: Sink>(
         tracing::warn!(signal, records = count, error = %e, "otlp/grpc export failed: kafka publish");
         status_from(e)
     })?;
+    // Counted once Kafka accepted the request: a 503 the collector retries is counted once.
+    metrics.record_conversion(&converted);
     metrics.record_published(signal, &published);
     Ok(())
 }
@@ -247,5 +250,36 @@ pub(crate) mod tests {
             assert_eq!(err.code(), tonic::Code::Unavailable, "{fail_topic:?}");
             assert_eq!(metrics.publish_failures.get(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn conversion_counters_count_only_accepted_requests() {
+        use crate::metrics::TopicLabel;
+        // The first span has no trace id (routed by service); the second is oversized.
+        let mut req = two_trace_request();
+        req.resource_spans[0].scope_spans[0].spans[0].trace_id = vec![];
+        req.resource_spans[0].scope_spans[0].spans[1].name = "x".repeat(10_000);
+        let metrics = IngestMetrics::default();
+        let oversized = |m: &IngestMetrics| {
+            m.oversized_dropped
+                .get_or_create(&TopicLabel {
+                    topic: "tayga.signals".into(),
+                })
+                .get()
+        };
+        let failing = Arc::new(FakeSink {
+            fail: true,
+            ..Default::default()
+        });
+        let svc = OtlpGrpc::new(failing, 2_000, metrics.clone());
+        TraceService::export(&svc, Request::new(req.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(metrics.service_routed_items.get(), 0, "503: not counted");
+        assert_eq!(oversized(&metrics), 0, "503: not counted");
+        let svc = OtlpGrpc::new(Arc::new(FakeSink::default()), 2_000, metrics.clone());
+        TraceService::export(&svc, Request::new(req)).await.unwrap();
+        assert_eq!(metrics.service_routed_items.get(), 1);
+        assert_eq!(oversized(&metrics), 1);
     }
 }

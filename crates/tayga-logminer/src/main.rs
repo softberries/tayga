@@ -334,6 +334,9 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
 
     let mut registry = Registry::default();
     let metrics = LogminerMetrics::register(&mut registry);
+    // Bound before the startup loads, so a taken port fails at once and the loads are visible.
+    tayga_common::metrics::spawn_server(cfg.metrics_addr, Arc::new(registry), stop_rx.clone())
+        .await?;
 
     let Some(miner) = load_miner(&store, cfg.drain(), &mut stop_rx).await else {
         return Ok(());
@@ -396,15 +399,6 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     )?);
     consumer.subscribe(&[topic])?;
 
-    let metrics_addr = cfg.metrics_addr;
-    let metrics_stop = stop_rx.clone();
-    tokio::spawn(async move {
-        if let Err(e) =
-            tayga_common::metrics::serve(metrics_addr, Arc::new(registry), metrics_stop).await
-        {
-            tracing::warn!(error = %e, "metrics server stopped");
-        }
-    });
     let replica = replica_id();
     let mut st = LoopState {
         miner,
@@ -771,6 +765,7 @@ async fn flush(
         // overwrites the new owner's offset, only makes records read again: offsets are
         // committed after their records are stored, so nothing is lost (hits deduplicate by
         // `log_id`).
+        ctx.metrics.commit_failures.inc();
         tracing::warn!(error = %e, "offset commit failed");
     }
     ctx.metrics.templates.set(miner.len() as i64);

@@ -61,15 +61,8 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     let stop_rx = tayga_common::shutdown_flag();
     let mut registry = Registry::default();
     let metrics = NotifierMetrics::register(&mut registry);
-    let metrics_addr = cfg.metrics_addr;
-    let metrics_stop = stop_rx.clone();
-    tokio::spawn(async move {
-        if let Err(e) =
-            tayga_common::metrics::serve(metrics_addr, Arc::new(registry), metrics_stop).await
-        {
-            tracing::warn!(error = %e, "metrics server stopped");
-        }
-    });
+    tayga_common::metrics::spawn_server(cfg.metrics_addr, Arc::new(registry), stop_rx.clone())
+        .await?;
 
     let targets: Vec<&str> = cfg.targets.iter().map(|t| t.name.as_str()).collect();
     let kinds: Vec<&str> = cfg.kinds.iter().map(|k| k.as_str()).collect();

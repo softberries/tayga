@@ -1,5 +1,6 @@
 //! Prometheus text exposition for every Tayga binary.
 
+use anyhow::Context;
 use axum::Router;
 use axum::extract::State;
 use axum::http::header;
@@ -46,19 +47,29 @@ pub fn router(registry: Arc<Registry>) -> Router {
         .with_state(registry)
 }
 
-/// Standalone metrics server until `stop` flips to true.
-pub async fn serve(
+/// Binds `addr` first, so a port that is taken fails the caller's startup, then serves
+/// `GET /metrics` in a task until `stop` flips to true. Returns the bound address (the OS picks
+/// the port for port 0).
+pub async fn spawn_server(
     addr: SocketAddr,
     registry: Arc<Registry>,
     mut stop: watch::Receiver<bool>,
-) -> anyhow::Result<()> {
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router(registry))
-        .with_graceful_shutdown(async move {
-            let _ = stop.wait_for(|s| *s).await;
-        })
-        .await?;
-    Ok(())
+) -> anyhow::Result<SocketAddr> {
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("bind metrics server on {addr}"))?;
+    let bound = listener.local_addr()?;
+    tokio::spawn(async move {
+        let served = axum::serve(listener, router(registry))
+            .with_graceful_shutdown(async move {
+                let _ = stop.wait_for(|s| *s).await;
+            })
+            .await;
+        if let Err(e) = served {
+            tracing::warn!(error = %e, "metrics server stopped");
+        }
+    });
+    Ok(bound)
 }
 
 #[cfg(test)]
@@ -79,5 +90,28 @@ mod tests {
             "{text}"
         );
         assert!(text.ends_with("# EOF\n"));
+    }
+
+    #[tokio::test]
+    async fn a_taken_metrics_port_is_an_error_and_a_free_one_binds() {
+        let taken = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = taken.local_addr().unwrap();
+        let (_tx, stop) = watch::channel(false);
+        let err = spawn_server(addr, Arc::new(Registry::default()), stop.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains(&format!("bind metrics server on {addr}")),
+            "{err:#}"
+        );
+        let bound = spawn_server(
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::new(Registry::default()),
+            stop,
+        )
+        .await
+        .unwrap();
+        assert_ne!(bound.port(), 0);
+        tokio::net::TcpStream::connect(bound).await.unwrap();
     }
 }

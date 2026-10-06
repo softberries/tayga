@@ -33,6 +33,8 @@ pub struct LogminerMetrics {
     pub templates_created: Counter,
     pub cluster_cap_hits: Counter,
     pub write_failures: Counter,
+    /// Offset commits Kafka refused; the records are read again, nothing is lost.
+    pub commit_failures: Counter,
     pub templates: Gauge,
     pub alerts: Family<KindLabel, Counter>,
     pub detect_seconds: Histogram,
@@ -57,6 +59,7 @@ impl Default for LogminerMetrics {
             templates_created: Counter::default(),
             cluster_cap_hits: Counter::default(),
             write_failures: Counter::default(),
+            commit_failures: Counter::default(),
             templates: Gauge::default(),
             alerts: Family::default(),
             // 10 ms .. ~20 s.
@@ -93,6 +96,11 @@ impl LogminerMetrics {
             "tayga_logminer_write_failures",
             "Failed ClickHouse insert attempts for hits and templates",
             m.write_failures.clone(),
+        );
+        registry.register(
+            "tayga_logminer_commit_failures",
+            "Offset commits Kafka refused (the records are read again; nothing is lost)",
+            m.commit_failures.clone(),
         );
         registry.register(
             "tayga_logminer_templates",
@@ -176,6 +184,7 @@ mod tests {
             "tayga_logminer_templates_created_total 0",
             "tayga_logminer_cluster_cap_hits_total 0",
             "tayga_logminer_write_failures_total 0",
+            "tayga_logminer_commit_failures_total 0",
             "tayga_logminer_templates 3",
             "tayga_logminer_silence_alerts 2",
             "tayga_logminer_alerts_total{kind=\"new\"} 1",

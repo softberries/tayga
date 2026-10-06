@@ -7,7 +7,6 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tayga_common::metrics::KindLabel;
 use tayga_common::retry::retry_until;
 use tayga_kafka::KafkaSettings;
 use tayga_model::envelope::{Envelope, HEADER_SCHEMA, SCHEMA_VERSION};
@@ -100,15 +99,12 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     let mut stop_rx = tayga_common::shutdown_flag();
     let mut registry = Registry::default();
     let metrics = WriterMetrics::register(&mut registry);
-    let metrics_addr = settings.writer.metrics_addr;
-    let metrics_stop = stop_rx.clone();
-    tokio::spawn(async move {
-        if let Err(e) =
-            tayga_common::metrics::serve(metrics_addr, Arc::new(registry), metrics_stop).await
-        {
-            tracing::warn!(error = %e, "metrics server stopped");
-        }
-    });
+    tayga_common::metrics::spawn_server(
+        settings.writer.metrics_addr,
+        Arc::new(registry),
+        stop_rx.clone(),
+    )
+    .await?;
     tracing::info!(topic = %settings.kafka.topic, "tayga-writer consuming");
 
     // Set when shutdown interrupted a flush: nothing was committed, rows are re-read on restart.
@@ -239,21 +235,15 @@ async fn flush(
     for (partition, offset) in batch.commit_offsets() {
         tpl.add_partition_offset(topic, partition, Offset::Offset(offset))?;
     }
-    if let Err(e) = consumer.commit(&tpl, CommitMode::Sync) {
-        // Typically a revoked partition after rebalance; its rows are re-read and deduplicated.
-        tracing::warn!(error = %e, "offset commit failed");
-        metrics.commit_failures.inc();
-    } else {
-        metrics.batches_committed.inc();
-    }
-    metrics
-        .rows_inserted
-        .get_or_create(&KindLabel::new("spans"))
-        .inc_by(batch.spans.len() as u64);
-    metrics
-        .rows_inserted
-        .get_or_create(&KindLabel::new("logs"))
-        .inc_by(batch.logs.len() as u64);
+    let committed = match consumer.commit(&tpl, CommitMode::Sync) {
+        Ok(()) => true,
+        Err(e) => {
+            // Typically a revoked partition after rebalance; its rows are re-read and deduplicated.
+            tracing::warn!(error = %e, "offset commit failed");
+            false
+        }
+    };
+    metrics.record_flush(batch.spans.len(), batch.logs.len(), committed);
     tracing::debug!(
         spans = batch.spans.len(),
         logs = batch.logs.len(),
