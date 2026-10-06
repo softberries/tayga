@@ -429,7 +429,8 @@ impl Store {
             .client()
             .query(
                 "SELECT template_id, toUnixTimestamp64Nano(max(ts)) AS last_ns \
-                 FROM log_template_hits WHERE template_id IN ? GROUP BY template_id",
+                 FROM log_template_hits WHERE template_id IN ? \
+                 AND ts > now64(9) - toIntervalDay(3) GROUP BY template_id",
             )
             .bind(template_ids)
             .fetch_all()
@@ -443,7 +444,8 @@ impl Store {
             self.client()
                 .query(
                     "SELECT service, toUnixTimestamp64Nano(max(ts)) AS last_ns \
-                     FROM log_template_hits WHERE service IN ? GROUP BY service",
+                     FROM log_template_hits WHERE service IN ? \
+                     AND ts > now64(9) - toIntervalDay(3) GROUP BY service",
                 )
                 .bind(services)
                 .fetch_all()
