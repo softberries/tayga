@@ -179,10 +179,12 @@ describe('consumer lag', () => {
     renderApp('/pipeline')
     const list = await screen.findByRole('list', { name: 'Consumer lag' })
     const rows = within(list).getAllByRole('listitem')
-    expect(rows).toHaveLength(3)
+    expect(rows).toHaveLength(4)
     expect(rows[1]).toHaveTextContent('tayga-assembler')
     expect(rows[1]).toHaveTextContent('1.2k')
     expect(rows[1]).toHaveTextContent('committed 17,327,899 · end 17,329,052')
+    expect(rows[3]).toHaveTextContent('tayga-notifier')
+    expect(rows[3]).toHaveTextContent('committed 2,487 · end 2,487')
   })
 
   it('scales bars to at least 1000 messages and keeps an empty track at zero lag', async () => {

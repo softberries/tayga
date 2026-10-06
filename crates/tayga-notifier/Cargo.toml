@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 futures.workspace = true
+httpdate.workspace = true
 prometheus-client.workspace = true
 rdkafka.workspace = true
 # Slack incoming webhooks are HTTPS only: rustls with the aws-lc-rs provider and the platform

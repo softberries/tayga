@@ -13,8 +13,11 @@ pub const DELIVERED: &str = "delivered";
 pub const FAILED: &str = "failed";
 /// One attempt failed with a retryable error; another follows.
 pub const RETRY: &str = "retry";
-/// Already delivered or given up earlier (a re-published alert, or a re-read record).
+/// Already delivered or given up earlier (a re-published alert, or a re-read record): counts
+/// re-publishes, not deliveries.
 pub const DUPLICATE: &str = "duplicate";
+/// Skipped as older than `max_age_secs` (a retained backlog); nothing was sent.
+pub const STALE: &str = "stale";
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct DeliveryLabels {
@@ -47,7 +50,9 @@ impl NotifierMetrics {
         let m = Self::default();
         registry.register(
             "tayga_notifier_deliveries",
-            "Delivery results per target",
+            "Delivery results per target. delivered and failed are deliveries; retry counts failed \
+             attempts that are retried; duplicate counts re-publishes of an alert already \
+             resolved, not deliveries; stale counts alerts skipped as older than max_age_secs",
             m.deliveries.clone(),
         );
         registry.register(
@@ -94,5 +99,11 @@ mod tests {
         assert!(text.contains("# TYPE tayga_notifier_delivery_seconds histogram"));
         assert!(text.contains("tayga_notifier_delivery_seconds_count 1"));
         assert!(text.contains("tayga_notifier_pending 1"));
+        assert!(
+            text.contains(
+                "duplicate counts re-publishes of an alert already resolved, not deliveries"
+            ),
+            "{text}"
+        );
     }
 }

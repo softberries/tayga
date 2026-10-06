@@ -50,11 +50,12 @@ impl LagCache {
         }
     }
 
-    /// Lag of the Tayga consumer groups on `topic`, read through `brokers`.
+    /// Lag of the Tayga consumer groups (signal groups on `topic`, the notifier on
+    /// `tayga.alerts`), read through `brokers`.
     pub fn kafka(brokers: String, topic: String) -> Self {
         let fetch: LagFetch = Arc::new(move || {
             let (brokers, topic) = (brokers.clone(), topic.clone());
-            Box::pin(async move { lag::fetch(&brokers, &topic, &lag::GROUPS).await })
+            Box::pin(async move { lag::fetch_all(&brokers, &topic).await })
         });
         Self::new(fetch, LAG_TTL)
     }

@@ -8,7 +8,11 @@ use rdkafka::{Offset, TopicPartitionList};
 use serde::Serialize;
 use std::time::Duration;
 
+/// Groups on the signals topic.
 pub const GROUPS: [&str; 3] = ["tayga-writer", "tayga-assembler", "tayga-logminer"];
+/// The notifier's group, on the topic the logminer publishes alerts to.
+pub const ALERTS_TOPIC: &str = "tayga.alerts";
+pub const ALERT_GROUPS: [&str; 1] = ["tayga-notifier"];
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(3);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -114,9 +118,74 @@ pub async fn fetch(brokers: &str, topic: &str, groups: &[&str]) -> anyhow::Resul
         .context("kafka lag fetch timed out")??
 }
 
+/// Lag of every Tayga group: [`GROUPS`] on `topic` and [`ALERT_GROUPS`] on [`ALERTS_TOPIC`],
+/// read concurrently (each bounded to 5 s).
+pub async fn fetch_all(brokers: &str, topic: &str) -> anyhow::Result<Vec<Lag>> {
+    let (signals, alerts) = tokio::join!(
+        fetch(brokers, topic, &GROUPS),
+        fetch(brokers, ALERTS_TOPIC, &ALERT_GROUPS)
+    );
+    combine(signals, alerts)
+}
+
+/// The signal groups decide success; the alert groups are appended when their read worked, so a
+/// stack whose alerts topic does not exist yet still shows the pipeline.
+fn combine(
+    signals: anyhow::Result<Vec<Lag>>,
+    alerts: anyhow::Result<Vec<Lag>>,
+) -> anyhow::Result<Vec<Lag>> {
+    let mut lags = signals?;
+    match alerts {
+        Ok(a) => lags.extend(a),
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), topic = ALERTS_TOPIC, "alerts consumer lag read failed")
+        }
+    }
+    Ok(lags)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::sum;
+    use super::{Lag, combine, sum};
+
+    fn lag(group: &str) -> Lag {
+        Lag {
+            group: group.into(),
+            committed: 1,
+            end: 2,
+            lag: 1,
+        }
+    }
+
+    #[test]
+    fn alert_groups_follow_the_signal_groups_and_are_best_effort() {
+        let groups = |r: anyhow::Result<Vec<Lag>>| {
+            r.map(|v| v.into_iter().map(|l| l.group).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            groups(combine(
+                Ok(vec![lag("tayga-writer")]),
+                Ok(vec![lag("tayga-notifier")])
+            ))
+            .unwrap(),
+            ["tayga-writer", "tayga-notifier"]
+        );
+        assert_eq!(
+            groups(combine(
+                Ok(vec![lag("tayga-writer")]),
+                Err(anyhow::anyhow!("topic tayga.alerts not found"))
+            ))
+            .unwrap(),
+            ["tayga-writer"]
+        );
+        assert!(
+            combine(
+                Err(anyhow::anyhow!("down")),
+                Ok(vec![lag("tayga-notifier")])
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn sums_committed_end_and_lag() {

@@ -4,22 +4,33 @@
 //! Exactly-once is per `(alert_id, target)`: a `delivered` or `failed` row means the target is
 //! resolved and is never sent again, whatever re-reads the record (a logminer re-publish, a
 //! restart before the offset commit). A shutdown never cancels an attempt in flight; it is
-//! finished and recorded first, so a restart cannot resend what was already delivered. The one
-//! window left is a hard kill between a 2xx and its row being written.
+//! finished and recorded first, so a restart cannot resend what was already delivered.
+//!
+//! Known resend windows (accepted; documented in the README):
+//! - a hard kill (SIGKILL, OOM) between a 2xx and its row being written;
+//! - a final row that could not be written before shutdown (ClickHouse down for the whole
+//!   [`RECORD_GRACE`]): the record is still committed, but a later re-publish of the same alert
+//!   finds no resolved row and is sent again;
+//! - `notifier_deliveries` rows expire after 30 days (TTL), so an alert id re-published after
+//!   that is delivered again.
 
 use crate::config::{REDACTED, Target, WebhookUrl};
 use crate::metrics::{DELIVERED, DUPLICATE, FAILED, NotifierMetrics, RETRY};
 use serde_json::Value;
 use std::future::Future;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tayga_common::retry::retry_until;
 use tayga_store::notifier::{DeliveryRow, STATUS_DELIVERED, STATUS_FAILED, STATUS_PENDING};
 use tayga_store::store::Store;
 use tokio::sync::watch;
 
 pub const MAX_BACKOFF: Duration = Duration::from_secs(300);
-/// After shutdown, how long a final delivery state may keep retrying its write.
-const RECORD_GRACE: Duration = Duration::from_secs(15);
+/// After shutdown, how long a delivery state may keep retrying its write.
+const RECORD_GRACE: Duration = Duration::from_secs(10);
+/// Bound of one state write. Worst case from SIGTERM to exit: an attempt in flight
+/// (`timeout_secs` ≤ 15 s), a failed write (5 s), then writes until [`RECORD_GRACE`] ends, the
+/// last one starting just before it (5 s): 35 s, inside the compose `stop_grace_period` of 40 s.
+const PUT_TIMEOUT: Duration = Duration::from_secs(5);
 /// `last_error` is cut to this many characters.
 const ERROR_MAX: usize = 500;
 
@@ -33,17 +44,30 @@ pub enum Outcome {
 }
 
 /// 2xx is delivered; 429, 5xx and no response at all (`None`: a network error or timeout)
-/// retry; any other status is permanent. `Retry-After` is read as delta-seconds.
+/// retry; any other status is permanent. `Retry-After` is read by [`retry_after_delay`].
 pub fn classify(status: Option<u16>, retry_after: Option<&str>) -> Outcome {
     match status {
         Some(200..=299) => Outcome::Delivered,
         None | Some(429 | 500..=599) => Outcome::Retry(
-            retry_after
-                .and_then(|v| v.trim().parse::<u64>().ok())
-                .map_or(Duration::ZERO, |s| Duration::from_secs(s).min(MAX_BACKOFF)),
+            retry_after.map_or(Duration::ZERO, |v| retry_after_delay(v, SystemTime::now())),
         ),
         Some(s) => Outcome::Permanent(format!("HTTP {s}")),
     }
+}
+
+/// A `Retry-After` value as a delay from `now`: delta-seconds or an HTTP date (IMF-fixdate; the
+/// obsolete RFC 850 and asctime forms are accepted too), capped at [`MAX_BACKOFF`]. A past date
+/// or an unreadable value is zero, which leaves the backoff in charge.
+pub fn retry_after_delay(value: &str, now: SystemTime) -> Duration {
+    let value = value.trim();
+    let delay = match value.parse::<u64>() {
+        Ok(secs) => Duration::from_secs(secs),
+        Err(_) => httpdate::parse_http_date(value)
+            .ok()
+            .and_then(|at| at.duration_since(now).ok())
+            .unwrap_or(Duration::ZERO),
+    };
+    delay.min(MAX_BACKOFF)
 }
 
 /// 1 s × 2^`attempt`, capped at [`MAX_BACKOFF`].
@@ -314,15 +338,17 @@ impl<L: DeliveryLog> Deliverer<'_, L> {
         let mut wait = Duration::from_millis(100);
         let mut deadline: Option<Instant> = None;
         loop {
-            match self.log.put(row).await {
-                Ok(()) => return true,
-                Err(e) => tracing::warn!(
-                    alert_id = %row.alert_id,
-                    target = %row.target,
-                    error = %redact_urls(&e.to_string()),
-                    "delivery state write failed; retrying"
-                ),
-            }
+            let error = match tokio::time::timeout(PUT_TIMEOUT, self.log.put(row)).await {
+                Ok(Ok(())) => return true,
+                Ok(Err(e)) => redact_urls(&e.to_string()),
+                Err(_) => format!("timed out after {} s", PUT_TIMEOUT.as_secs()),
+            };
+            tracing::warn!(
+                alert_id = %row.alert_id,
+                target = %row.target,
+                %error,
+                "delivery state write failed; retrying"
+            );
             if *stop.borrow() {
                 let deadline = *deadline.get_or_insert_with(|| Instant::now() + RECORD_GRACE);
                 let left = deadline.saturating_duration_since(Instant::now());
@@ -398,13 +424,32 @@ mod tests {
         assert_eq!(
             classify(Some(503), Some("Wed, 21 Oct 2015 07:28:00 GMT")),
             Outcome::Retry(Duration::ZERO),
-            "an HTTP date falls back to the backoff"
+            "a past HTTP date leaves the backoff in charge"
+        );
+        assert_eq!(
+            classify(Some(429), Some("Fri, 31 Dec 9999 23:59:59 GMT")),
+            Outcome::Retry(MAX_BACKOFF),
+            "a far HTTP date is capped"
         );
         assert_eq!(
             classify(Some(429), Some("99999")),
             Outcome::Retry(MAX_BACKOFF)
         );
         assert_eq!(classify(None, None), Outcome::Retry(Duration::ZERO));
+    }
+
+    #[test]
+    fn retry_after_reads_seconds_and_http_dates() {
+        // Wed, 21 Oct 2015 07:28:00 GMT
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_445_412_480);
+        let d = |v: &str| retry_after_delay(v, now);
+        assert_eq!(d("7"), Duration::from_secs(7));
+        assert_eq!(d("Wed, 21 Oct 2015 07:28:30 GMT"), Duration::from_secs(30));
+        assert_eq!(d("Wed, 21 Oct 2015 08:28:00 GMT"), MAX_BACKOFF, "capped");
+        assert_eq!(d("Wed, 21 Oct 2015 07:27:00 GMT"), Duration::ZERO, "past");
+        assert_eq!(d("Wed, 21 Oct 2015 07:28:00 GMT"), Duration::ZERO, "now");
+        assert_eq!(d("soon"), Duration::ZERO);
+        assert_eq!(d("-5"), Duration::ZERO);
     }
 
     #[test]
@@ -602,6 +647,73 @@ mod tests {
             [(STATUS_PENDING, 1, "HTTP 503"), (STATUS_DELIVERED, 2, "")]
         );
         assert_eq!((f.count("hook", RETRY), f.count("hook", DELIVERED)), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn a_429_waits_its_retry_after_then_delivers() {
+        let m = mock(&[429]).await;
+        let f = Fixture::new();
+        let target = hook("hook", &m.url());
+        let started = Instant::now();
+        let r = f
+            .deliverer(8)
+            .deliver("a10", &target, &serde_json::json!({}), running())
+            .await;
+        assert_eq!(r, Resolution::Delivered);
+        assert!(
+            started.elapsed() >= Duration::from_secs(1),
+            "Retry-After: 1"
+        );
+        assert_eq!(
+            m.received().iter().map(|r| r.status).collect::<Vec<_>>(),
+            [429, 200]
+        );
+        assert_eq!(
+            f.log
+                .rows()
+                .iter()
+                .map(|r| (r.status, r.attempts, r.last_error.as_str()))
+                .collect::<Vec<_>>(),
+            [(STATUS_PENDING, 1, "HTTP 429"), (STATUS_DELIVERED, 2, "")]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_during_the_post_still_records_the_delivery() {
+        let m = mock(&[]).await;
+        m.set_delay(Duration::from_millis(500));
+        let f = Fixture::new();
+        let target = hook("hook", &m.url());
+        let (tx, rx) = watch::channel(false);
+        let flip = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            tx.send(true).unwrap();
+            tx // kept alive: a dropped sender would read as stop anyway
+        });
+        let d = f.deliverer(8);
+        let body = serde_json::json!({ "alert_id": "a11" });
+        assert_eq!(
+            d.deliver("a11", &target, &body, rx).await,
+            Resolution::Delivered
+        );
+        let tx = flip.await.unwrap();
+        assert!(*tx.borrow(), "stop flipped while the POST was in flight");
+        assert_eq!(
+            f.log.rows(),
+            [DeliveryRow {
+                alert_id: "a11".into(),
+                target: "hook".into(),
+                status: STATUS_DELIVERED,
+                attempts: 1,
+                last_error: String::new(),
+            }]
+        );
+        // After the restart the record is re-read: nothing is sent again.
+        assert_eq!(
+            d.deliver("a11", &target, &body, running()).await,
+            Resolution::AlreadyResolved
+        );
+        assert_eq!(m.received().len(), 1);
     }
 
     #[tokio::test]

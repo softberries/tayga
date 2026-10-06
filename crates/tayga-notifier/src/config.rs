@@ -10,6 +10,9 @@ use std::net::SocketAddr;
 
 pub const REDACTED: &str = "<redacted>";
 const NAME_MAX: usize = 64;
+/// Upper bound of `timeout_secs`: an attempt in flight at shutdown must finish, and its state be
+/// written, inside the compose `stop_grace_period` (see `deliver::RECORD_GRACE`).
+pub const TIMEOUT_MAX_SECS: u64 = 15;
 
 /// A webhook URL. Read it with [`WebhookUrl::expose`] only to send a request.
 #[derive(Deserialize, Clone, PartialEq, Eq)]
@@ -69,8 +72,11 @@ pub struct NotifierSettings {
     pub kinds: Vec<AlertKind>,
     /// Attempts per alert and target, the first included.
     pub max_attempts: u32,
-    /// Per-request timeout.
+    /// Per-request timeout, `1..=TIMEOUT_MAX_SECS`.
     pub timeout_secs: u64,
+    /// Alerts whose `last_at` is older than this are skipped (and committed): a first start with
+    /// targets must not deliver the whole retained backlog of `tayga.alerts`.
+    pub max_age_secs: u64,
     pub targets: Vec<Target>,
     pub alerts_topic: String,
     pub metrics_addr: SocketAddr,
@@ -83,6 +89,7 @@ impl Default for NotifierSettings {
             kinds: AlertKind::ALL.to_vec(),
             max_attempts: 8,
             timeout_secs: 10,
+            max_age_secs: 3_600,
             targets: Vec::new(),
             alerts_topic: "tayga.alerts".to_string(),
             metrics_addr: SocketAddr::from(([0, 0, 0, 0], 9100)),
@@ -98,8 +105,12 @@ impl NotifierSettings {
             "notifier.max_attempts must be positive"
         );
         anyhow::ensure!(
-            self.timeout_secs > 0,
-            "notifier.timeout_secs must be positive"
+            (1..=TIMEOUT_MAX_SECS).contains(&self.timeout_secs),
+            "notifier.timeout_secs must be within 1..={TIMEOUT_MAX_SECS}"
+        );
+        anyhow::ensure!(
+            self.max_age_secs > 0,
+            "notifier.max_age_secs must be positive"
         );
         anyhow::ensure!(
             is_http_url(&self.public_url),
@@ -160,6 +171,7 @@ mod tests {
         assert_eq!(s.public_url, "http://localhost:8090");
         assert_eq!(s.kinds, AlertKind::ALL);
         assert_eq!((s.max_attempts, s.timeout_secs), (8, 10));
+        assert_eq!(s.max_age_secs, 3_600);
         assert!(s.targets.is_empty());
         assert_eq!(s.alerts_topic, "tayga.alerts");
         assert_eq!(s.metrics_addr.port(), 9100);
@@ -187,6 +199,7 @@ mod tests {
         assert!(s.targets.is_empty());
         assert_eq!(s.kinds, AlertKind::ALL);
         assert_eq!((s.max_attempts, s.timeout_secs), (8, 10));
+        assert_eq!(s.max_age_secs, 3_600);
     }
 
     #[test]
@@ -252,6 +265,20 @@ mod tests {
                 ..NotifierSettings::default()
             })
             .contains("timeout_secs")
+        );
+        for (timeout_secs, ok) in [(15, true), (16, false)] {
+            let s = NotifierSettings {
+                timeout_secs,
+                ..NotifierSettings::default()
+            };
+            assert_eq!(s.validate().is_ok(), ok, "{timeout_secs}");
+        }
+        assert!(
+            bad(NotifierSettings {
+                max_age_secs: 0,
+                ..NotifierSettings::default()
+            })
+            .contains("max_age_secs")
         );
         assert!(
             bad(NotifierSettings {

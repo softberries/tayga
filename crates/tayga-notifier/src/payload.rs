@@ -124,8 +124,11 @@ pub fn webhook_payload(alert: &AlertMsg, public_url: &str) -> Value {
         "template_id": alert.template_id,
         "template": alert.template,
         "started_at": rfc3339(alert.started_at_ns),
+        "last_at": rfc3339(alert.last_at_ns),
         "count": alert.window_count,
         "baseline": alert.baseline_per_window,
+        // Unescaped: a webhook consumer formats it for its own medium.
+        "summary": summary(alert),
         "example_trace_ids": alert.example_trace_ids,
         "links": {
             "template": template_link(alert, base),
@@ -196,8 +199,9 @@ pub fn slack_payload(alert: &AlertMsg, public_url: &str) -> Value {
         AlertKind::Silence => "Log silence",
     };
     let header = truncate(&format!("{title} in {}", alert.service), SLACK_HEADER_MAX);
-    // Backticks cannot close the code block.
-    let template = escape(&alert.template.replace("```", "` ` `"), SLACK_TEMPLATE_MAX);
+    // No backtick at all, so the template can neither close the code block nor merge with its
+    // fences (a template starting or ending with one).
+    let template = escape(&alert.template.replace('`', "\u{2CB}"), SLACK_TEMPLATE_MAX);
     let started = rfc3339(alert.started_at_ns);
     let baseline = format!("*Baseline*\n{:.1} per window", alert.baseline_per_window);
     let fields = match alert.kind {
@@ -327,8 +331,10 @@ mod tests {
                 "template_id": "1234567890123",
                 "template": "payment <*> declined for order <*>",
                 "started_at": "2023-11-14T22:13:20.123Z",
+                "last_at": "2023-11-14T22:18:20.123Z",
                 "count": 42,
                 "baseline": 3.25,
+                "summary": "payment <*> declined for order <*> spiked to 42 per window in checkout (baseline 3.2)",
                 "example_trace_ids": ["t1", "t2", "t3", "t4"],
                 "links": {
                     "template": "http://localhost:8090/logs/templates/1234567890123",
@@ -348,6 +354,11 @@ mod tests {
             (Some("silence"), Some(0))
         );
         assert_eq!(s["links"]["traces"], json!([]));
+        assert_eq!(s["last_at"], "2023-11-14T22:26:19.123Z");
+        assert_eq!(
+            s["summary"],
+            "payment <*> declined for order <*> has been silent for 12 min in checkout"
+        );
     }
 
     #[test]
@@ -433,7 +444,7 @@ mod tests {
         assert!(header.ends_with('…'));
         let code = v["blocks"][1]["text"]["text"].as_str().unwrap();
         assert!(code.chars().count() <= 3_000);
-        assert!(code.starts_with("```a ` ` ` b &amp; x"), "{}", &code[..30]);
+        assert!(code.starts_with("```a ˋˋˋ b &amp; x"), "{}", &code[..30]);
         assert!(code.ends_with("…```"));
         assert_eq!(
             code.matches("```").count(),
@@ -450,5 +461,31 @@ mod tests {
             .to_string();
         assert!(code.chars().count() <= 3_000, "{}", code.len());
         assert!(code.ends_with("&amp;…```"), "an entity is never cut");
+    }
+
+    #[test]
+    fn slack_code_block_has_no_backtick_but_its_fences() {
+        for template in ["`edge`", "``x", "y``", "```", "a`b"] {
+            let a = AlertMsg {
+                template: template.into(),
+                ..spike()
+            };
+            let v = slack_payload(&a, "http://h");
+            let code = v["blocks"][1]["text"]["text"].as_str().unwrap();
+            let inner = code
+                .strip_prefix("```")
+                .and_then(|c| c.strip_suffix("```"))
+                .unwrap();
+            assert!(!inner.contains('`'), "{template:?} -> {code:?}");
+            assert_eq!(inner, template.replace('`', "ˋ"));
+        }
+        let v = slack_payload(
+            &AlertMsg {
+                template: "`edge`".into(),
+                ..spike()
+            },
+            "http://h",
+        );
+        assert_eq!(v["blocks"][1]["text"]["text"], "```ˋedgeˋ```");
     }
 }

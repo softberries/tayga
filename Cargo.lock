@@ -2511,6 +2511,7 @@ dependencies = [
  "anyhow",
  "config",
  "futures",
+ "httpdate",
  "prometheus-client",
  "rand 0.10.3",
  "rdkafka",

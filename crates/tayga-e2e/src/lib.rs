@@ -456,6 +456,7 @@ pub struct Received {
 struct MockState {
     script: VecDeque<u16>,
     received: Vec<Received>,
+    delay: Duration,
 }
 
 /// A local webhook receiver for notifier tests: every request on any path is recorded and
@@ -474,6 +475,7 @@ impl MockWebhook {
         let state = Arc::new(Mutex::new(MockState {
             script: script.iter().copied().collect(),
             received: Vec::new(),
+            delay: Duration::ZERO,
         }));
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let addr = listener.local_addr()?;
@@ -497,6 +499,11 @@ impl MockWebhook {
         format!("http://{}/hook", self.addr)
     }
 
+    /// Delays every later response by `delay`; the request is recorded on arrival.
+    pub fn set_delay(&self, delay: Duration) {
+        self.state.lock().expect("mock state lock").delay = delay;
+    }
+
     pub fn received(&self) -> Vec<Received> {
         self.state.lock().expect("mock state lock").received.clone()
     }
@@ -514,17 +521,21 @@ async fn mock_receive(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    let mut s = state.lock().expect("mock state lock");
-    let status = s.script.pop_front().unwrap_or(200);
-    s.received.push(Received {
-        path: uri.path().to_string(),
-        content_type: headers
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string),
-        body: serde_json::from_str(&body).unwrap_or(Value::Null),
-        status,
-    });
+    let (status, delay) = {
+        let mut s = state.lock().expect("mock state lock");
+        let status = s.script.pop_front().unwrap_or(200);
+        s.received.push(Received {
+            path: uri.path().to_string(),
+            content_type: headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string),
+            body: serde_json::from_str(&body).unwrap_or(Value::Null),
+            status,
+        });
+        (status, s.delay)
+    };
+    tokio::time::sleep(delay).await;
     let code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     if status == 429 {
         (code, [(header::RETRY_AFTER, "1")]).into_response()
@@ -573,6 +584,10 @@ mod tests {
         assert_eq!(got[0].path, "/hook");
         assert_eq!(got[0].content_type.as_deref(), Some("application/json"));
         assert_eq!(got[0].body, serde_json::json!({ "n": 1 }));
+        mock.set_delay(Duration::from_millis(300));
+        let started = Instant::now();
+        assert_eq!(post().await.unwrap().status(), 200);
+        assert!(started.elapsed() >= Duration::from_millis(300));
     }
 
     #[test]

@@ -13,7 +13,11 @@ public_url = "http://localhost:8090"
 kinds = ["new", "spike", "silence"]
 # Attempts per alert and target; backoff 1 s doubling, capped at 5 min.
 max_attempts = 8
+# Per request, at most 15.
 timeout_secs = 10
+# Alerts last updated longer ago than this are skipped: a first start with
+# targets does not deliver the retained backlog.
+max_age_secs = 3600
 
 # [[notifier.targets]]
 # name = "ops-slack"

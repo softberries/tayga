@@ -90,6 +90,27 @@ pub fn consumer(s: &KafkaSettings, group: &str) -> KafkaResult<StreamConsumer> {
     consumer_config(s, group).create()
 }
 
+/// Like [`consumer`], with some properties overridden for one service.
+pub fn consumer_with_overrides(
+    s: &KafkaSettings,
+    group: &str,
+    overrides: &[(&str, &str)],
+) -> KafkaResult<StreamConsumer> {
+    config_with_overrides(s, group, overrides).create()
+}
+
+fn config_with_overrides(
+    s: &KafkaSettings,
+    group: &str,
+    overrides: &[(&str, &str)],
+) -> ClientConfig {
+    let mut config = consumer_config(s, group);
+    for (key, value) in overrides {
+        config.set(*key, *value);
+    }
+    config
+}
+
 /// Like [`consumer`], with a context that receives rebalance callbacks.
 pub fn consumer_with_context<C: ConsumerContext + 'static>(
     s: &KafkaSettings,
@@ -162,6 +183,19 @@ mod tests {
                 ("tayga-schema".into(), b"1".to_vec()),
                 ("tayga-key".into(), b"service".to_vec()),
             ]
+        );
+    }
+
+    #[test]
+    fn overrides_replace_only_the_named_properties() {
+        let s = settings(900_000);
+        let c = config_with_overrides(&s, "g", &[("max.poll.interval.ms", "2400000")]);
+        assert_eq!(c.get("max.poll.interval.ms"), Some("2400000"));
+        assert_eq!(c.get("enable.auto.commit"), Some("false"));
+        assert_eq!(
+            consumer_config(&s, "g").get("max.poll.interval.ms"),
+            Some("600000"),
+            "the shared default is unchanged"
         );
     }
 

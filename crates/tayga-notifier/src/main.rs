@@ -5,12 +5,13 @@ use rdkafka::message::BorrowedMessage;
 use rdkafka::{Message, Offset, TopicPartitionList};
 use serde::Deserialize;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tayga_kafka::KafkaSettings;
 use tayga_notifier::config::{NotifierSettings, TargetKind};
-use tayga_notifier::deliver::{Deliverer, Resolution, Sender};
-use tayga_notifier::metrics::NotifierMetrics;
+use tayga_notifier::deliver::{Deliverer, Sender};
+use tayga_notifier::metrics::{NotifierMetrics, STALE};
 use tayga_notifier::payload::{AlertMsg, slack_payload, webhook_payload};
+use tayga_notifier::route::{Route, may_commit, route};
 use tayga_store::ClickHouseSettings;
 use tayga_store::store::Store;
 use tokio::sync::watch;
@@ -18,6 +19,10 @@ use tokio::sync::watch;
 const GROUP: &str = "tayga-notifier";
 /// Matches the logminer, which normally creates the topic first.
 const ALERTS_PARTITIONS: i32 = 3;
+/// One record can hold the loop for a long time: up to `max_attempts` attempts per target, each
+/// waiting up to 5 min on `Retry-After` (about 35 min at 8 attempts). The shared 10 min would
+/// evict the consumer mid-record; 40 min covers it.
+const MAX_POLL_INTERVAL_MS: &str = "2400000";
 
 #[derive(Deserialize)]
 struct Settings {
@@ -46,7 +51,11 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
         ..settings.kafka.clone()
     };
     tayga_kafka::ensure_topic(&alerts).await?;
-    let consumer = tayga_kafka::consumer(&alerts, GROUP)?;
+    let consumer = tayga_kafka::consumer_with_overrides(
+        &alerts,
+        GROUP,
+        &[("max.poll.interval.ms", MAX_POLL_INTERVAL_MS)],
+    )?;
     consumer.subscribe(&[&alerts.topic])?;
 
     let stop_rx = tayga_common::shutdown_flag();
@@ -109,10 +118,8 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Delivers one record to every target. Returns whether every target is resolved (delivered,
-/// given up, or resolved earlier), i.e. whether the offset may be committed. Undecodable
-/// records, kinds not in `kinds`, and every record when no target is configured are resolved
-/// at once.
+/// Handles one record; returns whether its offset may be committed. Undecodable records are
+/// skipped; the rest follow [`route`] and [`may_commit`].
 async fn handle(
     msg: &BorrowedMessage<'_>,
     cfg: &NotifierSettings,
@@ -127,8 +134,16 @@ async fn handle(
         }
         None => return true,
     };
-    if cfg.targets.is_empty() || !cfg.delivers(alert.kind) {
-        return true;
+    match route(cfg, &alert, now_ns()) {
+        Route::NoTargets | Route::ExcludedKind => return true,
+        Route::Stale => {
+            tracing::debug!(alert_id = %alert.alert_id, last_at_ns = alert.last_at_ns, "skipping stale alert");
+            for target in &cfg.targets {
+                deliverer.metrics.count(&target.name, STALE);
+            }
+            return true;
+        }
+        Route::Deliver => {}
     }
     let webhook = webhook_payload(&alert, &cfg.public_url);
     let slack = slack_payload(&alert, &cfg.public_url);
@@ -140,7 +155,14 @@ async fn handle(
         deliverer.deliver(&alert.alert_id, target, body, stop.clone())
     }))
     .await;
-    results.iter().all(|r| *r != Resolution::Interrupted)
+    may_commit(&results)
+}
+
+fn now_ns() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 fn commit(consumer: &StreamConsumer, msg: &BorrowedMessage<'_>) {
