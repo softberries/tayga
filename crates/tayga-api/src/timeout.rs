@@ -1,5 +1,5 @@
 //! Bounds every `/api/` request. ClickHouse stops a read at `max_execution_time` (the route then
-//! answers 503); this layer answers 504 when a request is still running `SLACK_SECS` later, e.g.
+//! answers 504); this layer answers 504 when a request is still running `SLACK_SECS` later, e.g.
 //! against a ClickHouse that accepts the connection and never answers. The app, `/metrics` and
 //! `/healthz` are not bounded.
 

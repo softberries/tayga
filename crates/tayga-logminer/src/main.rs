@@ -44,6 +44,9 @@ const SEASONAL_SHIFTS_SECS: [u32; 2] = [86_400, 7 * 86_400];
 /// Timeout of one `fetch_watermarks` call per detection tick.
 const WATERMARK_TIMEOUT: Duration = Duration::from_secs(2);
 /// Alerts stored at most this long ago with no recorded publication are published again.
+/// The notifier's default `max_age_secs` (1 h): a republished alert whose `last_at` is older
+/// than this is skipped there as stale.
+const STALE_AFTER_NS: i64 = 3_600 * 1_000_000_000;
 const REPUBLISH_WINDOW_NS: i64 = 24 * 3600 * 1_000_000_000;
 /// Heartbeat keys older than this belong to replicas that are gone; deleted at startup.
 const STALE_HEARTBEAT_NS: i64 = 24 * 3600 * 1_000_000_000;
@@ -1674,6 +1677,15 @@ async fn republish_unpublished(
         return;
     }
     metrics.alerts_republished.inc_by(sent.len() as u64);
+    for alert in alerts.iter().filter(|a| sent.contains(&a.alert_id)) {
+        if now - alert.last_at_ns > STALE_AFTER_NS {
+            tracing::debug!(
+                alert_id = %alert.alert_id,
+                age_secs = (now - alert.last_at_ns) / 1_000_000_000,
+                "republished alert is older than the notifier's default max age and will likely be skipped as stale"
+            );
+        }
+    }
     tracing::info!(alerts = sent.len(), "unpublished alerts published again");
     mark_published(store, &sent, now).await;
 }

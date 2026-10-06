@@ -301,7 +301,7 @@
             "type": "prometheus",
             "uid": "tayga-prometheus"
           },
-          "expr": "increase(tayga_logminer_write_failures_total[5m])",
+          "expr": "sum(increase(tayga_logminer_write_failures_total[5m]))",
           "legendFormat": "logminer write failures",
           "range": true,
           "instant": false

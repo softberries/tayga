@@ -214,7 +214,7 @@ impl ChRepo {
     }
 
     /// Sends `max_execution_time` = `secs` with every query, so ClickHouse stops a read that runs
-    /// longer (error 159; the route answers 503). `0` sends nothing (no limit).
+    /// longer (error 159; the route answers 504). `0` sends nothing (no limit).
     pub fn with_max_execution_time(self, secs: u64) -> Self {
         if secs == 0 {
             return self;

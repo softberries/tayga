@@ -68,7 +68,7 @@ export const CHARTS: readonly ChartSpec[] = [
   {
     id: 'writer',
     title: 'Writer rows',
-    unit: 'rows inserted into ClickHouse per second',
+    unit: 'rows committed per second',
     format: perSec,
     minInterval: 0,
     type: 'area',
@@ -128,6 +128,17 @@ export const CHARTS: readonly ChartSpec[] = [
     format: seconds,
     minInterval: 0,
     series: [{ name: 'data lag', metric: 'tayga_logminer_data_lag_seconds', kind: 'gauge', job: 'tayga-logminer', tone: 'slow' }],
+  },
+  {
+    id: 'commit-failures',
+    title: 'Commit failures',
+    unit: 'refused offset commits per minute (the records are read again)',
+    format: perMin,
+    minInterval: 0,
+    series: [
+      { name: 'writer commit failures', metric: 'tayga_writer_commit_failures_total', kind: 'rate', job: 'tayga-writer', scale: 60 },
+      { name: 'logminer commit failures', metric: 'tayga_logminer_commit_failures_total', kind: 'rate', job: 'tayga-logminer', scale: 60 },
+    ],
   },
   {
     id: 'errors',

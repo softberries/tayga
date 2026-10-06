@@ -15,16 +15,29 @@ test('home inspector to story to trace to span drawer shows attributes', async (
 
   const rows = page.getByRole('treeitem')
   await expect(rows.first()).toBeVisible()
-  await rows.first().click()
 
+  // OTLP does not require span attributes, so the root span may have none. Walk the first few
+  // spans: an empty one shows the empty state; the first one with attributes shows a key/value pair.
   const drawer = page.getByRole('dialog')
-  await expect(drawer).toBeVisible()
-  const attributes = drawer.getByRole('tab', { name: /^Attributes/ })
-  await expect(attributes).toHaveAttribute('aria-selected', 'true')
-  // A positive count, and a rendered key/value pair in the panel.
-  await expect(attributes).toHaveText(/Attributes\s*[1-9]/)
-  await expect(drawer.getByRole('tabpanel')).toContainText(/\S+/)
-  await expect(drawer.getByRole('tabpanel').locator('dt, th, td, span').first()).toBeVisible()
+  const limit = Math.min(await rows.count(), 5)
+  let found = false
+  for (let i = 0; i < limit && !found; i++) {
+    await rows.nth(i).click()
+    await expect(drawer).toBeVisible()
+    const attributes = drawer.getByRole('tab', { name: /^Attributes/ })
+    await expect(attributes).toHaveAttribute('aria-selected', 'true')
+    const count = Number(((await attributes.textContent()) ?? '').replace(/\D/g, ''))
+    if (count === 0) {
+      await expect(drawer.getByRole('tabpanel')).toContainText('No attributes on this span')
+      await page.keyboard.press('Escape')
+      await expect(drawer).toBeHidden()
+      continue
+    }
+    await expect(attributes).toHaveText(/Attributes\s*[1-9]/)
+    await expect(drawer.getByRole('tabpanel').locator('dt, th, td, span').first()).toBeVisible()
+    found = true
+  }
+  expect(found, `none of the first ${limit} spans has attributes`).toBe(true)
 
   await page.keyboard.press('Escape')
   await expect(drawer).toBeHidden()

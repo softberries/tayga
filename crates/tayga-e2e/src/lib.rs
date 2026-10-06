@@ -177,7 +177,8 @@ pub fn order_root_span(trace_id: &str, span_id: &str, start_ns: i64, end_ns: i64
                 "name": "user_checkout_single",
                 "kind": 1,
                 "startTimeUnixNano": start_ns.to_string(),
-                "endTimeUnixNano": end_ns.to_string()
+                "endTimeUnixNano": end_ns.to_string(),
+                "attributes": [{"key": "app.e2e", "value": {"stringValue": "true"}}]
             }]
         }]
     }]})

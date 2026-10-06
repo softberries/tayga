@@ -91,14 +91,14 @@ describe('charts', () => {
   it('requests each series with the recorded metric names, kinds and k=v labels', async () => {
     const calls = stub({ up: { 'tayga-ingest': healthy(1) }, metrics: [[minute(120_000), 1], [minute(60_000), 3]] })
     renderApp('/pipeline?since=24h')
-    await waitFor(() => expect(screen.getAllByTestId('echart').length).toBe(9))
+    await waitFor(() => expect(screen.getAllByTestId('echart').length).toBe(10))
     const q = calls.filter((u) => u.pathname.endsWith('/pipeline/series')).map((u) => Object.fromEntries(u.searchParams))
     expect(q).toContainEqual({ since: '24h', metric: 'tayga_ingest_records_published_total', kind: 'rate', job: 'tayga-ingest', labels: 'kind=traces' })
     expect(q).toContainEqual({ since: '24h', metric: 'tayga_writer_batch_seconds', kind: 'q99', job: 'tayga-writer' })
     expect(q).toContainEqual({ since: '24h', metric: 'tayga_assembler_buffered_bytes', kind: 'gauge', job: 'tayga-assembler' })
     // Status chips use their own 15 min window whatever the page range.
     expect(q).toContainEqual({ since: '15m', metric: 'up', kind: 'gauge', job: 'tayga-api' })
-    for (const title of ['Ingest records', 'Writer rows', 'Assembler output', 'Logminer throughput', 'Open traces', 'Buffered bytes', 'Writer batch latency', 'Logminer data lag', 'Errors']) {
+    for (const title of ['Ingest records', 'Writer rows', 'Assembler output', 'Logminer throughput', 'Open traces', 'Buffered bytes', 'Writer batch latency', 'Logminer data lag', 'Commit failures', 'Errors']) {
       expect(screen.getByRole('heading', { name: title })).toBeInTheDocument()
     }
   })
@@ -107,7 +107,7 @@ describe('charts', () => {
     const until = formatUntil(minute(3_600_000))
     const calls = stub({ up: { 'tayga-ingest': healthy(1) }, metrics: [[minute(7_000_000), 1]] })
     const { queryClient } = renderApp(`/pipeline?since=2h&until=${until}`)
-    await waitFor(() => expect(screen.getAllByTestId('echart').length).toBe(9))
+    await waitFor(() => expect(screen.getAllByTestId('echart').length).toBe(10))
     const q = calls.filter((u) => u.pathname.endsWith('/pipeline/series')).map((u) => Object.fromEntries(u.searchParams))
     expect(q).toContainEqual({ since: '2h', until, metric: 'tayga_assembler_buffered_bytes', kind: 'gauge', job: 'tayga-assembler' })
     expect(q).toContainEqual({ since: '15m', metric: 'up', kind: 'gauge', job: 'tayga-api' })
@@ -126,7 +126,7 @@ describe('charts', () => {
   it('says a chart is collecting when its series has no points yet', async () => {
     stub({ up: { 'tayga-ingest': healthy(1) }, metrics: [] })
     renderApp('/pipeline')
-    await waitFor(() => expect(screen.getAllByText('Collecting… first points in 15 s').length).toBe(9))
+    await waitFor(() => expect(screen.getAllByText('Collecting… first points in 15 s').length).toBe(10))
     expect(screen.queryByTestId('echart')).toBeNull()
   })
 })
@@ -140,24 +140,24 @@ describe('failures inside charts', () => {
     const note = await screen.findByText(/Could not load insert failures; it is missing from this chart, not zero\./)
     expect(note.closest('[role="alert"]')).toBeInTheDocument()
     // The other lines still draw.
-    await waitFor(() => expect(screen.getAllByTestId('echart').length).toBe(9))
+    await waitFor(() => expect(screen.getAllByTestId('echart').length).toBe(10))
   })
 
   it('keeps old chart data and notes the failed refresh', async () => {
     let down = false
     stub({ up: { 'tayga-ingest': healthy(1) }, metrics, fail: (u) => down && u.searchParams.get('metric') === 'tayga_writer_rows_inserted_total' })
     const { queryClient } = renderApp('/pipeline')
-    await waitFor(() => expect(screen.getAllByTestId('echart').length).toBe(9))
+    await waitFor(() => expect(screen.getAllByTestId('echart').length).toBe(10))
     down = true
     await queryClient.refetchQueries({ queryKey: ['pipeline-series'] })
     expect(await screen.findByText(/Refresh failed · showing data from/)).toBeInTheDocument()
-    expect(screen.getAllByTestId('echart').length).toBe(9)
+    expect(screen.getAllByTestId('echart').length).toBe(10)
   })
 
   it('treats a series of only gaps as no data', async () => {
     stub({ up: { 'tayga-ingest': healthy(1) }, metrics: [[minute(120_000), null], [minute(60_000), null]] })
     renderApp('/pipeline')
-    await waitFor(() => expect(screen.getAllByText('Collecting… first points in 15 s').length).toBe(9))
+    await waitFor(() => expect(screen.getAllByText('Collecting… first points in 15 s').length).toBe(10))
     expect(screen.queryByTestId('echart')).toBeNull()
   })
 })
