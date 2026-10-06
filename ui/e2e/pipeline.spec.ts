@@ -8,13 +8,13 @@ test('the status strip shows 6 jobs up (ingest, writer, assembler, logminer, not
 
   // Every chart's text summary names a latest value, which exists only for a non-empty series.
   const captions = page.locator('figcaption')
-  await expect(captions).toHaveCount(9)
+  await expect(captions).toHaveCount(10)
   for (const text of await captions.allTextContents()) expect(text).toMatch(/ Latest: .+\d/)
   await expect(page.getByText(/^Collecting/)).toHaveCount(0)
 
   // Each chart painted its canvas.
   const canvases = page.locator('figure canvas')
-  await expect(canvases).toHaveCount(9)
+  await expect(canvases).toHaveCount(10)
   for (let i = 0; i < 9; i++) expect((await canvases.nth(i).boundingBox())!.height).toBeGreaterThan(100)
 
   await expect(page.getByRole('list', { name: 'Consumer lag' })).toBeVisible()
