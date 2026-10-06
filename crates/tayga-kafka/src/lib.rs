@@ -25,10 +25,11 @@ pub struct KafkaSettings {
     /// `MAX_MESSAGE_BYTES` to leave room for the key, headers and record overhead.
     #[serde(default = "default_max_record_bytes")]
     pub max_record_bytes: usize,
-    /// `retention.ms` set when a topic is created (24 h by default). An existing topic keeps
-    /// its own retention.
+    /// `retention.ms` set when a topic is created (24 h by default; `-1` is unlimited). A writer
+    /// or assembler outage longer than this loses the records it has not consumed yet. Applies
+    /// only when a topic is created: an existing topic keeps its own retention.
     #[serde(default = "default_retention_ms")]
-    pub retention_ms: u64,
+    pub retention_ms: i64,
 }
 
 /// Producer `message.max.bytes` and topic `max.message.bytes` (Redpanda's default batch limit).
@@ -50,7 +51,7 @@ fn default_max_record_bytes() -> usize {
     900_000
 }
 
-fn default_retention_ms() -> u64 {
+fn default_retention_ms() -> i64 {
     86_400_000
 }
 
@@ -72,6 +73,11 @@ impl KafkaSettings {
             self.partitions > 0,
             "kafka.partitions must be positive (got {})",
             self.partitions
+        );
+        anyhow::ensure!(
+            self.retention_ms == -1 || self.retention_ms > 0,
+            "kafka.retention_ms must be -1 (unlimited) or positive (got {})",
+            self.retention_ms
         );
         Ok(())
     }
@@ -288,5 +294,19 @@ mod tests {
         let mut s = settings(1000);
         s.logs_topic = s.topic.clone();
         assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn validate_checks_retention() {
+        for ok in [-1, 1, default_retention_ms()] {
+            let mut s = settings(1000);
+            s.retention_ms = ok;
+            s.validate().unwrap();
+        }
+        for bad in [0, -2] {
+            let mut s = settings(1000);
+            s.retention_ms = bad;
+            assert!(s.validate().is_err(), "{bad}");
+        }
     }
 }

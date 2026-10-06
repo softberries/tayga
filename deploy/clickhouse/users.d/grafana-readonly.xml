@@ -2,7 +2,9 @@
      temporary tables and setting changes; the Grafana plugin's clickhouse-go client sets
      max_execution_time per query, so only that setting may change. tayga-api keeps the default
      user: its recorder inserts metric_samples and the silence route writes log_template_silence.
-     The stack binds ClickHouse to 127.0.0.1, so the user has no password. -->
+     The stack binds ClickHouse to 127.0.0.1, so the user has no password. This protects against
+     stray dashboard writes; it is not a security boundary: `default` is still passwordless on
+     the compose network, and the published port binds to 127.0.0.1 only. -->
 <clickhouse>
     <profiles>
         <grafana_readonly>
