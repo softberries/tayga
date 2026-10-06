@@ -15,6 +15,7 @@ fn settings() -> KafkaSettings {
         logs_topic: format!("tayga-it-logs-{suffix}"),
         partitions: 3,
         max_record_bytes: 900_000,
+        retention_ms: 3_600_000,
     }
 }
 
