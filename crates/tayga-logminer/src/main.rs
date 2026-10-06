@@ -551,6 +551,11 @@ async fn bounded_flush(
 /// once it is more than `NEW_TEMPLATE_MARGIN_NS` past the template's `first_seen` the template
 /// is no longer a candidate. In practice the service must log again within about one detection
 /// tick; otherwise its "new" alert is missed. This narrow window is the accepted edge.
+///
+/// The 15 s bound covers the inserts only, not the offset commit: that is a synchronous
+/// `CommitMode::Sync` call the timeout cannot interrupt. A hanging group coordinator therefore
+/// holds the flush until Docker kills the process at `stop_grace_period`, which is the crash
+/// edge above (the stored records are re-read, the announcement is skipped).
 async fn shut_down(
     ctx: &Ctx<'_>,
     cfg: &LogminerSettings,
@@ -1161,16 +1166,20 @@ fn data_clock(raw_ns: i64, now_ns: i64) -> i64 {
     raw_ns.min(now_ns)
 }
 
-/// The clock this replica's data lag is read from: its detection clock over the partitions it
-/// holds ([`detection_clock`]), or the store's newest hit (`stored_now_ns`) before it has
-/// partition data (restart, nothing consumed, no assignment). Never ahead of `now_ns`.
+/// The clock this replica's data lag is read from. With a partition still behind: its detection
+/// clock over the partitions it holds ([`detection_clock`]), so the lag is this replica's own.
+/// With every partition caught up: the later of that clock and the store's newest hit
+/// (`stored_now_ns`), so an idle replica with nothing to read does not show a growing lag.
+/// Before it has partition data (restart, nothing consumed, no assignment): `stored_now_ns`.
+/// Never ahead of `now_ns`.
 fn lag_clock(
     partitions: Option<&BTreeMap<i32, (i64, bool)>>,
     stored_now_ns: i64,
     now_ns: i64,
 ) -> i64 {
     let raw = match partitions {
-        Some(m) if !m.is_empty() => detection_clock(m, stored_now_ns),
+        Some(m) if m.values().any(|(_, caught_up)| !caught_up) => detection_clock(m, stored_now_ns),
+        Some(m) if !m.is_empty() => detection_clock(m, stored_now_ns).max(stored_now_ns),
         _ => stored_now_ns,
     };
     data_clock(raw, now_ns)
@@ -1659,18 +1668,32 @@ async fn republish_unpublished(
             return;
         }
     };
-    let mut sent = Vec::new();
-    for alert in rows.iter().filter_map(alert_from_row) {
-        if send_alert(producer, topic, &alert).await {
-            sent.push(alert.alert_id);
-        }
-    }
+    let alerts: Vec<Alert> = rows.iter().filter_map(alert_from_row).collect();
+    let sent = send_until_failure(&alerts, |a| send_alert(producer, topic, a)).await;
     if sent.is_empty() {
         return;
     }
     metrics.alerts_republished.inc_by(sent.len() as u64);
     tracing::info!(alerts = sent.len(), "unpublished alerts published again");
     mark_published(store, &sent, now).await;
+}
+
+/// Sends `alerts` in order and returns the ids sent, stopping at the first failed send: during a
+/// Kafka outage each send waits out its timeout, so trying the rest would stall the pass past
+/// `max.poll.interval.ms`. The unsent ones wait for the next pass.
+async fn send_until_failure<'a, F, Fut>(alerts: &'a [Alert], mut send: F) -> Vec<String>
+where
+    F: FnMut(&'a Alert) -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let mut sent = Vec::new();
+    for alert in alerts {
+        if !send(alert).await {
+            break;
+        }
+        sent.push(alert.alert_id.clone());
+    }
+    sent
 }
 
 /// Deletes the heartbeat keys of replicas gone for more than a day (best effort). Only keys with
@@ -2012,7 +2035,39 @@ mod tests {
         let m = parts(&[(0, 50, false), (1, 90, true)]);
         assert_eq!(lag_clock(Some(&m), 999, 1_000), 50);
         let m = parts(&[(0, 50, true), (1, 90, true)]);
-        assert_eq!(lag_clock(Some(&m), 999, 1_000), 90, "caught up: the newest");
+        assert_eq!(
+            lag_clock(Some(&m), 999, 1_000),
+            999,
+            "caught up and idle: the store clock, so the gauge does not grow"
+        );
+        assert_eq!(
+            lag_clock(Some(&m), 60, 1_000),
+            90,
+            "caught up: never behind its own newest hit"
+        );
+    }
+
+    #[tokio::test]
+    async fn republishing_stops_at_the_first_failed_send() {
+        let alert = |id: &str| {
+            let mut a = new_alert(&candidate(5, "api", "t <*>", 0), vec![], 0);
+            a.alert_id = id.into();
+            a
+        };
+        let alerts = vec![alert("a"), alert("b"), alert("c")];
+        let tried = Mutex::new(Vec::new());
+        let sent = send_until_failure(&alerts, |a: &Alert| {
+            tried.lock().unwrap().push(a.alert_id.clone());
+            let ok = a.alert_id != "b";
+            async move { ok }
+        })
+        .await;
+        assert_eq!(sent, ["a"]);
+        assert_eq!(
+            *tried.lock().unwrap(),
+            ["a", "b"],
+            "the rest wait for the next pass"
+        );
     }
 
     #[test]

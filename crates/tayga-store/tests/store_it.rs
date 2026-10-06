@@ -48,15 +48,6 @@ fn span(id: &str) -> SpanRow {
 #[ignore = "requires ClickHouse: make it"]
 async fn migrate_is_idempotent_and_rows_roundtrip() {
     let s = settings();
-    assert_eq!(
-        migrate(&s).await.unwrap(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-    );
-    assert!(migrate(&s).await.unwrap().is_empty());
-
-    let store = Store::new(&s);
-    let rows = vec![span("01"), span("02"), span("01")];
-    store.insert_spans(&rows).await.unwrap();
     let ts = now_ns();
     let log = LogRow {
         log_id: 1,
@@ -74,34 +65,39 @@ async fn migrate_is_idempotent_and_rows_roundtrip() {
             ("user".into(), "u1".into()),
         ],
     };
-    store.insert_logs(std::slice::from_ref(&log)).await.unwrap();
-
-    let back: Vec<SpanRow> = store
-        .client()
-        .query("SELECT ?fields FROM spans FINAL ORDER BY span_id")
-        .fetch_all()
-        .await
-        .unwrap();
+    let store = Store::new(&s);
+    // Collect first, drop the database, then assert: a failure must not leak the database.
+    let outcome = async {
+        let first = migrate(&s).await?;
+        let second = migrate(&s).await?;
+        store
+            .insert_spans(&[span("01"), span("02"), span("01")])
+            .await?;
+        store.insert_logs(std::slice::from_ref(&log)).await?;
+        let spans: Vec<SpanRow> = store
+            .client()
+            .query("SELECT ?fields FROM spans FINAL ORDER BY span_id")
+            .fetch_all()
+            .await?;
+        let logs: Vec<LogRow> = store
+            .client()
+            .query("SELECT ?fields FROM logs")
+            .fetch_all()
+            .await?;
+        anyhow::Ok((first, second, spans, logs))
+    }
+    .await;
+    drop_db(&s, &store).await;
+    let (first, second, back, logs_back) = outcome.unwrap();
+    assert_eq!(first, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    assert!(second.is_empty());
     assert_eq!(
         back.len(),
         2,
         "duplicate (same sort key) collapses under FINAL"
     );
     assert_eq!(back[0], span("01"));
-
-    let logs_back: Vec<LogRow> = store
-        .client()
-        .query("SELECT ?fields FROM logs")
-        .fetch_all()
-        .await
-        .unwrap();
     assert_eq!(logs_back, [log], "every LogRow field round-trips");
-    store
-        .client()
-        .query(&format!("DROP DATABASE `{}`", s.database))
-        .execute()
-        .await
-        .unwrap();
 }
 
 use tayga_store::rows::{ServiceEdgeRow, StoryRow, TraceSummaryRow};
@@ -531,7 +527,7 @@ async fn log_store() -> (ClickHouseSettings, Store) {
 async fn drop_db(s: &ClickHouseSettings, store: &Store) {
     store
         .client()
-        .query(&format!("DROP DATABASE `{}`", s.database))
+        .query(&format!("DROP DATABASE IF EXISTS `{}`", s.database))
         .execute()
         .await
         .unwrap();
@@ -1432,54 +1428,53 @@ async fn enum_migration_keeps_old_alert_rows_and_accepts_silence() {
     }
     let store = Store::new(&s);
     let now = now_ns();
-    store
-        .insert_alerts(&[alert("new:1", 1, 1, now), alert("spike:1", 2, 1, now)])
-        .await
-        .unwrap();
-
-    assert_eq!(migrate(&s).await.unwrap(), vec![10, 11, 12]);
-    let kinds: Vec<(String, i8)> = store
-        .client()
-        .query("SELECT alert_id, kind FROM log_alerts FINAL ORDER BY alert_id")
-        .fetch_all()
-        .await
-        .unwrap();
-    assert_eq!(kinds, vec![("new:1".into(), 1), ("spike:1".into(), 2)]);
-    assert!(
+    // Collect first, drop the database, then assert: a failure must not leak the database.
+    let outcome = async {
         store
-            .unpublished_alerts(&svc(&["checkout"]), 0)
-            .await
-            .unwrap()
-            .is_empty(),
-        "migration 12 marks the alerts stored before it as published"
-    );
-    // The client caches the table schema per instance: a fresh one sees the widened enum.
-    let store = Store::new(&s);
-    store
-        .insert_alerts(&[alert("silence:1", 3, 1, now)])
-        .await
-        .unwrap();
-    let silence: Vec<String> = store
-        .client()
-        .query("SELECT toString(kind) FROM log_alerts FINAL WHERE kind = 'silence'")
-        .fetch_all()
-        .await
-        .unwrap();
-    assert_eq!(silence, vec!["silence".to_string()]);
-
-    // A partially applied 0010 (statements ran, version not recorded) re-runs cleanly.
-    db_exec_all(
-        &store,
-        include_str!("../migrations/0010_log_template_silence.sql"),
-    )
+            .insert_alerts(&[alert("new:1", 1, 1, now), alert("spike:1", 2, 1, now)])
+            .await?;
+        let applied = migrate(&s).await?;
+        let kinds: Vec<(String, i8)> = store
+            .client()
+            .query("SELECT alert_id, kind FROM log_alerts FINAL ORDER BY alert_id")
+            .fetch_all()
+            .await?;
+        let unpublished = store.unpublished_alerts(&svc(&["checkout"]), 0).await?;
+        // The client caches the table schema per instance: a fresh one sees the widened enum.
+        let fresh = Store::new(&s);
+        fresh
+            .insert_alerts(&[alert("silence:1", 3, 1, now)])
+            .await?;
+        let silence: Vec<String> = fresh
+            .client()
+            .query("SELECT toString(kind) FROM log_alerts FINAL WHERE kind = 'silence'")
+            .fetch_all()
+            .await?;
+        // A partially applied 0010 (statements ran, version not recorded) re-runs cleanly.
+        db_exec_all(
+            &fresh,
+            include_str!("../migrations/0010_log_template_silence.sql"),
+        )
+        .await?;
+        anyhow::Ok((applied, kinds, unpublished, silence))
+    }
     .await;
     drop_db(&s, &store).await;
+    let (applied, kinds, unpublished, silence) = outcome.unwrap();
+    assert_eq!(applied, vec![10, 11, 12]);
+    assert_eq!(kinds, vec![("new:1".into(), 1), ("spike:1".into(), 2)]);
+    assert!(
+        unpublished.is_empty(),
+        "migration 12 marks the alerts stored before it as published"
+    );
+    assert_eq!(silence, vec!["silence".to_string()]);
 }
 
-async fn db_exec_all(store: &Store, sql: &str) {
+async fn db_exec_all(store: &Store, sql: &str) -> clickhouse::error::Result<()> {
     for q in tayga_store::migrate::split_statements(sql) {
-        store.client().query(&q).execute().await.unwrap();
+        store.client().query(&q).execute().await?;
     }
+    Ok(())
 }
 
 #[tokio::test]
@@ -1742,6 +1737,8 @@ async fn unpublished_alerts_are_owned_recent_and_unmarked() {
     store
         .insert_alerts(&[
             at("a-owned", "checkout", now - MIN_NS),
+            // An older version of the same alert (a spike rewrites its row): read once.
+            at("a-owned", "checkout", now - 2 * MIN_NS),
             at("b-marked", "checkout", now - MIN_NS),
             at("c-old", "checkout", now - 25 * 60 * MIN_NS),
             at("d-other", "cart", now - MIN_NS),

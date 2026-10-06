@@ -471,6 +471,13 @@ impl Store {
 
     /// Alerts of `services` stored at or after `since_ns` (by `version`, their write time) with
     /// no recorded publication, oldest first, at most 1000. An empty `services` reads nothing.
+    /// Only the kinds the logminer publishes (`new`, `spike`, `silence`) are read, so a kind
+    /// added to the enum later is never handed to a publisher that cannot parse it.
+    ///
+    /// Cost: runs after every detection pass. No `FINAL`: the newest version per alert comes from
+    /// `LIMIT 1 BY` over the rows of the owned services written in the window (a spike rewrites
+    /// its row each update, so a few rows per alert), and the publication ids (one per alert
+    /// published in the last 7 days, the TTL) are read once as the `NOT IN` set.
     pub async fn unpublished_alerts(
         &self,
         services: &[String],
@@ -481,11 +488,14 @@ impl Store {
         }
         self.client()
             .query(
-                "SELECT alert_id, kind, template_id, service, template, started_at, last_at, \
+                "SELECT * FROM ( \
+                 SELECT alert_id, kind, template_id, service, template, started_at, last_at, \
                  window_count, peak_count, baseline_per_window, example_trace_ids, version, \
                  baseline_day, baseline_week \
-                 FROM log_alerts FINAL WHERE service IN ? AND version >= ? \
+                 FROM log_alerts WHERE service IN ? AND version >= ? \
+                 AND kind IN ('new', 'spike', 'silence') \
                  AND alert_id NOT IN (SELECT alert_id FROM log_alert_publications) \
+                 ORDER BY alert_id, version DESC LIMIT 1 BY alert_id) \
                  ORDER BY version LIMIT 1000",
             )
             .bind(services)
