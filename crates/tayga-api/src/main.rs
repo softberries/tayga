@@ -87,7 +87,11 @@ async fn main() -> anyhow::Result<()> {
     let v2 = routes_v2::router(
         repo.clone(),
         metrics.clone(),
-        LagCache::kafka(settings.kafka.brokers.clone(), settings.kafka.topic.clone()),
+        LagCache::kafka(
+            settings.kafka.brokers.clone(),
+            settings.kafka.topic.clone(),
+            settings.kafka.logs_topic.clone(),
+        ),
         ClientConfig::new(
             &settings.jaeger_url,
             &settings.grafana_url,

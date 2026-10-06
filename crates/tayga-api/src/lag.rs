@@ -9,7 +9,9 @@ use serde::Serialize;
 use std::time::Duration;
 
 /// Groups on the signals topic.
-pub const GROUPS: [&str; 3] = ["tayga-writer", "tayga-assembler", "tayga-logminer"];
+pub const GROUPS: [&str; 2] = ["tayga-writer", "tayga-assembler"];
+/// Groups on the service-keyed logs topic (the logminer reads `tayga.logs` since plan 8).
+pub const LOG_GROUPS: [&str; 1] = ["tayga-logminer"];
 /// The notifier's group, on the topic the logminer publishes alerts to.
 pub const ALERTS_TOPIC: &str = "tayga.alerts";
 pub const ALERT_GROUPS: [&str; 1] = ["tayga-notifier"];
@@ -122,14 +124,19 @@ pub async fn fetch(brokers: &str, topic: &str, groups: &[&str]) -> anyhow::Resul
         .context("kafka lag fetch timed out")??
 }
 
-/// Lag of every Tayga group: [`GROUPS`] on `topic` and [`ALERT_GROUPS`] on [`ALERTS_TOPIC`],
-/// read concurrently (each bounded to 5 s).
-pub async fn fetch_all(brokers: &str, topic: &str) -> anyhow::Result<Vec<Lag>> {
-    let (signals, alerts) = tokio::join!(
+/// Lag of every Tayga group: [`GROUPS`] on `topic`, [`LOG_GROUPS`] on `logs_topic` and
+/// [`ALERT_GROUPS`] on [`ALERTS_TOPIC`], read concurrently (each bounded to 5 s).
+pub async fn fetch_all(brokers: &str, topic: &str, logs_topic: &str) -> anyhow::Result<Vec<Lag>> {
+    let (signals, logs, alerts) = tokio::join!(
         fetch(brokers, topic, &GROUPS),
+        fetch(brokers, logs_topic, &LOG_GROUPS),
         fetch(brokers, ALERTS_TOPIC, &ALERT_GROUPS)
     );
-    combine(signals, alerts)
+    let pipeline = signals.and_then(|mut s| {
+        s.extend(logs?);
+        Ok(s)
+    });
+    combine(pipeline, alerts)
 }
 
 /// The signal groups decide success; the alert groups are appended when their read worked, so a
