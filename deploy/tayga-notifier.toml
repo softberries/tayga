@@ -1,0 +1,21 @@
+# tayga-notifier settings for compose, loaded through TAYGA_CONFIG. TAYGA__
+# env vars override the scalar keys; targets are a list of tables, so they
+# can only be set here.
+#
+# No targets by default: the notifier logs "delivery disabled: no targets"
+# once and keeps committing tayga.alerts offsets. Webhook URLs are secrets
+# (a Slack incoming-webhook URL is a credential): they are never logged,
+# used as metric labels or stored; targets show by their name only.
+
+[notifier]
+# Base of the links back into the app (templates and traces).
+public_url = "http://localhost:8090"
+kinds = ["new", "spike", "silence"]
+# Attempts per alert and target; backoff 1 s doubling, capped at 5 min.
+max_attempts = 8
+timeout_secs = 10
+
+# [[notifier.targets]]
+# name = "ops-slack"
+# kind = "slack"        # or "webhook"
+# url = "https://hooks.slack.com/services/…"

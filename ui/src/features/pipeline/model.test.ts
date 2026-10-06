@@ -56,7 +56,7 @@ describe('labels', () => {
 
   it('shortJob drops the tayga- prefix', () => {
     expect(shortJob('tayga-ingest')).toBe('ingest')
-    expect(JOBS.map(shortJob)).toEqual(['ingest', 'writer', 'assembler', 'logminer', 'api'])
+    expect(JOBS.map(shortJob)).toEqual(['ingest', 'writer', 'assembler', 'logminer', 'notifier', 'api'])
   })
 
   it('rateNumber keeps only the digits that matter', () => {

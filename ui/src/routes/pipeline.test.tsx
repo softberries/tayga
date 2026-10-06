@@ -58,6 +58,7 @@ describe('status strip', () => {
         'tayga-writer': healthy(1),
         'tayga-assembler': [[minute(120_000), 1], [minute(60_000), 1], [minute(0), 0]],
         'tayga-logminer': healthy(1),
+        'tayga-notifier': healthy(1),
         'tayga-api': healthy(1),
       },
       metrics: [[minute(120_000), 1], [minute(60_000), 3]],
@@ -65,7 +66,7 @@ describe('status strip', () => {
     renderApp('/pipeline')
     const strip = await screen.findByRole('list', { name: 'Job status' })
     const chips = within(strip).getAllByRole('listitem')
-    expect(chips.map((c) => c.getAttribute('data-state'))).toEqual(['up', 'up', 'down', 'up', 'up'])
+    expect(chips.map((c) => c.getAttribute('data-state'))).toEqual(['up', 'up', 'down', 'up', 'up', 'up'])
     const down = chips[2] as HTMLElement
     expect(down).toHaveTextContent('assembler')
     expect(down).toHaveTextContent('down')
@@ -76,7 +77,7 @@ describe('status strip', () => {
 
   it('treats a job with no recent sample as down', async () => {
     stub({
-      up: { 'tayga-ingest': [[minute(30 * 60_000), 1]], 'tayga-writer': healthy(1), 'tayga-assembler': healthy(1), 'tayga-logminer': healthy(1), 'tayga-api': healthy(1) },
+      up: { 'tayga-ingest': [[minute(30 * 60_000), 1]], 'tayga-writer': healthy(1), 'tayga-assembler': healthy(1), 'tayga-logminer': healthy(1), 'tayga-notifier': healthy(1), 'tayga-api': healthy(1) },
       metrics: [[minute(120_000), 1], [minute(60_000), 2]],
     })
     renderApp('/pipeline')

@@ -1,0 +1,28 @@
+[package]
+name = "tayga-notifier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+prometheus-client.workspace = true
+rdkafka.workspace = true
+# Slack incoming webhooks are HTTPS only: rustls with the aws-lc-rs provider and the platform
+# verifier (system roots, `ca-certificates` in the image).
+reqwest = { workspace = true, features = ["rustls"] }
+serde.workspace = true
+serde_json.workspace = true
+tayga-common.workspace = true
+tayga-kafka.workspace = true
+tayga-store.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+config.workspace = true
+rand.workspace = true
+tayga-drain.workspace = true
+tayga-e2e.workspace = true
+tayga-logminer.workspace = true

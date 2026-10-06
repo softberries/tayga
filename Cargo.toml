@@ -49,5 +49,6 @@ tayga-kafka = { path = "crates/tayga-kafka" }
 tayga-logminer = { path = "crates/tayga-logminer" }
 tayga-store = { path = "crates/tayga-store" }
 tayga-devtools = { path = "crates/tayga-devtools" }
+tayga-e2e = { path = "crates/tayga-e2e" }
 prometheus-client = "0.25.1"
 rust-embed = { version = "8.12.0", features = ["mime-guess"] }

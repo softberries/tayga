@@ -21,3 +21,7 @@ url = "http://tayga-assembler:9100/metrics"
 [[metric_targets]]
 job = "tayga-logminer"
 url = "http://tayga-logminer:9100/metrics"
+
+[[metric_targets]]
+job = "tayga-notifier"
+url = "http://tayga-notifier:9100/metrics"

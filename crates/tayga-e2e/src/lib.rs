@@ -1,7 +1,14 @@
 //! Black-box helpers for end-to-end tests against the running demo stack.
 
+use axum::Router;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode, Uri, header};
+use axum::response::{IntoResponse, Response};
 use serde_json::Value;
+use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const API: &str = "http://localhost:8090";
@@ -435,6 +442,97 @@ pub async fn ensure_checkout_baseline_detects(
     Ok(())
 }
 
+/// One request the mock webhook received, and the status it answered with.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Received {
+    pub path: String,
+    pub content_type: Option<String>,
+    /// The body as JSON; `Value::Null` when it was not JSON.
+    pub body: Value,
+    pub status: u16,
+}
+
+#[derive(Default)]
+struct MockState {
+    script: VecDeque<u16>,
+    received: Vec<Received>,
+}
+
+/// A local webhook receiver for notifier tests: every request on any path is recorded and
+/// answered with the next scripted status, then 200 once the script is used up. A 429 carries
+/// `Retry-After: 1`.
+pub struct MockWebhook {
+    pub addr: SocketAddr,
+    state: Arc<Mutex<MockState>>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl MockWebhook {
+    /// Binds `addr` (port 0 for an ephemeral one); `127.0.0.1` for in-process tests, `0.0.0.0`
+    /// to be reachable from containers through `host.docker.internal`.
+    pub async fn start(addr: SocketAddr, script: &[u16]) -> anyhow::Result<Self> {
+        let state = Arc::new(Mutex::new(MockState {
+            script: script.iter().copied().collect(),
+            received: Vec::new(),
+        }));
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let addr = listener.local_addr()?;
+        let app = Router::new()
+            .fallback(mock_receive)
+            .with_state(state.clone());
+        let server = tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app).await {
+                eprintln!("mock webhook stopped: {e}");
+            }
+        });
+        Ok(Self {
+            addr,
+            state,
+            server,
+        })
+    }
+
+    /// `http://<addr>/hook`.
+    pub fn url(&self) -> String {
+        format!("http://{}/hook", self.addr)
+    }
+
+    pub fn received(&self) -> Vec<Received> {
+        self.state.lock().expect("mock state lock").received.clone()
+    }
+}
+
+impl Drop for MockWebhook {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+async fn mock_receive(
+    State(state): State<Arc<Mutex<MockState>>>,
+    uri: Uri,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let mut s = state.lock().expect("mock state lock");
+    let status = s.script.pop_front().unwrap_or(200);
+    s.received.push(Received {
+        path: uri.path().to_string(),
+        content_type: headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string),
+        body: serde_json::from_str(&body).unwrap_or(Value::Null),
+        status,
+    });
+    let code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    if status == 429 {
+        (code, [(header::RETRY_AFTER, "1")]).into_response()
+    } else {
+        code.into_response()
+    }
+}
+
 pub fn report(name: &str, waited: Duration) {
     let verdict = if waited <= TARGET_LATENCY {
         "within"
@@ -450,6 +548,32 @@ pub fn report(name: &str, waited: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mock_webhook_records_requests_and_follows_its_script() {
+        let mock = MockWebhook::start(SocketAddr::from(([127, 0, 0, 1], 0)), &[503, 429])
+            .await
+            .unwrap();
+        let http = reqwest::Client::new();
+        let post = || {
+            http.post(mock.url())
+                .json(&serde_json::json!({ "n": 1 }))
+                .send()
+        };
+        assert_eq!(post().await.unwrap().status(), 503);
+        let r = post().await.unwrap();
+        assert_eq!(r.status(), 429);
+        assert_eq!(r.headers()[header::RETRY_AFTER], "1");
+        assert_eq!(post().await.unwrap().status(), 200);
+        let got = mock.received();
+        assert_eq!(
+            got.iter().map(|r| r.status).collect::<Vec<_>>(),
+            [503, 429, 200]
+        );
+        assert_eq!(got[0].path, "/hook");
+        assert_eq!(got[0].content_type.as_deref(), Some("application/json"));
+        assert_eq!(got[0].body, serde_json::json!({ "n": 1 }));
+    }
 
     #[test]
     fn since_flip_covers_only_the_time_after_the_flip() {

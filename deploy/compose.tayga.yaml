@@ -66,6 +66,39 @@ services:
       tayga-migrate:
         condition: service_completed_successfully
 
+  # Delivers log alerts from tayga.alerts to the webhook and Slack targets in
+  # deploy/tayga-notifier.toml (a list of tables, so file config only). With
+  # none it idles: it logs "delivery disabled: no targets" and keeps
+  # committing offsets. The grace period lets an attempt in flight (10 s
+  # timeout) finish and be recorded, so a restart never resends it.
+  tayga-notifier:
+    image: tayga:dev
+    container_name: tayga-notifier
+    command: ["tayga-notifier"]
+    environment:
+      <<: *tayga-env
+      TAYGA_CONFIG: /etc/tayga/notifier.toml
+    volumes:
+      - ${TAYGA_ROOT}/deploy/tayga-notifier.toml:/etc/tayga/notifier.toml:ro
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      # The image has no curl: bash opens the metrics port.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9100"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      tayga-migrate:
+        condition: service_completed_successfully
+
   # Serves the web app and /api. Kafka is for consumer-group lag on the
   # pipeline page; deploy/tayga-api.toml lists the in-network /metrics
   # targets its recorder scrapes (a list of tables cannot be set through
