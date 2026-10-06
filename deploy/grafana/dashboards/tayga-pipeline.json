@@ -42,7 +42,9 @@
         "h": 8
       },
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "unit": "suffix: rec/s"
+        },
         "overrides": []
       },
       "options": {}
@@ -75,7 +77,9 @@
         "h": 8
       },
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "unit": "suffix: rows/s"
+        },
         "overrides": []
       },
       "options": {}
@@ -119,7 +123,9 @@
         "h": 8
       },
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "unit": "suffix: /s"
+        },
         "overrides": []
       },
       "options": {}
@@ -183,8 +189,30 @@
             "type": "prometheus",
             "uid": "tayga-prometheus"
           },
-          "expr": "sum(redpanda_kafka_max_offset{redpanda_topic=\"tayga.signals\"}) - on() group_right sum by (redpanda_group) (redpanda_kafka_consumer_group_committed_offset{redpanda_topic=\"tayga.signals\"})",
-          "legendFormat": "{{redpanda_group}}",
+          "expr": "sum by (redpanda_group) (redpanda_kafka_max_offset{redpanda_topic=\"tayga.signals\"} - on(redpanda_partition) group_right redpanda_kafka_consumer_group_committed_offset{redpanda_topic=\"tayga.signals\", redpanda_group=~\"tayga-writer|tayga-assembler\"})",
+          "legendFormat": "{{redpanda_group}} (tayga.signals)",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "sum by (redpanda_group) (redpanda_kafka_max_offset{redpanda_topic=\"tayga.logs\"} - on(redpanda_partition) group_right redpanda_kafka_consumer_group_committed_offset{redpanda_topic=\"tayga.logs\", redpanda_group=~\"tayga-logminer\"})",
+          "legendFormat": "{{redpanda_group}} (tayga.logs)",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "sum by (redpanda_group) (redpanda_kafka_max_offset{redpanda_topic=\"tayga.alerts\"} - on(redpanda_partition) group_right redpanda_kafka_consumer_group_committed_offset{redpanda_topic=\"tayga.alerts\", redpanda_group=~\"tayga-notifier\"})",
+          "legendFormat": "{{redpanda_group}} (tayga.alerts)",
           "range": true,
           "instant": false
         }
@@ -196,7 +224,9 @@
         "h": 8
       },
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "unit": "short"
+        },
         "overrides": []
       },
       "options": {}
@@ -275,6 +305,61 @@
           "legendFormat": "logminer write failures",
           "range": true,
           "instant": false
+        },
+        {
+          "refId": "G",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "sum(increase(tayga_writer_commit_failures_total[5m]))",
+          "legendFormat": "writer commit failures",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "H",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "sum(increase(tayga_writer_undecodable_records_total[5m]))",
+          "legendFormat": "writer undecodable records",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "I",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "sum(increase(tayga_ingest_rejected_requests_total[5m]))",
+          "legendFormat": "ingest rejected requests",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "J",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "sum(increase(tayga_assembler_serialization_failures_total[5m]))",
+          "legendFormat": "assembler serialization failures",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "K",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tayga-prometheus"
+          },
+          "expr": "sum(increase(tayga_logminer_commit_failures_total[5m]))",
+          "legendFormat": "logminer commit failures",
+          "range": true,
+          "instant": false
         }
       ],
       "gridPos": {
@@ -284,7 +369,9 @@
         "h": 8
       },
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "unit": "short"
+        },
         "overrides": []
       },
       "options": {}
@@ -363,7 +450,9 @@
         "h": 8
       },
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "unit": "suffix: items/s"
+        },
         "overrides": []
       },
       "options": {}
@@ -383,7 +472,7 @@
             "type": "prometheus",
             "uid": "tayga-prometheus"
           },
-          "expr": "rate(tayga_logminer_logs_mined_total[1m])",
+          "expr": "sum(rate(tayga_logminer_logs_mined_total[1m]))",
           "legendFormat": "logs/s",
           "range": true,
           "instant": false
@@ -396,7 +485,9 @@
         "h": 8
       },
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "unit": "suffix: logs/s"
+        },
         "overrides": []
       },
       "options": {}
@@ -416,7 +507,7 @@
             "type": "prometheus",
             "uid": "tayga-prometheus"
           },
-          "expr": "tayga_logminer_templates",
+          "expr": "max(tayga_logminer_templates)",
           "legendFormat": "templates",
           "range": true,
           "instant": false
@@ -449,7 +540,7 @@
             "type": "prometheus",
             "uid": "tayga-prometheus"
           },
-          "expr": "increase(tayga_logminer_cluster_cap_hits_total[5m])",
+          "expr": "sum(increase(tayga_logminer_cluster_cap_hits_total[5m]))",
           "legendFormat": "cap hits",
           "range": true,
           "instant": false
@@ -517,7 +608,7 @@
             "type": "prometheus",
             "uid": "tayga-prometheus"
           },
-          "expr": "tayga_logminer_data_lag_seconds",
+          "expr": "max(tayga_logminer_data_lag_seconds)",
           "legendFormat": "lag",
           "range": true,
           "instant": false

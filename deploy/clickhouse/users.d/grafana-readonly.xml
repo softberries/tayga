@@ -1,0 +1,27 @@
+<!-- Read-only ClickHouse user for Grafana (make up-extras). readonly=1 refuses writes, DDL,
+     temporary tables and setting changes; the Grafana plugin's clickhouse-go client sets
+     max_execution_time per query, so only that setting may change. tayga-api keeps the default
+     user: its recorder inserts metric_samples and the silence route writes log_template_silence.
+     The stack binds ClickHouse to 127.0.0.1, so the user has no password. -->
+<clickhouse>
+    <profiles>
+        <grafana_readonly>
+            <readonly>1</readonly>
+            <constraints>
+                <max_execution_time>
+                    <changeable_in_readonly/>
+                </max_execution_time>
+            </constraints>
+        </grafana_readonly>
+    </profiles>
+    <users>
+        <grafana>
+            <password></password>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>grafana_readonly</profile>
+            <quota>default</quota>
+        </grafana>
+    </users>
+</clickhouse>

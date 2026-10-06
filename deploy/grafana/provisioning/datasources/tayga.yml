@@ -8,7 +8,7 @@ datasources:
       port: 8123
       protocol: http
       secure: false
-      username: default
+      username: grafana
       defaultDatabase: tayga
   - name: Tayga Prometheus
     uid: tayga-prometheus

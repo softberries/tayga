@@ -7,8 +7,9 @@ scrape_configs:
     static_configs: [{ targets: ["tayga-writer:9100"] }]
   - job_name: tayga-assembler
     static_configs: [{ targets: ["tayga-assembler:9100"] }]
+  # Every replica: the compose DNS name returns one address per replica.
   - job_name: tayga-logminer
-    static_configs: [{ targets: ["tayga-logminer:9100"] }]
+    dns_sd_configs: [{ names: ["tayga-logminer"], type: A, port: 9100 }]
   - job_name: tayga-api
     static_configs: [{ targets: ["tayga-api:8090"] }]
   - job_name: redpanda

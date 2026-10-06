@@ -1,12 +1,14 @@
 # The web app, built on its own so the Rust stages never need Node.
-FROM node:24-bookworm-slim AS ui
+# node:24-bookworm-slim, pinned by digest on 2026-10-06.
+FROM node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS ui
 WORKDIR /ui
 COPY ui/package.json ui/package-lock.json ./
 RUN npm ci
 COPY ui/ ./
 RUN npm run build
 
-FROM lukemathwalker/cargo-chef:latest-rust-1.98-trixie AS chef
+# lukemathwalker/cargo-chef:latest-rust-1.98-trixie, pinned by digest on 2026-10-06.
+FROM lukemathwalker/cargo-chef:latest-rust-1.98-trixie@sha256:94a624f8475651c2b56281b29936cab5cbe21c431677880b6a98d47561fa3289 AS chef
 RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
@@ -22,7 +24,11 @@ COPY . .
 COPY --from=ui /ui/dist /app/ui/dist
 RUN cargo build --release --workspace --bins
 
-FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+# debian:trixie-slim, pinned by digest on 2026-10-06.
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+# The services write nothing to disk and listen above 1024, so they run unprivileged.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin tayga
 COPY --from=builder /app/target/release/tayga-ingest /app/target/release/tayga-writer /app/target/release/tayga-assembler /app/target/release/tayga-api /app/target/release/tayga-logminer /app/target/release/tayga-notifier /usr/local/bin/
 ENV RUST_LOG=info
+USER tayga
