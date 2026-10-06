@@ -300,7 +300,7 @@ pub fn is_silent(
         return false;
     };
     let since = t_last_ns.unwrap_or(first_seen_ns);
-    s_last.saturating_sub(since) >= i64::from(minutes) * MIN_NS
+    s_last.saturating_sub(since) >= i64::from(minutes).saturating_mul(MIN_NS)
 }
 
 /// The alert of a silent template. The id hashes the template and the `t_last` (or `first_seen`)
@@ -326,13 +326,14 @@ pub fn silence_alert(
         template_id: input.template_id,
         service: input.service.clone(),
         template: template.to_string(),
-        started_at_ns: since.saturating_add(i64::from(minutes) * MIN_NS),
+        started_at_ns: since.saturating_add(i64::from(minutes).saturating_mul(MIN_NS)),
         last_at_ns: now_ns,
         window_count: 0,
         peak_count: 0,
         baseline_per_window,
         baseline_day: None,
         baseline_week: None,
+        // A silence has no lines, so no example traces.
         example_trace_ids: Vec::new(),
     }
 }

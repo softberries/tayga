@@ -97,6 +97,7 @@ struct SilenceTemplateRow {
     template_id: u64,
     service: String,
     first_seen_ns: i64,
+    last_seen_ns: i64,
 }
 
 #[derive(clickhouse::Row, Deserialize)]
@@ -419,7 +420,8 @@ impl Store {
         let templates: Vec<SilenceTemplateRow> = self
             .client()
             .query(
-                "SELECT template_id, service, toUnixTimestamp64Nano(first_seen) AS first_seen_ns \
+                "SELECT template_id, service, toUnixTimestamp64Nano(first_seen) AS first_seen_ns, \
+                 toUnixTimestamp64Nano(last_seen) AS last_seen_ns \
                  FROM log_templates FINAL WHERE template_id IN ? ORDER BY template_id",
             )
             .bind(template_ids)
@@ -454,10 +456,14 @@ impl Store {
         Ok(templates
             .into_iter()
             .map(|t| SilenceInput {
+                // The newest hit inside the 3-day hits TTL, else the template's own `last_seen`
+                // (30-day TTL): a silence longer than the hits TTL keeps the same anchor, so its
+                // alert id does not change when the last hit ages out.
                 t_last_ns: t_last
                     .iter()
                     .find(|r| r.template_id == t.template_id)
-                    .map(|r| r.last_ns),
+                    .map(|r| r.last_ns)
+                    .or((t.last_seen_ns > 0).then_some(t.last_seen_ns)),
                 s_last_ns: s_last
                     .iter()
                     .find(|r| r.service == t.service)

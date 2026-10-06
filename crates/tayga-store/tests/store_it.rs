@@ -1307,13 +1307,19 @@ async fn silence_inputs_read_template_and_service_last_hit() {
     assert_eq!(got[0].t_last_ns, ns(now - 15 * MIN_NS));
     assert_eq!(got[0].s_last_ns, ns(now - MIN_NS));
     assert_eq!(got[0].first_seen_ns, now - 60 * MIN_NS);
-    // Template without hits, service with hits.
+    // Template without hits in the hits TTL: falls back to its own `last_seen` (the helper
+    // stamps it at insert time), so a long silence keeps one anchor.
     assert_eq!(got[1].template_id, 3);
-    assert_eq!(got[1].t_last_ns, None);
+    assert!(
+        got[1].t_last_ns.is_some_and(|v| v >= now),
+        "{:?}",
+        got[1].t_last_ns
+    );
     assert_eq!(got[1].s_last_ns, ns(now - MIN_NS));
-    // Service without any hit.
+    // Service without any hit: no `s_last`, so it is never judged silent.
     assert_eq!(got[2].template_id, 4);
-    assert_eq!((got[2].t_last_ns, got[2].s_last_ns), (None, None));
+    assert!(got[2].t_last_ns.is_some_and(|v| v >= now));
+    assert_eq!(got[2].s_last_ns, None);
     assert!(store.silence_inputs(&[]).await.unwrap().is_empty());
     drop_db(&s, &store).await;
 }
