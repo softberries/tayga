@@ -1,7 +1,10 @@
 import '@testing-library/jest-dom/vitest'
-import { cleanup } from '@testing-library/react'
+import { cleanup, configure } from '@testing-library/react'
 import { afterEach, vi } from 'vitest'
 import { AUTH_OFF, seed } from './seed'
+
+// Under the full suite's load a grid can take over a second to render; 5 s, not the default 1 s.
+configure({ asyncUtilTimeout: 5_000 })
 
 // jsdom lacks these browser APIs that Radix and Motion use.
 class ResizeObserverStub {

@@ -28,5 +28,7 @@ export default defineConfig({
     include: ['src/**/*.test.{ts,tsx}'],
     css: false,
     restoreMocks: true,
+    // above asyncUtilTimeout (5 s, src/test/setup.ts), so a slow query still fails inside its test
+    testTimeout: 15_000,
   },
 })

@@ -8,16 +8,26 @@ use serde_json::Value;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const API: &str = "http://localhost:8090";
 pub const SCENARIO_TIMEOUT: Duration = Duration::from_secs(180);
-/// `intlShippingSlowdown` only delays orders shipped outside the US, a small share of the
-/// load generator's ~3 orders/min (15 of 286 orders in earlier flag-on periods), so the first
-/// slow story can take several minutes. One clean-baseline run saw 10 orders, none
-/// international, in 180 s.
-pub const SHIPPING_TIMEOUT: Duration = Duration::from_secs(600);
+/// The shipping scenario places its own international orders (`place_intl_order`, one every
+/// `ORDER_EVERY`), so it no longer waits for the load generator's rare non-US orders.
+pub const SHIPPING_TIMEOUT: Duration = Duration::from_secs(300);
+/// Pace of the shipping scenario's own orders; the first may land before flagd reloads the flag.
+pub const ORDER_EVERY: Duration = Duration::from_secs(20);
+/// `adFailure` fails one `GetAds` in ten (`AdService.java:238`). At the 20.4–22.2 ad requests a
+/// minute measured on 2026-10-06 that is about 2.1 failures a minute, and the first minute
+/// after the flip goes to detection and assembly: 3 stories in 180 s fail about 1 run in 5
+/// (Poisson mean ≈ 4.2), as one recorded run did. 300 s gives a mean ≈ 8.4, P(miss) ≈ 0.01.
+pub const AD_FAILURE_TIMEOUT: Duration = Duration::from_secs(300);
+/// The demo shop's frontend proxy: the shop API, and the demo collector under `/otlp-http/`.
+pub const FRONTEND: &str = "http://localhost:8080";
+/// A product from the demo catalog (the load generator's `products` list).
+const ORDER_PRODUCT: &str = "66VCHSJNUP";
 /// Log detection runs every 60 s and the spike rule needs 10 hits in 5 min.
 pub const LOG_SPIKE_TIMEOUT: Duration = Duration::from_secs(600);
 pub const NEW_TEMPLATE_TIMEOUT: Duration = Duration::from_secs(180);
@@ -62,19 +72,52 @@ pub fn now_ns() -> i64 {
     i64::try_from(d.as_nanos()).expect("nanoseconds since epoch fit in i64")
 }
 
-/// Sets a demo flag; restores the upstream flag file when dropped (also on panic).
+/// Set while a [`FlagLock`] exists. The flags are one shared file, so two scenarios running at
+/// once (cargo's default parallel test threads) would overwrite each other's flag.
+static FLAGS_HELD: AtomicBool = AtomicBool::new(false);
+
+/// Exclusive use of the demo's flag file within this test process.
+#[derive(Debug)]
+pub struct FlagLock(());
+
+impl FlagLock {
+    pub fn acquire() -> anyhow::Result<Self> {
+        FLAGS_HELD
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "another e2e scenario holds the demo flags: run the e2e tests one at a time \
+                     (`make e2e`, or `cargo test -p tayga-e2e -- --ignored --test-threads=1`)"
+                )
+            })?;
+        Ok(Self(()))
+    }
+}
+
+impl Drop for FlagLock {
+    fn drop(&mut self) {
+        FLAGS_HELD.store(false, Ordering::Release);
+    }
+}
+
+/// Sets a demo flag; restores the upstream flag file when dropped (also on panic). Fails at once
+/// while another `FlagGuard` exists.
 pub struct FlagGuard {
     live: PathBuf,
     upstream: PathBuf,
+    /// Last, so it is released after `Drop::drop` restored the flag file.
+    _lock: FlagLock,
 }
 
 impl FlagGuard {
     pub fn set(name: &str, variant: &str) -> anyhow::Result<Self> {
+        let lock = FlagLock::acquire()?;
         let root = repo_root();
         // Built before any mutation so Drop restores the flags even if a step below fails.
         let guard = Self {
             live: root.join("deploy/flagd/demo.flagd.json"),
             upstream: root.join("vendor/opentelemetry-demo/src/flagd/demo.flagd.json"),
+            _lock: lock,
         };
         std::fs::copy(&guard.upstream, &guard.live)?;
         tayga_devtools::flags::set_flag(&guard.live, name, variant)?;
@@ -88,6 +131,84 @@ impl Drop for FlagGuard {
             eprintln!("failed to reset flags: {e}");
         }
     }
+}
+
+/// A checkout shipped to Ottawa (the load generator's Canadian person in `people.json`), so the
+/// shipping service applies `intlShippingSlowdown`.
+pub fn intl_order(user_id: &str) -> Value {
+    serde_json::json!({
+        "userId": user_id,
+        "email": "tobias@example.com",
+        "address": {
+            "streetAddress": "150 Elgin St",
+            "zipCode": "K2P1L4",
+            "city": "Ottawa",
+            "state": "ON",
+            "country": "Canada"
+        },
+        "userCurrency": "USD",
+        "creditCard": {
+            "creditCardNumber": "4763-1844-9699-8031",
+            "creditCardExpirationMonth": 7,
+            "creditCardExpirationYear": 2039,
+            "creditCardCvv": 488
+        }
+    })
+}
+
+/// W3C `traceparent` of a sampled span.
+pub fn traceparent(trace_id: &str, span_id: &str) -> String {
+    format!("00-{trace_id}-{span_id}-01")
+}
+
+/// OTLP/JSON for the order's root span: service `load-generator`, name `user_checkout_single`,
+/// like the load generator's own checkouts, so the trace's endpoint is the one whose baseline
+/// `ensure_checkout_baseline_detects` checks.
+pub fn order_root_span(trace_id: &str, span_id: &str, start_ns: i64, end_ns: i64) -> Value {
+    serde_json::json!({"resourceSpans": [{
+        "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "load-generator"}}]},
+        "scopeSpans": [{
+            "scope": {"name": "tayga-e2e"},
+            "spans": [{
+                "traceId": trace_id,
+                "spanId": span_id,
+                "name": "user_checkout_single",
+                "kind": 1,
+                "startTimeUnixNano": start_ns.to_string(),
+                "endTimeUnixNano": end_ns.to_string()
+            }]
+        }]
+    }]})
+}
+
+/// Places one international order through the demo shop as one trace: a product into a fresh
+/// cart, a checkout to Canada, then the trace's root span, sent through the shop's `/otlp-http/`
+/// route to the demo collector so Jaeger and Tayga both get it. Returns the trace id.
+pub async fn place_intl_order(http: &reqwest::Client, frontend: &str) -> anyhow::Result<String> {
+    let trace_id = format!("{:032x}", rand::random::<u128>());
+    let span_id = format!("{:016x}", rand::random::<u64>());
+    let user = format!("tayga-e2e-{trace_id}");
+    let parent = traceparent(&trace_id, &span_id);
+    let start = now_ns();
+    http.post(format!("{frontend}/api/cart"))
+        .header("traceparent", &parent)
+        .json(&serde_json::json!({"item": {"productId": ORDER_PRODUCT, "quantity": 1}, "userId": user}))
+        .send()
+        .await?
+        .error_for_status()?;
+    http.post(format!("{frontend}/api/checkout"))
+        .header("traceparent", &parent)
+        .json(&intl_order(&user))
+        .send()
+        .await?
+        .error_for_status()?;
+    let end = now_ns();
+    http.post(format!("{frontend}/otlp-http/v1/traces"))
+        .json(&order_root_span(&trace_id, &span_id, start, end))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(trace_id)
 }
 
 pub struct Api {
@@ -553,8 +674,12 @@ pub struct MockWebhook {
 }
 
 impl MockWebhook {
-    /// Binds `addr` (port 0 for an ephemeral one); `127.0.0.1` for in-process tests, `0.0.0.0`
-    /// to be reachable from containers through `host.docker.internal`.
+    /// Binds `addr` (port 0 for an ephemeral one): `127.0.0.1` for in-process tests, `0.0.0.0`
+    /// for the notifier check. Docker Desktop reaches a loopback listener through
+    /// `host.docker.internal`, but a Linux engine's `host-gateway` is the bridge gateway (for
+    /// example 172.17.0.1), which a loopback listener does not accept (checked 2026-10-06 in
+    /// Docker Desktop's Linux VM: refused on 127.0.0.1, answered on 0.0.0.0). The mock listens
+    /// only while its scenario runs.
     pub async fn start(addr: SocketAddr, script: &[u16]) -> anyhow::Result<Self> {
         let state = Arc::new(Mutex::new(MockState {
             script: script.iter().copied().collect(),
@@ -672,6 +797,57 @@ mod tests {
         let started = Instant::now();
         assert_eq!(post().await.unwrap().status(), 200);
         assert!(started.elapsed() >= Duration::from_millis(300));
+    }
+
+    #[test]
+    fn a_second_flag_lock_fails_fast_until_the_first_is_dropped() {
+        let first = FlagLock::acquire().unwrap();
+        let err = FlagLock::acquire().unwrap_err().to_string();
+        assert!(err.contains("--test-threads=1"), "{err}");
+        drop(first);
+        FlagLock::acquire().unwrap();
+    }
+
+    #[test]
+    fn the_order_ships_outside_the_us_and_carries_the_user() {
+        let o = intl_order("u-1");
+        assert_eq!(o["userId"], "u-1");
+        let country = o["address"]["country"].as_str().unwrap().to_uppercase();
+        // `ship_order` in the demo's shipping service treats these as domestic.
+        assert!(
+            !["US", "USA", "UNITED STATES", "UNITED STATES OF AMERICA"].contains(&country.as_str())
+        );
+    }
+
+    #[test]
+    fn the_root_span_makes_a_load_generator_checkout_trace() {
+        assert_eq!(
+            traceparent("0af7651916cd43dd8448eb211c80319c", "b7ad6b7169203331"),
+            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+        );
+        let r = order_root_span(
+            "0af7651916cd43dd8448eb211c80319c",
+            "b7ad6b7169203331",
+            10,
+            25,
+        );
+        let rs = &r["resourceSpans"][0];
+        assert_eq!(
+            rs["resource"]["attributes"][0],
+            serde_json::json!({"key": "service.name", "value": {"stringValue": "load-generator"}})
+        );
+        let span = &rs["scopeSpans"][0]["spans"][0];
+        assert_eq!(span["name"], "user_checkout_single");
+        assert_eq!(span["traceId"], "0af7651916cd43dd8448eb211c80319c");
+        assert_eq!(span["spanId"], "b7ad6b7169203331");
+        assert_eq!(
+            (
+                span["startTimeUnixNano"].as_str(),
+                span["endTimeUnixNano"].as_str()
+            ),
+            (Some("10"), Some("25"))
+        );
+        assert!(span.get("parentSpanId").is_none(), "the trace's root");
     }
 
     #[test]

@@ -10,15 +10,14 @@ fn s(v: &Value, key: &str) -> String {
 }
 
 macro_rules! scenario {
-    ($name:ident, $flag:literal, $variant:literal, $q:literal, $min:literal, $label:literal, $pred:expr) => {
+    ($name:ident, $flag:literal, $variant:literal, $q:literal, $min:literal, $timeout:expr, $label:literal, $pred:expr) => {
         #[tokio::test]
         #[ignore = "end-to-end: requires `make up`"]
         async fn $name() -> anyhow::Result<()> {
             let api = Api::new(API);
             let flipped = now_ns();
             let _flag = FlagGuard::set($flag, $variant)?;
-            let (_g, waited) =
-                wait_for_group(&api, $q, flipped, $min, SCENARIO_TIMEOUT, $pred).await?;
+            let (_g, waited) = wait_for_group(&api, $q, flipped, $min, $timeout, $pred).await?;
             report($label, waited);
             Ok(())
         }
@@ -84,6 +83,7 @@ scenario!(
     "on",
     "kind=error&service=product-catalog",
     3,
+    SCENARIO_TIMEOUT,
     "productCatalogFailure",
     |g| s(g, "summary").contains("Product Catalog Fail Feature Flag Enabled")
 );
@@ -94,14 +94,16 @@ scenario!(
     "on",
     "kind=error&service=ad",
     3,
+    AD_FAILURE_TIMEOUT,
     "adFailure",
     |g| s(g, "summary").contains("GetAds failed")
 );
 
-/// The flag only delays international orders, which are rare in the load generator's traffic,
-/// so this waits up to `SHIPPING_TIMEOUT` (600 s) rather than `SCENARIO_TIMEOUT`. The group's
-/// sample story is its latest, which may be a spontaneous sub-second one, so the wait runs until
-/// an example story after the flip carries the injected 5 s delay.
+/// Places its own international orders (one every `ORDER_EVERY`) instead of waiting for the
+/// load generator's rare ones; the baseline pre-check still fails fast when no checkout endpoint
+/// can flag a 5 s trace. The group's sample story is its latest, which may be a spontaneous
+/// sub-second one, so the wait runs until an example story after the flip carries the injected
+/// 5 s delay.
 #[tokio::test]
 #[ignore = "end-to-end: requires `make up`"]
 async fn shipping_slowdown_produces_slow_story_blaming_shipping() -> anyhow::Result<()> {
@@ -109,7 +111,21 @@ async fn shipping_slowdown_produces_slow_story_blaming_shipping() -> anyhow::Res
     let api = Api::new(API);
     let flipped = now_ns();
     let _flag = FlagGuard::set("intlShippingSlowdown", "5sec")?;
-    let (g, story_id, waited) = wait_for_slow_story(
+    // Its own international orders; the 5 s delay needs a client timeout above it.
+    let orders = tokio::spawn(async {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("client builds");
+        loop {
+            match place_intl_order(&http, FRONTEND).await {
+                Ok(trace) => println!("[e2e] intlShippingSlowdown: order placed, trace {trace}"),
+                Err(e) => eprintln!("[e2e] order failed (continuing): {e:#}"),
+            }
+            tokio::time::sleep(ORDER_EVERY).await;
+        }
+    });
+    let found = wait_for_slow_story(
         &api,
         "kind=slow&service=shipping",
         flipped,
@@ -117,7 +133,9 @@ async fn shipping_slowdown_produces_slow_story_blaming_shipping() -> anyhow::Res
         SHIPPING_TIMEOUT,
         |g| s(g, "rc_service") == "shipping",
     )
-    .await?;
+    .await;
+    orders.abort();
+    let (g, story_id, waited) = found?;
     report("intlShippingSlowdown", waited);
     println!(
         "[e2e] intlShippingSlowdown: delayed story {story_id} in group {}",
