@@ -260,6 +260,7 @@ Both values are log timestamps, not the wall clock. So a pipeline outage, where 
 
 **The alert:**
 - `started_at` is the template's last hit, so `last_at − started_at` is how long it has been quiet.
+- That quiet time ("silent N min" in the app, Slack and the webhook `summary`) mixes clocks: `last_at` is the logminer's wall clock, while `started_at` is a log timestamp. Pipeline lag or clock skew is counted in, so a logminer 10 minutes behind the logs reports a silence 10 minutes longer than it is in log time. Whether the template is silent at all is still judged in log time only.
 - `last_at` is refreshed on every pass while the template stays silent.
 - `alert_id` is a hash of the template id and that last hit, so one quiet period is one alert, also across a logminer restart.
 - `window_count` is 0 and there are no example traces. `baseline_per_window` is 0: the spec marks it informational, and no query computes it yet.
@@ -433,6 +434,8 @@ Migrations must run before `tayga-api`, `tayga-logminer` or `tayga-notifier` res
 - migration 0011 adds `notifier_deliveries`.
 
 `make up` takes care of this. It rebuilds the image and recreates the stack, and every Tayga service except ingest waits for the one-shot `tayga-migrate` service (`tayga-writer migrate`) to finish successfully (`depends_on: condition: service_completed_successfully`). If you restart one service by hand after an upgrade, run the migration first.
+
+Reload browser tabs opened before the upgrade. Their old bundle validates alert kinds against a strict enum that does not know `silence`, so its alert views show an error until the page is reloaded.
 
 ## Developer commands
 
