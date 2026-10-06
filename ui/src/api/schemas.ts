@@ -371,6 +371,8 @@ export const SeriesViewSchema = z.strictObject({
 /** `GET /pipeline/lag` element */
 export const ConsumerLagSchema = z.strictObject({
   group: str,
+  /** The topic the lag is measured on: the signal groups' topic, or `tayga.alerts` for the notifier. */
+  topic: str,
   committed: int,
   end: int,
   lag: int,

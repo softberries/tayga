@@ -14,6 +14,7 @@ async fn fetch_returns_lag_for_each_group() {
         println!("{l:?}");
         assert!(l.lag >= 0, "{l:?}");
         assert!(l.end >= 0, "{l:?}");
+        assert_eq!(l.topic, "tayga.signals");
     }
 }
 
@@ -25,4 +26,8 @@ async fn fetch_all_adds_the_notifier_on_the_alerts_topic() {
     let groups: Vec<&str> = lags.iter().map(|l| l.group.as_str()).collect();
     let expected: Vec<&str> = GROUPS.iter().chain(&ALERT_GROUPS).copied().collect();
     assert_eq!(groups, expected);
+    let topics: Vec<&str> = lags.iter().map(|l| l.topic.as_str()).collect();
+    let mut want = vec!["tayga.signals"; GROUPS.len()];
+    want.extend([lag::ALERTS_TOPIC; ALERT_GROUPS.len()]);
+    assert_eq!(topics, want);
 }

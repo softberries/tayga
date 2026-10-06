@@ -361,6 +361,7 @@ mod tests {
     fn lags() -> Vec<Lag> {
         vec![Lag {
             group: "tayga-writer".into(),
+            topic: "tayga.signals".into(),
             committed: 5,
             end: 7,
             lag: 2,
@@ -965,7 +966,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             json,
-            serde_json::json!([{"group": "tayga-writer", "committed": 5, "end": 7, "lag": 2}])
+            serde_json::json!([{"group": "tayga-writer", "topic": "tayga.signals", "committed": 5, "end": 7, "lag": 2}])
         );
         call(&app, "/api/v1/pipeline/lag").await;
         assert_eq!(

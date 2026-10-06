@@ -20,6 +20,9 @@ const TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Lag {
     pub group: String,
+    /// The topic the group's lag is measured on: groups on different topics count different
+    /// records (log and span batches vs alerts), so the UI scales each topic on its own.
+    pub topic: String,
     pub committed: i64,
     pub end: i64,
     pub lag: i64,
@@ -100,6 +103,7 @@ fn fetch_blocking(brokers: &str, topic: &str, groups: &[String]) -> anyhow::Resu
             let (committed, end, lag) = sum(&pairs);
             Ok(Lag {
                 group: group.clone(),
+                topic: topic.to_owned(),
                 committed,
                 end,
                 lag,
@@ -151,6 +155,7 @@ mod tests {
     fn lag(group: &str) -> Lag {
         Lag {
             group: group.into(),
+            topic: "t".into(),
             committed: 1,
             end: 2,
             lag: 1,

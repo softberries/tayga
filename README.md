@@ -379,7 +379,7 @@ The logminer re-publishes an alert every time it updates it. Once the target has
 | `tayga_notifier_pending` | Deliveries started and not yet resolved |
 | `tayga_notifier_breaker_open{target}` | 1 while the target's breaker is open, else 0. Updated when an alert is delivered to the target, so after an idle cooldown it can read 1 until the next alert |
 
-The Pipeline page shows `tayga-notifier` as a job, and its consumer lag on `tayga.alerts` next to the other groups.
+The Pipeline page shows `tayga-notifier` as a job, and its consumer lag on `tayga.alerts` next to the other groups. Each lag row names its topic, and bars are scaled per topic: the signal groups against their largest lag (at least 1,000 messages), the notifier against its own (at least 10 alerts), so a notifier stuck behind tens of alerts still shows a full bar next to a signal lag in the thousands.
 
 ### Pointing the notifier at a mock
 
@@ -436,7 +436,7 @@ Migrations must run before `tayga-api`, `tayga-logminer` or `tayga-notifier` res
 
 `make up` takes care of this. It rebuilds the image and recreates the stack, and every Tayga service except ingest waits for the one-shot `tayga-migrate` service (`tayga-writer migrate`) to finish successfully (`depends_on: condition: service_completed_successfully`). If you restart one service by hand after an upgrade, run the migration first.
 
-Reload browser tabs opened before the upgrade. Their old bundle validates alert kinds against a strict enum that does not know `silence`, so its alert views show an error until the page is reloaded.
+Reload browser tabs opened before the upgrade. Their old bundle validates alert kinds against a strict enum that does not know `silence`, so its alert views show an error until the page is reloaded. The same holds for the Pipeline page's consumer lag, whose rows now carry a `topic` field that the old strict schema rejects.
 
 ## Developer commands
 
@@ -493,7 +493,7 @@ JSON API:
 | `GET /api/v1/services/{name}` | `since`, `until` | RED series (rate, error ratio, p50/p95/p99) for one service |
 | `GET /api/v1/search` | `q` | Command palette: matching services, templates and story groups; a trace id when `q` is 32 hex characters |
 | `GET /api/v1/pipeline/series` | `metric`, `kind` (required), `job`, `labels` (`k=v`), `since`, `until` | A rate, gauge or quantile series from the recorded metrics |
-| `GET /api/v1/pipeline/lag` | none | Consumer lag per group (committed, end offset, lag) |
+| `GET /api/v1/pipeline/lag` | none | Consumer lag per group (`group`, `topic`, `committed`, `end` offset, `lag`) |
 | `GET /api/v1/config` | none | `{jaeger_url, grafana_url, auth_enabled, infra_services}` (the two links are null when unset; `infra_services` is the `[map]` list, default `["flagd"]`) |
 | `POST /api/v1/auth/login` | JSON body `{username, password}` | 204 and the session cookie; 401 on a wrong login, 429 when limited, 415 without a JSON content type. Only exists when authentication is on (404 otherwise) |
 | `POST /api/v1/auth/logout` | JSON content type | 204 and a cookie that clears the session. Only when authentication is on |
