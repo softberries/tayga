@@ -31,7 +31,7 @@ pub struct LogHitRow {
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
 pub struct LogAlertRow {
     pub alert_id: String,
-    /// 1 new, 2 spike.
+    /// 1 new, 2 spike, 3 silence.
     pub kind: i8,
     pub template_id: u64,
     pub service: String,
@@ -66,6 +66,62 @@ pub struct SeasonalWindow {
     pub covered: bool,
     /// `(template_id, hits)`; templates without a row in a covered window have 0 hits.
     pub counts: Vec<(u64, u64)>,
+}
+
+/// Detection inputs of one template for silence alerts (log time, ns). `t_last_ns` is the
+/// template's newest hit, `s_last_ns` the newest hit over its service's templates; both are
+/// `None` when no hit is left within the 3-day hits TTL.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SilenceInput {
+    pub template_id: u64,
+    pub service: String,
+    pub first_seen_ns: i64,
+    pub t_last_ns: Option<i64>,
+    pub s_last_ns: Option<i64>,
+}
+
+/// The columns of a stored log that template mining reads.
+#[derive(Debug, Clone, PartialEq, clickhouse::Row, Deserialize)]
+pub struct LogMineRow {
+    pub log_id: u64,
+    pub ts: i64,
+    pub trace_id: String,
+    pub span_id: String,
+    pub severity_number: u8,
+    pub service_name: String,
+    pub body: String,
+}
+
+#[derive(clickhouse::Row, Deserialize)]
+struct SilenceSettingRow {
+    enabled: u8,
+    minutes: u32,
+}
+
+#[derive(clickhouse::Row, Deserialize)]
+struct SilenceEnabledRow {
+    template_id: u64,
+    minutes: u32,
+}
+
+#[derive(clickhouse::Row, Deserialize)]
+struct SilenceTemplateRow {
+    template_id: u64,
+    service: String,
+    first_seen_ns: i64,
+    last_seen_ns: i64,
+}
+
+#[derive(clickhouse::Row, Deserialize)]
+struct TemplateLastRow {
+    template_id: u64,
+    last_ns: i64,
+}
+
+#[derive(clickhouse::Row, Deserialize)]
+struct ServiceLastRow {
+    service: String,
+    last_ns: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
@@ -276,6 +332,42 @@ impl Store {
             .await
     }
 
+    /// Up to `limit` stored logs strictly after `(after_ts, after_id)` in `(ts, log_id)` order
+    /// (keyset paging: pass the last row's key to get the next page). A log stored twice before
+    /// its parts merged is returned once. Start with `(since_ns - 1, u64::MAX)` to include every
+    /// log from `since_ns` on.
+    pub async fn logs_batch(
+        &self,
+        after_ts: i64,
+        after_id: u64,
+        limit: u32,
+    ) -> clickhouse::error::Result<Vec<LogMineRow>> {
+        self.client()
+            .query(
+                "SELECT log_id, ts, trace_id, span_id, severity_number, service_name, body \
+                 FROM logs WHERE (ts, log_id) > (fromUnixTimestamp64Nano(?), ?) \
+                 ORDER BY ts, log_id LIMIT 1 BY ts, log_id LIMIT ?",
+            )
+            .bind(after_ts)
+            .bind(after_id)
+            .bind(limit)
+            .fetch_all()
+            .await
+    }
+
+    /// Empties `log_templates`, `log_template_hits` and `log_template_minutes`. Only for
+    /// `tayga-devtools remine`, with the logminer stopped.
+    pub async fn truncate_templates(&self) -> clickhouse::error::Result<()> {
+        let c = self.client();
+        c.query("TRUNCATE TABLE log_templates").execute().await?;
+        c.query("TRUNCATE TABLE log_template_hits")
+            .execute()
+            .await?;
+        c.query("TRUNCATE TABLE log_template_minutes")
+            .execute()
+            .await
+    }
+
     /// Persisted logminer state value for `key`, or `None` when never stored.
     pub async fn state_get(&self, key: &str) -> clickhouse::error::Result<Option<i64>> {
         self.client()
@@ -313,5 +405,121 @@ impl Store {
             .bind(limit)
             .fetch_all()
             .await
+    }
+
+    /// Silence setting of a template as `(enabled, minutes)`, or `None` when never set.
+    pub async fn silence_get(
+        &self,
+        template_id: u64,
+    ) -> clickhouse::error::Result<Option<(bool, u32)>> {
+        let row: Option<SilenceSettingRow> = self
+            .client()
+            .query("SELECT enabled, minutes FROM log_template_silence FINAL WHERE template_id = ?")
+            .bind(template_id)
+            .fetch_optional()
+            .await?;
+        Ok(row.map(|r| (r.enabled != 0, r.minutes)))
+    }
+
+    /// Stores the silence setting of a template; the latest write wins.
+    pub async fn silence_put(
+        &self,
+        template_id: u64,
+        enabled: bool,
+        minutes: u32,
+    ) -> clickhouse::error::Result<()> {
+        self.client()
+            .query(
+                "INSERT INTO log_template_silence (template_id, enabled, minutes, updated) \
+                 VALUES (?, ?, ?, now64(9))",
+            )
+            .bind(template_id)
+            .bind(u8::from(enabled))
+            .bind(minutes)
+            .execute()
+            .await
+    }
+
+    /// `(template_id, minutes)` of every template whose latest silence setting is enabled.
+    pub async fn silence_enabled(&self) -> clickhouse::error::Result<Vec<(u64, u32)>> {
+        let rows: Vec<SilenceEnabledRow> = self
+            .client()
+            .query(
+                "SELECT template_id, minutes FROM log_template_silence FINAL \
+                 WHERE enabled = 1 ORDER BY template_id",
+            )
+            .fetch_all()
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.template_id, r.minutes))
+            .collect())
+    }
+
+    /// Silence detection inputs for `template_ids`, read from the hits within their 3-day TTL.
+    /// Ids without a template row are left out.
+    pub async fn silence_inputs(
+        &self,
+        template_ids: &[u64],
+    ) -> clickhouse::error::Result<Vec<SilenceInput>> {
+        if template_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let templates: Vec<SilenceTemplateRow> = self
+            .client()
+            .query(
+                "SELECT template_id, service, toUnixTimestamp64Nano(first_seen) AS first_seen_ns, \
+                 toUnixTimestamp64Nano(last_seen) AS last_seen_ns \
+                 FROM log_templates FINAL WHERE template_id IN ? ORDER BY template_id",
+            )
+            .bind(template_ids)
+            .fetch_all()
+            .await?;
+        let t_last: Vec<TemplateLastRow> = self
+            .client()
+            .query(
+                "SELECT template_id, toUnixTimestamp64Nano(max(ts)) AS last_ns \
+                 FROM log_template_hits WHERE template_id IN ? \
+                 AND ts > now64(9) - toIntervalDay(3) GROUP BY template_id",
+            )
+            .bind(template_ids)
+            .fetch_all()
+            .await?;
+        let mut services: Vec<&str> = templates.iter().map(|t| t.service.as_str()).collect();
+        services.sort_unstable();
+        services.dedup();
+        let s_last: Vec<ServiceLastRow> = if services.is_empty() {
+            Vec::new()
+        } else {
+            self.client()
+                .query(
+                    "SELECT service, toUnixTimestamp64Nano(max(ts)) AS last_ns \
+                     FROM log_template_hits WHERE service IN ? \
+                     AND ts > now64(9) - toIntervalDay(3) GROUP BY service",
+                )
+                .bind(services)
+                .fetch_all()
+                .await?
+        };
+        Ok(templates
+            .into_iter()
+            .map(|t| SilenceInput {
+                // The newest hit inside the 3-day hits TTL, else the template's own `last_seen`
+                // (30-day TTL): a silence longer than the hits TTL keeps the same anchor, so its
+                // alert id does not change when the last hit ages out.
+                t_last_ns: t_last
+                    .iter()
+                    .find(|r| r.template_id == t.template_id)
+                    .map(|r| r.last_ns)
+                    .or((t.last_seen_ns > 0).then_some(t.last_seen_ns)),
+                s_last_ns: s_last
+                    .iter()
+                    .find(|r| r.service == t.service)
+                    .map(|r| r.last_ns),
+                template_id: t.template_id,
+                service: t.service,
+                first_seen_ns: t.first_seen_ns,
+            })
+            .collect())
     }
 }

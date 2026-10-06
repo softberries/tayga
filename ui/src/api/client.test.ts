@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, apiUrl, getJson, isApiError } from './client'
+import { ApiError, apiUrl, getJson, isApiError, putJson } from './client'
 
 function respond(status: number, body: unknown, contentType = 'application/json') {
   return vi.fn(async () =>
@@ -66,5 +66,25 @@ describe('getJson', () => {
     expect(err).toBeInstanceOf(DOMException)
     expect((err as DOMException).name).toBe('AbortError')
     expect(isApiError(err)).toBe(false)
+  })
+})
+
+describe('putJson', () => {
+  it('sends a JSON body with the JSON content type and parses the answer', async () => {
+    const fetch = respond(200, { enabled: true, minutes: 15 })
+    vi.stubGlobal('fetch', fetch)
+    await expect(putJson('/log-templates/1/silence', { enabled: true, minutes: 15 })).resolves.toEqual({ enabled: true, minutes: 15 })
+    const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('/api/v1/log-templates/1/silence')
+    expect(init.method).toBe('PUT')
+    expect(init.headers).toMatchObject({ 'Content-Type': 'application/json' })
+    expect(init.body).toBe('{"enabled":true,"minutes":15}')
+  })
+
+  it('throws an ApiError with the API message, and a status 0 one on a network failure', async () => {
+    vi.stubGlobal('fetch', respond(400, { error: 'minutes must be 1..=1440' }))
+    await expect(putJson('/x', {})).rejects.toMatchObject({ status: 400, message: 'minutes must be 1..=1440' })
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('offline')))
+    await expect(putJson('/x', {})).rejects.toMatchObject({ status: 0, message: 'offline' })
   })
 })

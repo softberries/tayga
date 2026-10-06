@@ -4,6 +4,7 @@
  * is drawn from the buckets each row carries.
  */
 import { Link } from '@tanstack/react-router'
+import { Bell } from 'lucide-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useMemo, useRef } from 'react'
 import type { KeyboardEvent } from 'react'
@@ -22,7 +23,7 @@ import { sortTemplates } from './model'
 import type { TemplateSort, TemplateSortKey } from './model'
 import { TruncationTooltip } from '../../components/ui/Tooltip'
 
-const COLS = '140px minmax(0, 1fr) 72px 120px 84px 80px'
+const COLS = '140px minmax(0, 1fr) 72px 120px 84px 96px'
 const AREAS = '"svc tmpl count spark first alert"'
 const NARROW_COLS = 'minmax(0, 1fr) auto auto'
 const NARROW_AREAS = '"tmpl tmpl tmpl" "svc count alert"'
@@ -168,7 +169,13 @@ export function TemplatesTable({ rows, range, nowMs, sort, onSort, height = 'min
                 <span role="cell" style={{ gridArea: 'first' }} className={cx('tabular whitespace-nowrap text-xs text-muted', narrow && 'hidden')} title={dateTime(t.first_seen_ns)}>
                   {ago(t.first_seen_ns, nowMs)}
                 </span>
-                <span role="cell" style={{ gridArea: 'alert' }} className={narrow ? 'justify-self-end' : undefined}>
+                <span role="cell" style={{ gridArea: 'alert' }} className={cx('flex items-center gap-1.5', narrow && 'justify-self-end')}>
+                  {t.silence_enabled ? (
+                    <span title="Alerts when silent" className="inline-flex text-silence">
+                      <Bell aria-hidden size={13} />
+                      <span className="sr-only">alerts when silent</span>
+                    </span>
+                  ) : null}
                   {t.alerting ? <Badge kind="spike">alerting</Badge> : <span className="sr-only">not alerting</span>}
                 </span>
               </div>

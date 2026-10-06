@@ -64,6 +64,26 @@ enum Cmd {
     /// Print the Argon2id PHC string for `auth.password_hash`. Prompts twice without echo, or
     /// reads the first stdin line when piped.
     HashPassword,
+    /// Rebuild log templates from the stored logs of the last 3 days with the logminer's current
+    /// `[logminer]` config (same `TAYGA_CONFIG` file and `TAYGA__` env). Truncates
+    /// `log_templates`, `log_template_hits` and `log_template_minutes`, then stores the
+    /// watermark, a fresh masking epoch and the masking version. A real run refuses while the
+    /// logminer's heartbeat is under 3 minutes old; `--dry-run` is read-only and always allowed. Stop the logminer first
+    /// (`docker compose ... stop tayga-logminer`) and start it again afterwards.
+    Remine {
+        /// Mine and print the summary; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Run a real re-mine although the logminer heartbeat is fresh.
+        #[arg(long)]
+        force: bool,
+        /// ClickHouse HTTP URL; default `clickhouse.url` of the config, else http://localhost:18123.
+        #[arg(long)]
+        clickhouse: Option<String>,
+        /// Database name; default `clickhouse.database` of the config, else `tayga`.
+        #[arg(long)]
+        database: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -136,6 +156,12 @@ async fn main() -> anyhow::Result<()> {
             let password = tayga_devtools::password::read_password()?;
             println!("{}", tayga_devtools::password::hash_password(&password)?);
         }
+        Cmd::Remine {
+            dry_run,
+            force,
+            clickhouse,
+            database,
+        } => remine(dry_run, force, clickhouse, database).await?,
     }
     Ok(())
 }
@@ -150,4 +176,47 @@ fn parse_trace_id(hex: &str) -> anyhow::Result<[u8; 16]> {
         *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)?;
     }
     Ok(id)
+}
+
+/// The `[clickhouse]` keys a flag can override.
+#[derive(serde::Deserialize, Default)]
+struct ClickHouseSection {
+    url: Option<String>,
+    database: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct RemineConfig {
+    #[serde(default)]
+    clickhouse: ClickHouseSection,
+}
+
+async fn remine(
+    dry_run: bool,
+    force: bool,
+    clickhouse: Option<String>,
+    database: Option<String>,
+) -> anyhow::Result<()> {
+    let drain = tayga_logminer::config::DrainSettings::load()?.drain();
+    let cfg: RemineConfig = tayga_common::load_settings()?;
+    let store = tayga_store::store::Store::new(&tayga_store::ClickHouseSettings {
+        url: clickhouse
+            .or(cfg.clickhouse.url)
+            .unwrap_or_else(|| "http://localhost:18123".to_string()),
+        database: database
+            .or(cfg.clickhouse.database)
+            .unwrap_or_else(|| "tayga".to_string()),
+    });
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let summary = tayga_devtools::remine::remine(
+        &store,
+        &drain,
+        tayga_devtools::remine::Options { dry_run, force },
+        i64::try_from(now_ns)?,
+    )
+    .await?;
+    print!("{}", summary.render(dry_run));
+    Ok(())
 }

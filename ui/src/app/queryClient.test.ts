@@ -85,6 +85,22 @@ describe('query client', () => {
       expect(lost).toHaveBeenCalledTimes(1)
     })
 
+    it('a mutation that opts in reports a lost session; one that does not (the login) is only an error', async () => {
+      const lost = vi.fn()
+      setSessionLostHandler(lost)
+      const qc = createQueryClient()
+      qc.setQueryData(api.config().queryKey, { jaeger_url: null, grafana_url: null, auth_enabled: true, infra_services: [] })
+      const run = (meta?: Record<string, unknown>) =>
+        qc.getMutationCache().build(qc, { mutationFn: fail401, meta, retry: false }).execute(undefined).catch(() => {})
+      await run()
+      expect(lost).not.toHaveBeenCalled()
+      await run({ sessionAware: true })
+      expect(lost).toHaveBeenCalledTimes(1)
+      qc.setQueryData(api.config().queryKey, { jaeger_url: null, grafana_url: null, auth_enabled: false, infra_services: [] })
+      await run({ sessionAware: true })
+      expect(lost).toHaveBeenCalledTimes(1)
+    })
+
     it('a burst of 401s redirects once while the first redirect is pending', async () => {
       let finish = () => {}
       const redirect = vi.fn(() => new Promise<void>((r) => (finish = r)))

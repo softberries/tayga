@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { HEX32, U64, formatRect, formatUntil, sinceSecs, untilMs, parseRect, sinceCovering, validateHomeSearch, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch, validateTracesSearch } from './search'
+import { HEX32, U64, formatRect, formatUntil, sinceSecs, untilMs, parseRect, sinceCovering, validateHomeSearch, validateLogAlertsSearch, validateMapSearch, validateRootSearch, validateStorySearch, validateTraceSearch, validateTracesSearch } from './search'
 
 describe('validateRootSearch', () => {
   it('keeps a valid non-default since', () => {
@@ -151,5 +151,12 @@ describe('traces explorer search', () => {
     expect(formatRect({ t0: 1000.4, t1: 1999.2, d0: 40.12345, d1: 60 })).toBe('1000_2000_40.123_60')
     expect(validateTracesSearch({ sel: '2000_1000_60_40' }).sel).toBe('1000_2000_40_60')
     expect(parseRect('1_2_3')).toBeUndefined()
+  })
+})
+
+describe('log alerts search', () => {
+  it('keeps every alert kind and drops unknown ones', () => {
+    for (const kind of ['new', 'spike', 'silence'] as const) expect(validateLogAlertsSearch({ kind }).kind).toBe(kind)
+    expect(validateLogAlertsSearch({ kind: 'loud' }).kind).toBeUndefined()
   })
 })

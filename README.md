@@ -29,10 +29,10 @@ OTel demo services ──► demo otel-collector ──OTLP gRPC──► tayga-
 Redpanda topic `tayga.signals` ──► tayga-logminer (separate consumer group, one replica)
                                      │  Drain template mining per service, detection every 60 s
                                      ├─► ClickHouse `log_templates`, `log_template_hits`, `log_alerts`
-                                     └─► Redpanda topic `tayga.alerts`
+                                     └─► Redpanda topic `tayga.alerts` ──► tayga-notifier ──► webhook and Slack targets
 ```
 
-Workspace crates (`crates/`): `tayga-ingest`, `tayga-writer`, `tayga-assembler`, `tayga-logminer`, `tayga-api` (services); `tayga-analysis`, `tayga-drain` (Drain mining and alert rules, no I/O), `tayga-model`, `tayga-kafka`, `tayga-store`, `tayga-common` (libraries); `tayga-devtools` (flag, capture, verify-raw, emit-log, hash-password CLI); `tayga-e2e` (end-to-end tests).
+Workspace crates (`crates/`): `tayga-ingest`, `tayga-writer`, `tayga-assembler`, `tayga-logminer`, `tayga-notifier`, `tayga-api` (services); `tayga-analysis`, `tayga-drain` (Drain mining and alert rules, no I/O), `tayga-model`, `tayga-kafka`, `tayga-store`, `tayga-common` (libraries); `tayga-devtools` (flag, capture, verify-raw, emit-log, hash-password, remine CLI); `tayga-e2e` (end-to-end tests).
 
 ## Quick start
 
@@ -86,7 +86,7 @@ Header and shortcuts:
 - `g` then `s`, `t`, `m`, `l` or `p` goes to Stories, Traces, Service map, Log alerts or Pipeline. `?` lists the shortcuts. They are ignored while you type in a field or a dialog is open.
 - "Open in Jaeger" (span drawer, trace page) links to the demo's Jaeger (`TAYGA__JAEGER_URL`, set in `deploy/compose.tayga.yaml`). "Open in Grafana" on the map appears only when `TAYGA__GRAFANA_URL` is set, which `make up-extras` does. Both are empty when unset.
 
-Pipeline history comes from a recorder inside `tayga-api`: every 15 s (`record_secs`) it scrapes the `/metrics` of ingest, writer, assembler and logminer plus its own registry, and stores the samples in ClickHouse `metric_samples` (7-day TTL). The scrape targets are in `deploy/tayga-api.toml` (`TAYGA_CONFIG`); a list of targets cannot be set through `TAYGA__` environment variables. Consumer lag is read from Kafka on request, so `tayga-api` has Kafka settings.
+Pipeline history comes from a recorder inside `tayga-api`: every 15 s (`record_secs`) it scrapes the `/metrics` of ingest, writer, assembler, logminer and notifier plus its own registry, and stores the samples in ClickHouse `metric_samples` (7-day TTL). The scrape targets are in `deploy/tayga-api.toml` (`TAYGA_CONFIG`); a list of targets cannot be set through `TAYGA__` environment variables. Consumer lag is read from Kafka on request, so `tayga-api` has Kafka settings.
 
 ### Grafana and Prometheus (optional)
 
@@ -158,9 +158,9 @@ The demo's load generator has a task, `ask_agent`, that posts to an `agent` serv
 
 `tayga-logminer` reads the logs from `tayga.signals` (its own consumer group) and groups them into templates with the Drain algorithm, one tree per service. A body is first masked (UUIDs, hex runs of 8 or more characters and numbers become `<*>`), so `Found 3 products from database` and `Found 12 products from database` are one template, `Found <*> products from database`. A template keeps its id when it generalizes. Other numbers are masked, but an HTTP status code in an access-log position is kept (see [Detection correctness](#detection-correctness-plan-7a)), so a burst of 500s in Envoy logs can be its own template.
 
-Per log, one row in `log_template_hits` (3-day TTL); per template, one row in `log_templates` (30-day TTL); alerts in `log_alerts` (7-day TTL) and as JSON on the topic `tayga.alerts`. Counting uses `uniqExact(log_id)`, so replayed records are not counted twice. Notification delivery (webhook, Slack) is not implemented.
+Per log, one row in `log_template_hits` (3-day TTL); per template, one row in `log_templates` (30-day TTL); alerts in `log_alerts` (7-day TTL) and as JSON on the topic `tayga.alerts`. Counting uses `uniqExact(log_id)`, so replayed records are not counted twice. `tayga-notifier` delivers the alerts to webhook and Slack targets (see [Alert delivery](#alert-delivery-tayga-notifier)).
 
-Every 60 seconds the logminer runs two rules over `log_template_hits`:
+Every 60 seconds the logminer runs two rules over `log_template_hits`, plus the opt-in silence rule (see [Silence alerts](#silence-alerts)):
 
 | Rule | Fires when | Default |
 |---|---|---|
@@ -180,7 +180,7 @@ Where to look:
 - Story pages: the log table has a Template column, with a `new` or `spike` badge when the template was alerting at the story's time.
 - With `make up-extras`: Grafana "Tayga · Logs" dashboard (`tayga-logs`) and logminer panels in "Tayga · Pipeline health". The app's Pipeline page charts the logminer metrics too.
 
-Limits: one logminer replica only (Drain state is global per service while records are partitioned by trace); seasonal baselines are opt-in; no alert when a template disappears; history is not re-mined. Open questions are in `docs/superpowers/followups.md`.
+Limits: one logminer replica only (Drain state is global per service while records are partitioned by trace); seasonal baselines are opt-in; a template that disappears raises an alert only when silence alerts are switched on for it; history is re-mined only by hand (see [Re-mining templates](#re-mining-templates-tayga-devtools-remine)). Open questions are in `docs/superpowers/followups.md`.
 
 To probe the new-template rule by hand (the stack's ingest listens on 14318):
 
@@ -224,6 +224,220 @@ The command prints the trace id it used. An alert fires only if the service alre
 
 Known gaps: seasonal mode has not been run against a live stack (it needs a day of history); the per-partition clock's Kafka position and committed-offset paths are tested with fakes, not a real broker; partitions lagging under 60 s count as caught up.
 
+## Silence alerts
+
+Silence alerts are opt-in per template. Tayga raises a `silence` alert when a template has had no log for N minutes while its service still sends other logs.
+
+**In the app.** The template page (`/logs/templates/{id}`) has a "Silence alert" card. It holds an "Alert when silent" switch and a minutes field, which defaults to 10, takes 1 to 1440, and is disabled while the switch is off.
+- Save sends the PUT below. A 401 follows the session-lost flow, and other errors show inline.
+- The templates table shows a bell on rows with silence on.
+- In `/logs/alerts` and the other alert lists, a silence alert has its own `silence` badge, the kind filter has a "Silence" option, and the count column reads "silent N min".
+- The `/logs/alerts` timeline draws a silence alert at its latest detection (`last_at`), not at the template's last hit, so a silence that began before the range but is still detected inside it is counted. New and spike alerts are drawn at their start.
+
+**API.** `PUT /api/v1/log-templates/{id}/silence` with `Content-Type: application/json`:
+
+```sh
+curl -X PUT localhost:8090/api/v1/log-templates/<template_id>/silence \
+  -H 'content-type: application/json' -d '{"enabled": true, "minutes": 10}'
+```
+
+- The answer is the stored setting.
+- Errors:
+  - 415 without the JSON content type;
+  - 400 on a bad body, an id that is not a decimal u64, or `minutes` outside 1 to 1440;
+  - 404 for an unknown template.
+- With authentication on, it needs a session or Basic credentials, like the other API routes.
+- Settings are stored in `log_template_silence` (migration 0010), where the newest row per template wins.
+- `GET /api/v1/log-templates/{id}` returns the setting as `silence`, and list rows carry `silence_enabled`.
+
+**The rule, in log time.** On every detection pass (60 s), for each template with silence on:
+- `t_last` is the template's newest hit inside the 3-day hits TTL. Past that TTL it falls back to the template's `last_seen`, and without one to its `first_seen`.
+- `s_last` is the newest hit of any template of the same service.
+- The template is silent when `s_last − t_last ≥ minutes`.
+
+Both values are log timestamps, not the wall clock. So a pipeline outage, where no logs arrive at all, does not make a template silent. A service with no hits in the last 3 days is not judged.
+
+**Partition-clock guard.** `s_last` counts only up to the logminer's per-partition data clock, the same clock the new-template rule uses. That clock holds back while an assigned partition is behind, so logs still waiting in a lagging partition cannot make a template look silent.
+
+**The alert:**
+- `started_at` is the template's last hit, so `last_at − started_at` is how long it has been quiet.
+- That quiet time ("silent N min" in the app, Slack and the webhook `summary`) mixes clocks: `last_at` is the logminer's wall clock, while `started_at` is a log timestamp. Pipeline lag or clock skew is counted in, so a logminer 10 minutes behind the logs reports a silence 10 minutes longer than it is in log time. Whether the template is silent at all is still judged in log time only.
+- `last_at` is refreshed on every pass while the template stays silent.
+- `alert_id` is a hash of the template id and that last hit, so one quiet period is one alert, also across a logminer restart.
+- `window_count` is 0 and there are no example traces. `baseline_per_window` is 0: the spec marks it informational, and no query computes it yet.
+- Silence alerts do not set a template's `alerting` flag, and they are not shown as badges on story logs.
+- `tayga_logminer_silence_alerts` is a gauge of the templates that are currently silent.
+
+**How a silence ends.** When the template gets a hit again, or silence is switched off for it, the alert is no longer refreshed. It turns inactive 10 minutes (`alert_active_min`) after its last `last_at`, like a spike. A later quiet period gets a new alert id.
+
+## Alert delivery (tayga-notifier)
+
+`tayga-notifier` consumes `tayga.alerts` as consumer group `tayga-notifier` and delivers `new`, `spike` and `silence` alerts to webhook and Slack targets. It always runs in compose. With no targets, which is the default, it logs `delivery disabled: no targets` once and keeps committing offsets.
+
+**Config.** The settings live in `deploy/tayga-notifier.toml`, which is mounted as `TAYGA_CONFIG`.
+- Scalar keys can be overridden with `TAYGA__NOTIFIER__*` environment variables.
+- `targets` is a list of tables, so it can only be set in a file.
+- Settings are read at startup, so run `docker restart tayga-notifier` after an edit.
+
+| Key | Meaning | Default |
+|---|---|---|
+| `targets` | `{name, kind, url}` per target. `kind` is `"webhook"` or `"slack"`. `name` is 1 to 64 of `[A-Za-z0-9._-]` and unique. `url` is http(s) | none |
+| `public_url` | Base of the links back into the app. Slack readers must be able to open it, so `localhost` only works on the machine running the stack | `http://localhost:8090` |
+| `kinds` | The alert kinds to deliver | `["new", "spike", "silence"]` |
+| `max_attempts` | Attempts per alert and target | 8 |
+| `timeout_secs` | Timeout per request, 1 to 15 | 10 |
+| `max_age_secs` | Alerts whose `last_at` is older are skipped and committed (`result="stale"`), so a first start with targets does not deliver the backlog retained on the topic | 3600 |
+| `breaker_cooldown_secs` | How long a target's circuit breaker stays open after it gave up on a retryable error (see Retries). Must be positive | 300 |
+
+```toml
+[[notifier.targets]]
+name = "ops-slack"
+kind = "slack"
+url = "https://hooks.slack.com/services/…"
+```
+
+**URL secrecy.** A webhook URL, and a Slack one in particular, is a credential.
+- The notifier never logs a URL, never uses it as a metric label, and never stores it.
+- Logs, metrics and `notifier_deliveries` name the target by its `name`.
+- Debug output prints `<redacted>`, and every `http(s)://…` in an error text is replaced with `<redacted>` before it is logged or stored.
+- `deploy/tayga-notifier.toml` is tracked by git, so do not commit a real URL. Either keep it as a local, uncommitted edit, or mount an untracked file through a compose override, the way `deploy/compose.notifier-e2e.yaml` does.
+
+**Webhook payload.** The notifier sends a `POST` with `Content-Type: application/json`. This is the body from the live `make e2e-notifier` run, with the template shortened:
+
+```json
+{"alert_id":"fe0492738da0b683","kind":"silence","service":"tayga-e2e-probe",
+ "template_id":"2340958801421686365","template":"xzwoppcincbw probe … probe marker",
+ "started_at":"2026-10-06T05:40:40.946Z","last_at":"2026-10-06T05:43:20.029Z",
+ "count":0,"baseline":0.0,
+ "summary":"xzwoppcincbw probe … probe marker has been silent for 2 min in tayga-e2e-probe",
+ "example_trace_ids":[],
+ "links":{"template":"http://localhost:8090/logs/templates/2340958801421686365","traces":[]}}
+```
+
+- `template_id` is a decimal string.
+- Times are RFC 3339 UTC with milliseconds. `last_at` is the alert's latest update.
+- `count` is the alert's `window_count` (0 for a silence), and `baseline` is its `baseline_per_window`.
+- `summary` is one unescaped line, the same text as Slack's fallback:
+  - `New log template in <service>: <template>`;
+  - `<template> spiked to <count> per window in <service> (baseline <b>)`;
+  - `<template> has been silent for <N> min in <service>`.
+- `example_trace_ids` holds every example trace id; `links.traces` links at most 3 of them.
+- Redirects are not followed.
+
+Each alert is delivered once, when the notifier first sees it. Later updates, such as a spike growing or a silence getting longer, are not sent.
+
+**Slack.**
+1. Create a Slack app with Incoming Webhooks turned on.
+2. Add a webhook for the channel.
+3. Put its URL in a `kind = "slack"` target.
+
+The message is built from `blocks`:
+- a header such as "Log spike in checkout", "Log silence in cart" or "New log template in ad";
+- the template in a code block;
+- fields for the count, the baseline and the start (for a silence, how long it has been silent and the last hit);
+- buttons to the template and up to 3 traces.
+
+Template text is escaped for Slack, so `<*>` is not read as a link. Tayga only posts; nothing is read back from Slack.
+
+**Retries:**
+- A 2xx is delivered.
+- 429, 5xx, a network error or a timeout is retried.
+- Any other status, including every other 4xx and a 3xx, fails at once. The status is recorded as `last_error`.
+- The wait after the n-th failed attempt is the larger of 1 s × 2^(n−1) and the response's `Retry-After` (delta-seconds or an HTTP date), capped at 300 s.
+- After `max_attempts` attempts the delivery is marked failed.
+
+Records are handled one at a time, and each waits for all its targets. With the defaults and no `Retry-After`, a target that keeps failing takes about 2 minutes of backoff (1 + 2 + … + 64 s) plus up to 8 request timeouts before it gives up. The consumer's `max.poll.interval.ms` is raised to 40 minutes, so even waits at the `Retry-After` cap do not trigger a rebalance.
+
+**Circuit breaker per target.** Paying that ladder on every alert would let the backlog grow past `max_age_secs` after roughly 17 to 28 alerts (3600 s at 127 to 207 s each); the live stack has seen over 100 alerts in an hour. From then on every record would be skipped as `stale` for every target, healthy ones included. A breaker per target prevents this:
+- When a target gives up on a retryable error (429, 5xx, a network error or a timeout), its breaker opens for `breaker_cooldown_secs` (300 s).
+- While it is open, each new alert gets exactly one attempt to that target, without backoff. A 2xx closes the breaker. A retryable failure marks that alert `failed` for the target, with its attempt recorded, and keeps the breaker open for another cooldown.
+- A permanent error (a 4xx) does not open or close it.
+- When the cooldown passes with no new alert, the breaker closes, and the next alert runs the full ladder again.
+- The state is kept in memory, so a restart starts every target closed.
+
+So, after its first ladder, a dead target costs each record one attempt: almost nothing for a fast 5xx, and at most `timeout_secs` (10 s) for a host that does not answer. Healthy targets keep pace and are not skipped as stale. The price is that alerts sent while a target's breaker is open are not retried to it: they are marked `failed` after one attempt and are not delivered there later. `max_age_secs` still applies per record, judged when the record is read, so a backlog that is old for another reason, such as a notifier that was down for over an hour, is skipped as before.
+
+**Dedup and offsets.** Delivery state is kept per `(alert_id, target)` in `notifier_deliveries`:
+- migration 0011, `ReplacingMergeTree(updated)`, 30-day TTL;
+- columns `status` (`pending`, `delivered` or `failed`), `attempts` and `last_error`.
+
+The logminer re-publishes an alert every time it updates it. Once the target has a `delivered` or `failed` row, a re-published or re-read alert sends nothing and is counted as `result="duplicate"`. A `pending` row keeps its attempt count across a restart. The Kafka offset is committed only once every target is delivered or failed.
+
+**Stopping.** A stop (SIGTERM) does not cancel an attempt that is in flight. The attempt finishes within `timeout_secs`, and its row is written: each write times out after 5 s and is retried for up to 10 s more. Compose gives the container `stop_grace_period: 40s` for this.
+
+**Accepted limits.** Receivers should deduplicate on `alert_id`, because an alert can be sent a second time in these cases:
+- The process is hard-killed (SIGKILL, OOM, or a stop that outlasts the grace period) between a 2xx and the row write. The alert is sent again once after the restart.
+- ClickHouse is down for the whole grace period, so the final row is lost. The offset is still committed, and the next re-publish of that alert is sent again.
+- A `notifier_deliveries` row expires after its 30-day TTL. A re-publish of the same alert id after that, for example a silence lasting more than 30 days, is delivered again.
+
+**Metrics** are served on `:9100` inside the network; the port is not published. The API's recorder scrapes them (`deploy/tayga-api.toml`).
+
+| Metric | Meaning |
+|---|---|
+| `tayga_notifier_deliveries_total{target,result}` | `result` is `delivered`, `failed`, `retry`, `duplicate` (a re-publish of an alert already resolved, not a send), `stale` (older than `max_age_secs`) or `breaker` (an attempt made while the target's breaker was open; its outcome is also counted as `delivered` or `failed`) |
+| `tayga_notifier_delivery_seconds` | Histogram of each HTTP attempt |
+| `tayga_notifier_pending` | Deliveries started and not yet resolved |
+| `tayga_notifier_breaker_open{target}` | 1 while the target's breaker is open, else 0. Updated when an alert is delivered to the target, so after an idle cooldown it can read 1 until the next alert |
+
+The Pipeline page shows `tayga-notifier` as a job, and its consumer lag on `tayga.alerts` next to the other groups. Each lag row names its topic, and bars are scaled per topic: the signal groups against their largest lag (at least 1,000 messages), the notifier against its own (at least 10 alerts), so a notifier stuck behind tens of alerts still shows a full bar next to a signal lag in the thousands.
+
+### Pointing the notifier at a mock
+
+`make e2e-notifier` checks delivery against a live stack without any outside service:
+1. It recreates `tayga-notifier` with `deploy/compose.notifier-e2e.yaml`. That override mounts `deploy/tayga-notifier.e2e.toml`, which has one webhook target, `e2e-mock`, at `http://host.docker.internal:18099/hook`.
+2. It runs the `silence_alert_and_delivery` scenario with `TAYGA_E2E_NOTIFIER=1`. The scenario starts the e2e crate's mock webhook on the host's `0.0.0.0:18099` and waits for its silence alert. It then checks that the mock got exactly one delivery for that `alert_id`, runs `docker restart tayga-notifier`, watches for 150 s while the logminer keeps re-publishing the alert, and checks that there is still exactly one.
+3. It always recreates the notifier with the default, target-less `deploy/tayga-notifier.toml` afterwards, whether the scenario passed or not.
+
+Docker Desktop resolves `host.docker.internal` by itself. The override also maps it to `host-gateway` for Linux engines, which was not tested. The mock listens on all interfaces only while the scenario runs.
+
+## Re-mining templates (`tayga-devtools remine`)
+
+Use it after changing masking or a Drain setting (`sim_threshold`, `max_clusters_per_service`, `keep_http_status`). Without it, the templates reflect the new configuration only for logs mined since the change.
+
+`remine` does the following:
+1. It truncates `log_templates`, `log_template_hits` and `log_template_minutes`.
+2. It reads `logs` from the last 3 days in `(ts, log_id)` order, 10,000 rows per page, and mines them with the logminer's own code and its current `[logminer]` settings, taken from the `TAYGA_CONFIG` file and the `TAYGA__LOGMINER__*` environment variables. The compose logminer is configured by environment variables only, so give the CLI the same ones.
+3. After each page it writes the hits and the changed templates; `log_template_minutes` is filled through its materialized view. Template rows of page n carry version `now + n` ns, so a template written on several pages keeps the row of its last page (final `count` and `last_seen`) without depending on how ClickHouse breaks an equal-version tie.
+4. It stores `new_template_watermark_ns` (the newest mined `ts`), `masking_epoch_start_ns = now` and the current `masking_version` in `logminer_state`.
+
+The watermark means the restarted logminer does not report the rebuilt templates as new. The new masking epoch adds the 15-minute warmup: no `new` alert fires for templates first seen in the 15 minutes after the re-mine. Only `new` alerts are gated this way. Spikes are not: spike alerts are matched by template id, so a template that is spiking when the re-mine changes its id gets a new spike alert id, and the notifier may deliver it a second time. `log_alerts` and `log_template_silence` are kept. ClickHouse defaults to `http://localhost:18123`, database `tayga`; `--clickhouse` and `--database` override them.
+
+```sh
+# 1. Preview. Read-only, and allowed while the logminer runs.
+cargo run --release -q -p tayga-devtools -- remine --dry-run
+# 2. Stop the logminer. These are the Makefile's compose files, run from the repository root.
+TAYGA_ROOT=$PWD docker compose --project-directory vendor/opentelemetry-demo \
+  -f vendor/opentelemetry-demo/compose.yaml -f vendor/opentelemetry-demo/compose.full.yaml \
+  -f vendor/opentelemetry-demo/compose.observability.yaml \
+  -f deploy/compose.infra.yaml -f deploy/compose.tayga.yaml stop tayga-logminer
+# 3. Wait until the heartbeat is 3 minutes old, then re-mine.
+cargo run --release -q -p tayga-devtools -- remine
+# 4. Start the logminer: the same compose command with `start tayga-logminer`.
+```
+
+- **Duration.** Build with `--release`: on 8.6 million logs a debug-build dry run took 501 s, and a release-build real run took 211 s. The logminer is down for that time plus the 3-minute heartbeat wait.
+- **Dry run.** The dry run prints the same summary as a real run without writing anything:
+  - templates per service, before and after;
+  - template ids added, removed and unchanged;
+  - silence settings that would be orphaned.
+- **Heartbeat guard.** The logminer writes `logminer_heartbeat_ns` to `logminer_state` on every detection pass. A real run refuses while that heartbeat is under 3 minutes old, and the message says to stop the logminer first. This means you wait about 3 minutes after stopping it. `--force` skips the check; use it only when you know the logminer is down. `--dry-run` never checks.
+- **Not atomic.** The tables are truncated before mining. If a run fails partway, run it again before you start the logminer.
+- **3-day window.** Only the stored logs (3-day TTL) are mined. Templates whose logs are all older are dropped, even though `log_templates` itself keeps rows for 30 days.
+- **Id churn and orphans.** A template id hashes the service and the cluster's first-seen template. Ids are stable only for the same logs, order and configuration, so a rebuild after a config change can change many of them.
+  - Alerts keep their own template text, but their template links can point at ids that no longer exist.
+  - Silence settings on vanished ids are reported as orphaned and left in place. Switch silence on again for the new ids.
+- **Empty window.** With no logs in the last 3 days, the template tables end up empty and the watermark is left unchanged.
+
+## Deploy order
+
+Migrations must run before `tayga-api`, `tayga-logminer` or `tayga-notifier` restart on a new version:
+- migration 0010 adds `log_template_silence` and the `silence` alert kind, which the API reads and the logminer writes;
+- migration 0011 adds `notifier_deliveries`.
+
+`make up` takes care of this. It rebuilds the image and recreates the stack, and every Tayga service except ingest waits for the one-shot `tayga-migrate` service (`tayga-writer migrate`) to finish successfully (`depends_on: condition: service_completed_successfully`). If you restart one service by hand after an upgrade, run the migration first.
+
+Reload browser tabs opened before the upgrade. Their old bundle validates alert kinds against a strict enum that does not know `silence`, so its alert views show an error until the page is reloaded. The same holds for the Pipeline page's consumer lag, whose rows now carry a `topic` field that the old strict schema rejects.
+
 ## Developer commands
 
 | Command | What it does |
@@ -235,7 +449,8 @@ Known gaps: seasonal mode has not been run against a live stack (it needs a day 
 | `npm --prefix ui test` | UI unit and component tests (vitest) |
 | `make it` | Starts Redpanda + ClickHouse standalone (compose project `tayga-it`) and runs the ignored integration tests (all crates except `tayga-e2e`; the ClickHouse tests each seed a uniquely named database). Run it with the full stack down: both use the same host ports 19092 and 18123 |
 | `make infra-down` | Stops the standalone infra and removes its volumes |
-| `make e2e` | Resets flags, then runs the end-to-end tests against the live stack (`make up` first). Nine tests: the seven from before (flag-driven story scenarios for payment, payment unreachable, shipping, product catalog and ad, the service map, and raw span counts versus Jaeger) plus `log_spike_on_payment_failure` and `new_template_from_probe`. The spike scenario fails up front if a payment spike alert is still active from an earlier run (wait about 10 minutes). The first run on a fresh stack waits up to 16 more minutes for the probe service warmup |
+| `make e2e` | Resets flags, then runs the end-to-end tests against the live stack (`make up` first). Ten tests: the seven from before (flag-driven story scenarios for payment, payment unreachable, shipping, product catalog and ad, the service map, and raw span counts versus Jaeger) plus `log_spike_on_payment_failure`, `new_template_from_probe` and `silence_alert_and_delivery` (without its notifier part). The spike scenario fails up front if a payment spike alert is still active from an earlier run (wait about 10 minutes). The first run on a fresh stack waits up to 16 more minutes for the probe service warmup |
+| `make e2e-notifier` | Runs `silence_alert_and_delivery` with the notifier check: points `tayga-notifier` at a mock webhook on the host, then puts the target-less config back (see [Pointing the notifier at a mock](#pointing-the-notifier-at-a-mock)) |
 | `make verify-raw` | Compares per-trace span counts in ClickHouse with the demo's Jaeger |
 | `make capture NAME=<n> ARGS="<args>"` | Captures a fixture to `fixtures/<n>.pb.gz` (see `cargo run -p tayga-devtools -- capture --help`) |
 
@@ -266,9 +481,10 @@ JSON API:
 | `GET /api/v1/stories/{story_id}` | none | Full story; 404 if absent |
 | `GET /api/v1/traces/{trace_id}` | none | Spans and logs from the raw tables; 404 if neither exists |
 | `GET /api/v1/service-map` | `since` (default `1h`), `until` | `{edges, nodes}`: `edges` are service-to-service calls (`parent`, `child`, `calls`, `errors`, `error_rate`, `avg_duration_ns`); `nodes` are per-service RED summaries (`service`, `calls`, `rate`, `error_ratio`, `p99_ns`, `baseline_p99_ns`, `health`: `ok`, `slow` or `error`). Before plan 5 the body was a plain array of edges |
-| `GET /api/v1/log-alerts` | `since` (default `24h`), `until`, `kind` (`new` or `spike`), `service` | Up to 200 alerts that overlap the window (seen after its start, started by its end), newest `last_at` first; each has `active` and `example_traces` (`[{trace_id, story_id \| null}]`) |
-| `GET /api/v1/log-templates` | `since` (default `1h`), `until`, `service`, `q` (substring, at most 200 chars) | Top 200 templates with hits in the window, by count; each has `alerting`, plus `bucket_secs` (the window / 120, rounded up to whole minutes) and `buckets` (`[bucket_start_unix_s, hits]`, oldest first; buckets without hits are left out) |
-| `GET /api/v1/log-templates/{id}` | `since` (default `24h`), `until` | One template with `buckets`, the 20 most recent hits up to the window's end and its alerts of the 7 days before that end |
+| `GET /api/v1/log-alerts` | `since` (default `24h`), `until`, `kind` (`new`, `spike` or `silence`), `service` | Up to 200 alerts that overlap the window (seen after its start, started by its end), newest `last_at` first; each has `active` and `example_traces` (`[{trace_id, story_id \| null}]`) |
+| `GET /api/v1/log-templates` | `since` (default `1h`), `until`, `service`, `q` (substring, at most 200 chars) | Top 200 templates with hits in the window, by count; each has `alerting` (spike and new alerts only) and `silence_enabled`, plus `bucket_secs` (the window / 120, rounded up to whole minutes) and `buckets` (`[bucket_start_unix_s, hits]`, oldest first; buckets without hits are left out) |
+| `GET /api/v1/log-templates/{id}` | `since` (default `24h`), `until` | One template with `buckets`, the 20 most recent hits up to the window's end, its alerts of the 7 days before that end, and `silence` (`{enabled, minutes}`, or null when never set) |
+| `PUT /api/v1/log-templates/{id}/silence` | JSON body `{enabled, minutes}` (`minutes` 1 to 1440) | The stored setting. 415 without a JSON content type, 400 on a bad body or id, 404 when the template does not exist. The only route that changes stored data |
 | `GET /api/v1/traces/{trace_id}/log-templates` | none | `[{log_id, template_id, template, alert}]` for the trace's logs |
 | `GET /api/v1/overview` | `since`, `until` | KPI values and bucket series for the Stories page |
 | `GET /api/v1/stories/series` | `since`, `until`, `kind`, `service` | Stories per bucket, for charts |
@@ -277,7 +493,7 @@ JSON API:
 | `GET /api/v1/services/{name}` | `since`, `until` | RED series (rate, error ratio, p50/p95/p99) for one service |
 | `GET /api/v1/search` | `q` | Command palette: matching services, templates and story groups; a trace id when `q` is 32 hex characters |
 | `GET /api/v1/pipeline/series` | `metric`, `kind` (required), `job`, `labels` (`k=v`), `since`, `until` | A rate, gauge or quantile series from the recorded metrics |
-| `GET /api/v1/pipeline/lag` | none | Consumer lag per group (committed, end offset, lag) |
+| `GET /api/v1/pipeline/lag` | none | Consumer lag per group (`group`, `topic`, `committed`, `end` offset, `lag`) |
 | `GET /api/v1/config` | none | `{jaeger_url, grafana_url, auth_enabled, infra_services}` (the two links are null when unset; `infra_services` is the `[map]` list, default `["flagd"]`) |
 | `POST /api/v1/auth/login` | JSON body `{username, password}` | 204 and the session cookie; 401 on a wrong login, 429 when limited, 415 without a JSON content type. Only exists when authentication is on (404 otherwise) |
 | `POST /api/v1/auth/logout` | JSON content type | 204 and a cookie that clears the session. Only when authentication is on |
@@ -305,7 +521,7 @@ Static files: `/assets/*` is served with `Cache-Control: public, max-age=3153600
 
 ## Verified
 
-Rows above the `Plan 4` row were checked 2026-10-03 on branch `feat/plan-3-api-ui-e2e`; rows from the `Plan 4` row on were checked 2026-10-04 on branch `feat/plan-4-log-templates`; rows from the `Plan 5` row on were checked 2026-10-05 on branch `feat/plan-5-ui`; rows from the `Plan 6` row on were checked 2026-10-05 on branch `feat/plan-6-owner-decisions`. The stack was running for all of them. Rows about the removed server-rendered pages are kept as history and marked **superseded**.
+Rows above the `Plan 4` row were checked 2026-10-03 on branch `feat/plan-3-api-ui-e2e`; rows from the `Plan 4` row on were checked 2026-10-04 on branch `feat/plan-4-log-templates`; rows from the `Plan 5` row on were checked 2026-10-05 on branch `feat/plan-5-ui`; rows from the `Plan 6` row on were checked 2026-10-05 on branch `feat/plan-6-owner-decisions`. The plan 7a and 7b rows carry their own dates. The stack was running for all of them. Rows about the removed server-rendered pages are kept as history and marked **superseded**.
 
 | Claim | How verified | Result |
 |---|---|---|
@@ -431,4 +647,28 @@ Rows above the `Plan 4` row were checked 2026-10-03 on branch `feat/plan-3-api-u
 | Demo checkout: every `user_checkout_*` trace errored from about 13:00 UTC until the controller restarted the demo's Kafka and `checkout` | `trace_summaries FINAL`, 15-minute buckets: 13:15 34/34 errors, 13:30 40/40, and every bucket from 17:15 to 18:45 100% (the table keeps 2 days; earlier, 11:00 to 12:00 had 89 of 109 errors and 12:00 to 13:00 only 2 traces). Proxy: 820 of 863 `POST /api/checkout` `frontend-proxy` bodies from 13:15 to 19:05 carry ` 504 ` (template `... "POST /api/checkout <*> 504 UT response_timeout ...`). `checkout`'s `publish orders` span, 13:00 to 19:05: 825 spans, median 91.5 s, max 589.4 s. Restart: `docker inspect` `StartedAt` kafka 19:07:16 UTC, checkout 19:07:57 UTC | verified live. The demo Kafka at 600.8 of its 620 MiB memory limit is the controller's `docker stats` reading before the restart and cannot be re-checked now (548.2 MiB / 620 MiB at 19:19) |
 | Checkout recovered after the restart | `SELECT toStartOfFifteenMinutes(ts), count(), countIf(is_error=1) FROM tayga.trace_summaries FINAL WHERE endpoint_name LIKE 'user_checkout%' AND ts > now()-INTERVAL 2 HOUR GROUP BY 1 ORDER BY 1` at 19:25 UTC: 18:45 40/40 errors, 19:00 40/20, 19:15 25/0; in 5-minute buckets 19:05 9/5, then 19:10 16/0, 19:15 11/0, 19:20 14/0. `publish orders` after 19:08: 31 spans, median under 0.1 s | verified live (about 15 minutes after the restart) |
 | Trap: span `status_code` is lowercase | `spans.status_code` is `Enum8('unset' = 0, 'ok' = 1, 'error' = 2)`; over `checkout` spans 13:15 to 19:00, `countIf(status_code='error')` = 86 while `countIf(status_code='ERROR')` = 0, with no error raised | verified live |
+| **Plan 7b (silence alerts, notifier, remine)** | | |
+| Rows below checked 2026-10-06 from 05:39 to 07:02 UTC on `feat/plan-7b-alerting` (`e8621ff` plus the Task 7 commits), against the stack rebuilt by `make up` at 05:39 UTC | | |
+| A silence alert fires in log time, and `started_at` is the last hit | `make e2e-notifier`: templates A and B existed 5 s after the emit; silence enabled with `minutes = 2`; alert `fe0492738da0b683` 155 s after enabling, with `last_at − started_at` = 159 s. In `make e2e`: alert `f59f6d2b7fec6162` after 176 s, with 176 s. The test asserts `last_at − started_at ≥ minutes` | verified live (2 runs) |
+| Silence UI: switch, minutes (default 10, 1 to 1440, disabled while off), bell, badge, "Silence" filter, "silent N min" | `ui/src/features/logs/SilenceCard.tsx` (`DEFAULT_MINUTES = 10`, `SILENCE_MAX = 1440`, `disabled={!cur.enabled}`), `TemplatesTable.tsx` (`Bell`), `routes/logs/alerts.tsx` (`{ value: 'silence', label: 'Silence' }`), `features/logs/model.ts` (`silent ${min} min`) | verified in code; the UI was not driven in a browser for these rows |
+| PUT silence: 415, 400, 404, auth; `silence` and `silence_enabled` on the GETs | `put_silence` in `crates/tayga-api/src/routes.rs`; Task 3 router tests; `silence_put_needs_a_session_or_basic` in `auth.rs`; live PUTs (200) from both e2e runs | verified in code and tests; 200 path live |
+| Partition-clock guard: `s_last` counts only up to the data clock | `is_silent` in `crates/tayga-drain/src/detect.rs` (`s_last.min(clock_ns)`); unit test `a_held_back_clock_suppresses_silence_alerts` | verified in unit tests; no lagging partition observed live |
+| Silence alerts are not `alerting` and not badges on story logs | `kind != 'silence'` in `ALERTING_AT` and in the per-trace alert query, `crates/tayga-api/src/repo.rs` | verified in code |
+| A silence ends when it is no longer refreshed; inactive 10 min after `last_at` | `active` = `last_at > end − ALERT_ACTIVE_MIN` (10) in `repo.rs`; live: after the scenario switched silence off, `fe0492738da0b683` showed `active: false` at 06:17 UTC with `last_at` 05:45:20 | verified live |
+| `host.docker.internal` resolves inside the notifier on Docker Desktop for Mac | `docker exec tayga-notifier getent hosts host.docker.internal`: `192.168.65.254` | verified live; the `host-gateway` mapping for Linux is not tested |
+| The override replaces the config mount | `docker compose … -f deploy/compose.notifier-e2e.yaml config tayga-notifier`: one bind of `deploy/tayga-notifier.e2e.toml` at `/etc/tayga/notifier.toml` | verified |
+| The notifier delivers a fresh alert exactly once, also after `docker restart tayga-notifier` | `make e2e-notifier` (exit 0, 310.9 s): the mock got 1 delivery of `fe0492738da0b683`, 0 s after the alert showed in the API (4 requests in all, the others for other alerts). After the restart and a 150 s watch, still 1. `tayga.alerts` partition 2 holds the alert at offsets 760, 761 and 762 (`last_at` 05:43:20, 05:44:20, 05:45:20), so two re-publishes came after the restart. `notifier_deliveries`: one row, `e2e-mock`, `delivered`, `attempts` 1 | verified live (one run) |
+| Webhook body fields, including `last_at` and `summary` | the delivered body above: `alert_id`, `kind`, `service`, `template_id`, `template`, `started_at`, `last_at`, `count` 0, `baseline` 0.0, `summary` "… has been silent for 2 min in tayga-e2e-probe", `example_trace_ids` [], `links`; content type `application/json` (asserted by the scenario) | verified live |
+| The default config is target-less again after the check | `docker logs tayga-notifier` after `make e2e-notifier`: `delivery disabled: no targets`, and `tayga-notifier consuming` with `"targets":"[]"` | verified live |
+| Retries, `Retry-After`, permanent 4xx/3xx, backoff, `max_age_secs`, the 40 s stop grace, URL redaction | `classify`, `retry_after_delay`, `backoff`, `retry_wait` in `crates/tayga-notifier/src/deliver.rs`; `route.rs`; `stop_grace_period: 40s` in `deploy/compose.tayga.yaml`; the Task 6 unit tests and the notifier IT | verified in code and tests; not exercised live with a failing target |
+| Notifier metrics, the Pipeline job and the lag | Task 6 report (live): `/metrics` served the three series; `pipeline/series?metric=up&job=tayga-notifier` gave 1.0; `pipeline/lag` listed `tayga-notifier` with lag 0 | verified live on 2026-10-06 (Task 6), not re-checked here |
+| Receivers should dedup on `alert_id`: hard-kill, lost-final-write and 30-day TTL resends | `deliver.rs` module docs; `TTL toDateTime(updated) + INTERVAL 30 DAY` in migration `0011_notifier_deliveries.sql` | verified in code; accepted, not reproduced |
+| `remine --dry-run` on live data | 06:07:47 to 06:16:08 UTC, debug build: 8,655,171 logs read; templates 412 before, 402 after; 31 added, 41 removed, 371 unchanged by id; `otelcol-contrib` 35 → 21, `frontend-proxy` 19 → 20, `tayga-e2e-probe` 12 → 15; orphaned silence settings: none; duration 500.9 s (370 s user CPU) | verified live |
+| The real run refuses while the heartbeat is fresh | after `docker compose … stop tayga-logminer` at 06:40:01: `Error: the logminer looks alive (heartbeat 43s ago, limit 180s). Stop it first with ...`, exit status 1 | verified live |
+| Real re-mine | release build, 06:42:30 to 06:46:01 UTC: 8,647,835 logs read and hits written; templates 415 before, 402 after; 27 added, 40 removed, 375 unchanged; no orphaned silence; 211.1 s (33 s user CPU); it printed "Start the logminer again now." Before: 415 templates, 8,984,121 hits, 301,878 `log_template_minutes` rows. After: 402 templates, 8,647,205 hits, 259,642 minute rows | verified live |
+| `logminer_state` after the re-mine | `masking_epoch_start_ns` 1791268950154855000 (06:42:30.15, was 1791225236728986679), `new_template_watermark_ns` 1791269158886828000 (06:45:58.89), `masking_version` 3; the heartbeat stayed at 06:39:21 until the restart. The logminer restart at 06:46:09 logged `restored: 402`, `epoch_start: 1791268950154855000`, `masking_version: 3` | verified live |
+| No `new` alerts during the warmup after the re-mine | `SELECT toString(kind), count() FROM log_alerts FINAL WHERE started_at >= '2026-10-06 06:46:09' AND started_at < '2026-10-06 07:01:09' GROUP BY kind`: no rows, so no alert of any kind in the 15 minutes after the restart (also none up to 07:08). `log_templates` had 0 templates first seen after the epoch, and the logminer was live: heartbeat 07:08:11, 51,040 hits after 06:46:09 | verified live; weak test, because no new template appeared in the window |
+| `make e2e`: 9 of 10 pass | 06:02:36 to 06:18:24 UTC, 943.9 s, exit 2. Passed: log spike 221 s, new-template probe 60 s (warm after 0 s), payment 111 s, unreachable 50 s, catalog 25 s, raw span counts, service map, shipping 115 s (its pre-check passed), silence 176 s. Failed: `ad_failure_blames_ad` (groups with 2 and 1 stories in 180 s; it needs 3). Run alone afterwards it passed in 85 s. `make flags-reset` run after both | verified live; the ad failure is the same intermittent miss as in plan 7a |
+| Rust unit tests: 428 pass, 49 ignored | `cargo test --workspace` (sum of the `test result` lines); fmt and clippy `-D warnings` clean | verified |
+| Migrations run before the services that need them under `make up` | `depends_on: tayga-migrate: condition: service_completed_successfully` on writer, assembler, logminer, notifier and api in `deploy/compose.tayga.yaml` | verified in config |
 | Performance, scale, or latency claims | none beyond the single runs above | n/a |

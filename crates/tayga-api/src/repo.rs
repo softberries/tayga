@@ -47,6 +47,17 @@ pub trait Repo: Send + Sync + 'static {
         &self,
         trace_id: &str,
     ) -> impl Future<Output = anyhow::Result<Vec<TraceLogTemplate>>> + Send;
+    /// The silence setting of a template, `None` when it was never set.
+    fn silence(
+        &self,
+        template_id: &str,
+    ) -> impl Future<Output = anyhow::Result<Option<SilenceSetting>>> + Send;
+    /// Stores the silence setting; `false` when the template does not exist.
+    fn put_silence(
+        &self,
+        template_id: &str,
+        setting: SilenceSetting,
+    ) -> impl Future<Output = anyhow::Result<bool>> + Send;
     fn overview(&self, window: Window)
     -> impl Future<Output = anyhow::Result<OverviewView>> + Send;
     fn stories_series(
@@ -350,10 +361,13 @@ impl ChRepo {
     }
 }
 
-/// Template ids with an alert active at the window's end, by the alerts list's rule (`active`
-/// as of `end`, started before the list's upper bound): binds `end`, then `upper`.
+/// Template ids with a `new` or `spike` alert active at the window's end, by the alerts list's
+/// rule (`active` as of `end`, started before the list's upper bound): binds `end`, then
+/// `upper`. Silence alerts are left out: `alerting` flags new or spiking activity, while a
+/// silent template shows through `silence_enabled` and the alert list.
 const ALERTING_AT: &str = "SELECT template_id FROM log_alerts FINAL \
-     WHERE last_at > toDateTime(?) - toIntervalMinute({ACTIVE}) AND started_at < toDateTime(?)";
+     WHERE kind != 'silence' AND last_at > toDateTime(?) - toIntervalMinute({ACTIVE}) \
+     AND started_at < toDateTime(?)";
 
 /// Templates with at least one hit in the window, as a subquery so the outer aliases never
 /// shadow the filter columns. `alerting` is as of the window's end.
@@ -505,11 +519,22 @@ impl Repo for ChRepo {
                     .push((h.bucket, h.hits));
             }
         }
+        let silent: HashSet<String> = if rows.is_empty() {
+            HashSet::new()
+        } else {
+            self.store
+                .silence_enabled()
+                .await?
+                .into_iter()
+                .map(|(id, _)| id.to_string())
+                .collect()
+        };
         Ok(rows
             .into_iter()
             .map(|r| {
                 let buckets = by_template.remove(&r.template_id).unwrap_or_default();
                 LogTemplateListItem {
+                    silence_enabled: silent.contains(&r.template_id),
                     template: LogTemplateView::from_row(r),
                     bucket_secs: step,
                     buckets,
@@ -623,7 +648,7 @@ impl Repo for ChRepo {
             .client
             .query(&format!(
                 "SELECT toString(template_id) AS template_id, toString(kind) AS kind FROM log_alerts FINAL \
-                 WHERE toString(template_id) IN ? \
+                 WHERE kind != 'silence' AND toString(template_id) IN ? \
                  AND started_at <= fromUnixTimestamp64Nano(?) + toIntervalMinute({ALERT_LEAD_MIN}) \
                  AND last_at >= fromUnixTimestamp64Nano(?) - toIntervalMinute({ALERT_ACTIVE_MIN})"
             ))
@@ -642,6 +667,36 @@ impl Repo for ChRepo {
                 template: r.template,
             })
             .collect())
+    }
+
+    async fn silence(&self, template_id: &str) -> anyhow::Result<Option<SilenceSetting>> {
+        let id: u64 = template_id.parse()?;
+        Ok(self
+            .store
+            .silence_get(id)
+            .await?
+            .map(|(enabled, minutes)| SilenceSetting { enabled, minutes }))
+    }
+
+    async fn put_silence(
+        &self,
+        template_id: &str,
+        setting: SilenceSetting,
+    ) -> anyhow::Result<bool> {
+        let id: u64 = template_id.parse()?;
+        let known: u64 = self
+            .client
+            .query("SELECT count() FROM log_templates WHERE template_id = ?")
+            .bind(id)
+            .fetch_one()
+            .await?;
+        if known == 0 {
+            return Ok(false);
+        }
+        self.store
+            .silence_put(id, setting.enabled, setting.minutes)
+            .await?;
+        Ok(true)
     }
 
     async fn service_map(&self, window: Window) -> anyhow::Result<Vec<EdgeView>> {

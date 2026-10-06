@@ -1,13 +1,14 @@
 import type { HTMLAttributes, ReactNode } from 'react'
 import { cx } from '../../lib/cx'
 
-export type BadgeKind = 'error' | 'slow' | 'new' | 'spike' | 'ok' | 'neutral'
+export type BadgeKind = 'error' | 'slow' | 'new' | 'spike' | 'silence' | 'ok' | 'neutral'
 
 const tag: Record<BadgeKind, string> = {
   error: 'bg-err-soft text-err',
   slow: 'bg-slow-soft text-slow',
   new: 'bg-accent-strong text-on-accent',
   spike: 'bg-slow text-on-slow',
+  silence: 'bg-silence-soft text-silence',
   ok: 'bg-ok-soft text-ok',
   neutral: 'bg-inner text-muted',
 }
@@ -17,6 +18,7 @@ const dot: Record<BadgeKind, string> = {
   slow: 'bg-slow',
   new: 'bg-on-accent',
   spike: 'bg-on-slow',
+  silence: 'bg-silence',
   ok: 'bg-ok',
   neutral: 'bg-muted',
 }

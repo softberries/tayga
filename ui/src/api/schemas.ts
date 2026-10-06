@@ -24,7 +24,7 @@ const countBucket = z.tuple([int, int])
 export const StoryKindSchema = z.enum(['error', 'slow'])
 export const SpanKindSchema = z.enum(['unspecified', 'internal', 'server', 'client', 'producer', 'consumer'])
 export const SpanStatusSchema = z.enum(['unset', 'ok', 'error'])
-export const AlertKindSchema = z.enum(['new', 'spike'])
+export const AlertKindSchema = z.enum(['new', 'spike', 'silence'])
 export const HealthSchema = z.enum(['ok', 'slow', 'error'])
 export const SeriesKindSchema = z.enum(['rate', 'gauge', 'q50', 'q99'])
 
@@ -251,8 +251,15 @@ export const LogTemplateViewSchema = z.strictObject({
   alerting: z.boolean(),
 })
 
+/** A template's "alert when silent" setting (`minutes` is 1..=1440). */
+export const SilenceSettingSchema = z.strictObject({
+  enabled: z.boolean(),
+  minutes: int,
+})
+
 /** `GET /log-templates` element: the template plus its hits per bucket over the window. */
 export const LogTemplateListItemSchema = LogTemplateViewSchema.extend({
+  silence_enabled: z.boolean(),
   bucket_secs: int,
   buckets: z.array(countBucket),
 })
@@ -273,6 +280,8 @@ export const LogTemplateDetailSchema = z.strictObject({
   buckets: z.array(countBucket),
   recent: z.array(TemplateHitSchema),
   alerts: z.array(LogAlertViewSchema),
+  /** `null` until a setting has been saved. */
+  silence: z.nullable(SilenceSettingSchema),
 })
 
 export const StoriesSeriesSchema = z.strictObject({
@@ -362,6 +371,8 @@ export const SeriesViewSchema = z.strictObject({
 /** `GET /pipeline/lag` element */
 export const ConsumerLagSchema = z.strictObject({
   group: str,
+  /** The topic the lag is measured on: the signal groups' topic, or `tayga.alerts` for the notifier. */
+  topic: str,
   committed: int,
   end: int,
   lag: int,

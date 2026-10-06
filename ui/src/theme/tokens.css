@@ -140,6 +140,8 @@
   --tg-on-slow: #ffffff;
   --tg-ok: #1f7a4d;
   --tg-ok-soft: #e3f3ea;
+  --tg-silence: #6b4fc8;
+  --tg-silence-soft: #eee9fa;
 
   --tg-edge: #a8b9d3;
   --tg-node: #f1f5fb;
@@ -229,6 +231,8 @@
   --tg-on-slow: #0a1020;
   --tg-ok: #7fd1a8;
   --tg-ok-soft: #10261d;
+  --tg-silence: #b79cff;
+  --tg-silence-soft: #1e1838;
 
   --tg-edge: #2e4266;
   --tg-node: #132038;
@@ -285,6 +289,8 @@
   --color-on-slow: var(--tg-on-slow);
   --color-ok: var(--tg-ok);
   --color-ok-soft: var(--tg-ok-soft);
+  --color-silence: var(--tg-silence);
+  --color-silence-soft: var(--tg-silence-soft);
   --color-edge: var(--tg-edge);
   --color-node: var(--tg-node);
   --color-node-line: var(--tg-node-line);

@@ -1,7 +1,14 @@
 //! Black-box helpers for end-to-end tests against the running demo stack.
 
+use axum::Router;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode, Uri, header};
+use axum::response::{IntoResponse, Response};
 use serde_json::Value;
+use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const API: &str = "http://localhost:8090";
@@ -19,6 +26,27 @@ pub const NEW_TEMPLATE_TIMEOUT: Duration = Duration::from_secs(180);
 pub const PROBE_WARMUP: Duration = Duration::from_secs(15 * 60);
 /// First run only: how long to wait for the probe service's seed template to age past the warmup.
 pub const PROBE_WARMUP_TIMEOUT: Duration = Duration::from_secs(17 * 60);
+/// How long a fresh probe body may take to show up as a template (ingest, Kafka, logminer flush).
+pub const TEMPLATE_TIMEOUT: Duration = Duration::from_secs(120);
+/// The silence threshold the silence scenario sets on its probe template.
+pub const SILENCE_MINUTES: u32 = 2;
+/// The silence scenario keeps the probe service logging at this pace, so its log time moves on.
+pub const SILENCE_KEEPALIVE: Duration = Duration::from_secs(20);
+/// `SILENCE_MINUTES` of quiet, plus up to a 60 s detection pass, plus slack for the
+/// per-partition clock that holds detection back to the slowest assigned partition.
+pub const SILENCE_TIMEOUT: Duration = Duration::from_secs(6 * 60);
+/// Set by `make e2e-notifier`: the silence scenario then also checks the notifier's delivery.
+pub const NOTIFIER_CHECK_ENV: &str = "TAYGA_E2E_NOTIFIER";
+/// Host port of the notifier check's mock webhook; `deploy/tayga-notifier.e2e.toml` points the
+/// `e2e-mock` target at `http://host.docker.internal:18099/hook`.
+pub const NOTIFIER_MOCK_PORT: u16 = 18099;
+/// Target name of the mock in `deploy/tayga-notifier.e2e.toml`.
+pub const NOTIFIER_MOCK_TARGET: &str = "e2e-mock";
+/// How long the notifier may take to deliver an alert to the mock once it exists.
+pub const DELIVERY_TIMEOUT: Duration = Duration::from_secs(120);
+/// After `docker restart tayga-notifier`, how long to watch for a resend. The logminer
+/// re-publishes a silence alert on every 60 s pass, so this covers at least two re-publishes.
+pub const RESEND_WATCH: Duration = Duration::from_secs(150);
 pub const POLL_EVERY: Duration = Duration::from_secs(5);
 /// Spec §15 target for flag-to-story latency; reported, not asserted.
 pub const TARGET_LATENCY: Duration = Duration::from_secs(60);
@@ -120,6 +148,26 @@ impl Api {
             .as_array()
             .cloned()
             .unwrap_or_default())
+    }
+
+    /// `PUT /log-templates/{id}/silence`; returns the stored setting.
+    pub async fn put_silence(
+        &self,
+        template_id: &str,
+        enabled: bool,
+        minutes: u32,
+    ) -> anyhow::Result<Value> {
+        let res = self
+            .http
+            .put(format!(
+                "{}/api/v1/log-templates/{template_id}/silence",
+                self.base
+            ))
+            .json(&serde_json::json!({ "enabled": enabled, "minutes": minutes }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(res.json().await?)
     }
 
     pub async fn story(&self, id: &str) -> anyhow::Result<Value> {
@@ -407,6 +455,49 @@ pub async fn wait_for_service_warmup(
     }
 }
 
+/// The id of the template whose text is exactly `body`.
+pub fn template_id_of(templates: &[Value], body: &str) -> Option<String> {
+    templates
+        .iter()
+        .find(|t| t["template"].as_str() == Some(body))
+        .and_then(|t| t["template_id"].as_str().map(str::to_string))
+}
+
+/// Polls `service`'s templates matching `word` until one's text is exactly `body`. Returns its id.
+pub async fn wait_for_template(
+    api: &Api,
+    service: &str,
+    word: &str,
+    body: &str,
+    timeout: Duration,
+) -> anyhow::Result<String> {
+    let start = Instant::now();
+    let query = format!("service={service}&q={word}&since=1h");
+    loop {
+        match api.log_templates(&query).await {
+            Ok(t) => {
+                if let Some(id) = template_id_of(&t, body) {
+                    return Ok(id);
+                }
+            }
+            Err(e) => eprintln!("[e2e] poll error (continuing): {e}"),
+        }
+        anyhow::ensure!(
+            start.elapsed() < timeout,
+            "no template {body:?} in {service} after {timeout:?}"
+        );
+        tokio::time::sleep(POLL_EVERY).await;
+    }
+}
+
+/// The requests the mock received for `alert_id`.
+pub fn deliveries_of<'a>(received: &'a [Received], alert_id: &str) -> Vec<&'a Received> {
+    received
+        .iter()
+        .filter(|r| r.body["alert_id"].as_str() == Some(alert_id))
+        .collect()
+}
+
 /// Fails fast when no checkout endpoint can flag a `delay_s` trace as slow: the assembler needs
 /// ≥ 50 baseline traces and a duration above max(1.5 × p99, p99 + 100 ms) over the last 60 min.
 pub async fn ensure_checkout_baseline_detects(
@@ -435,6 +526,108 @@ pub async fn ensure_checkout_baseline_detects(
     Ok(())
 }
 
+/// One request the mock webhook received, and the status it answered with.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Received {
+    pub path: String,
+    pub content_type: Option<String>,
+    /// The body as JSON; `Value::Null` when it was not JSON.
+    pub body: Value,
+    pub status: u16,
+}
+
+#[derive(Default)]
+struct MockState {
+    script: VecDeque<u16>,
+    received: Vec<Received>,
+    delay: Duration,
+}
+
+/// A local webhook receiver for notifier tests: every request on any path is recorded and
+/// answered with the next scripted status, then 200 once the script is used up. A 429 carries
+/// `Retry-After: 1`.
+pub struct MockWebhook {
+    pub addr: SocketAddr,
+    state: Arc<Mutex<MockState>>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl MockWebhook {
+    /// Binds `addr` (port 0 for an ephemeral one); `127.0.0.1` for in-process tests, `0.0.0.0`
+    /// to be reachable from containers through `host.docker.internal`.
+    pub async fn start(addr: SocketAddr, script: &[u16]) -> anyhow::Result<Self> {
+        let state = Arc::new(Mutex::new(MockState {
+            script: script.iter().copied().collect(),
+            received: Vec::new(),
+            delay: Duration::ZERO,
+        }));
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let addr = listener.local_addr()?;
+        let app = Router::new()
+            .fallback(mock_receive)
+            .with_state(state.clone());
+        let server = tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app).await {
+                eprintln!("mock webhook stopped: {e}");
+            }
+        });
+        Ok(Self {
+            addr,
+            state,
+            server,
+        })
+    }
+
+    /// `http://<addr>/hook`.
+    pub fn url(&self) -> String {
+        format!("http://{}/hook", self.addr)
+    }
+
+    /// Delays every later response by `delay`; the request is recorded on arrival.
+    pub fn set_delay(&self, delay: Duration) {
+        self.state.lock().expect("mock state lock").delay = delay;
+    }
+
+    pub fn received(&self) -> Vec<Received> {
+        self.state.lock().expect("mock state lock").received.clone()
+    }
+}
+
+impl Drop for MockWebhook {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+async fn mock_receive(
+    State(state): State<Arc<Mutex<MockState>>>,
+    uri: Uri,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let (status, delay) = {
+        let mut s = state.lock().expect("mock state lock");
+        let status = s.script.pop_front().unwrap_or(200);
+        s.received.push(Received {
+            path: uri.path().to_string(),
+            content_type: headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string),
+            body: serde_json::from_str(&body).unwrap_or(Value::Null),
+            status,
+        });
+        (status, s.delay)
+    };
+    tokio::time::sleep(delay).await;
+    let code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    if status == 429 {
+        (code, [(header::RETRY_AFTER, "1")]).into_response()
+    } else {
+        code.into_response()
+    }
+}
+
 pub fn report(name: &str, waited: Duration) {
     let verdict = if waited <= TARGET_LATENCY {
         "within"
@@ -450,6 +643,62 @@ pub fn report(name: &str, waited: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mock_webhook_records_requests_and_follows_its_script() {
+        let mock = MockWebhook::start(SocketAddr::from(([127, 0, 0, 1], 0)), &[503, 429])
+            .await
+            .unwrap();
+        let http = reqwest::Client::new();
+        let post = || {
+            http.post(mock.url())
+                .json(&serde_json::json!({ "n": 1 }))
+                .send()
+        };
+        assert_eq!(post().await.unwrap().status(), 503);
+        let r = post().await.unwrap();
+        assert_eq!(r.status(), 429);
+        assert_eq!(r.headers()[header::RETRY_AFTER], "1");
+        assert_eq!(post().await.unwrap().status(), 200);
+        let got = mock.received();
+        assert_eq!(
+            got.iter().map(|r| r.status).collect::<Vec<_>>(),
+            [503, 429, 200]
+        );
+        assert_eq!(got[0].path, "/hook");
+        assert_eq!(got[0].content_type.as_deref(), Some("application/json"));
+        assert_eq!(got[0].body, serde_json::json!({ "n": 1 }));
+        mock.set_delay(Duration::from_millis(300));
+        let started = Instant::now();
+        assert_eq!(post().await.unwrap().status(), 200);
+        assert!(started.elapsed() >= Duration::from_millis(300));
+    }
+
+    #[test]
+    fn template_id_needs_the_exact_text() {
+        let t = [
+            serde_json::json!({ "template_id": "1", "template": "abc probe marker" }),
+            serde_json::json!({ "template_id": "2", "template": "abc probe probe marker" }),
+        ];
+        assert_eq!(
+            template_id_of(&t, "abc probe probe marker").as_deref(),
+            Some("2")
+        );
+        assert!(template_id_of(&t, "abc marker").is_none());
+    }
+
+    #[test]
+    fn deliveries_are_counted_per_alert_id() {
+        let r = |id: &str| Received {
+            path: "/hook".into(),
+            content_type: None,
+            body: serde_json::json!({ "alert_id": id }),
+            status: 200,
+        };
+        let got = [r("a"), r("b"), r("a")];
+        assert_eq!(deliveries_of(&got, "a").len(), 2);
+        assert_eq!(deliveries_of(&got, "c").len(), 0);
+    }
 
     #[test]
     fn since_flip_covers_only_the_time_after_the_flip() {

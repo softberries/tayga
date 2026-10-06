@@ -50,11 +50,12 @@ impl LagCache {
         }
     }
 
-    /// Lag of the Tayga consumer groups on `topic`, read through `brokers`.
+    /// Lag of the Tayga consumer groups (signal groups on `topic`, the notifier on
+    /// `tayga.alerts`), read through `brokers`.
     pub fn kafka(brokers: String, topic: String) -> Self {
         let fetch: LagFetch = Arc::new(move || {
             let (brokers, topic) = (brokers.clone(), topic.clone());
-            Box::pin(async move { lag::fetch(&brokers, &topic, &lag::GROUPS).await })
+            Box::pin(async move { lag::fetch_all(&brokers, &topic).await })
         });
         Self::new(fetch, LAG_TTL)
     }
@@ -360,6 +361,7 @@ mod tests {
     fn lags() -> Vec<Lag> {
         vec![Lag {
             group: "tayga-writer".into(),
+            topic: "tayga.signals".into(),
             committed: 5,
             end: 7,
             lag: 2,
@@ -964,7 +966,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             json,
-            serde_json::json!([{"group": "tayga-writer", "committed": 5, "end": 7, "lag": 2}])
+            serde_json::json!([{"group": "tayga-writer", "topic": "tayga.signals", "committed": 5, "end": 7, "lag": 2}])
         );
         call(&app, "/api/v1/pipeline/lag").await;
         assert_eq!(

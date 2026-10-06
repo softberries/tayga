@@ -48,7 +48,10 @@ fn span(id: &str) -> SpanRow {
 #[ignore = "requires ClickHouse: make it"]
 async fn migrate_is_idempotent_and_rows_roundtrip() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(
+        migrate(&s).await.unwrap(),
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    );
     assert!(migrate(&s).await.unwrap().is_empty());
 
     let store = Store::new(&s);
@@ -150,7 +153,10 @@ fn story_row(id: &str) -> StoryRow {
 #[ignore = "requires ClickHouse: run against the live stack"]
 async fn analysis_tables_roundtrip_and_baseline_queries() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(
+        migrate(&s).await.unwrap(),
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    );
     let store = Store::new(&s);
 
     let mut summaries: Vec<TraceSummaryRow> = (0..60).map(|i| summary_row(i, i % 2 == 0)).collect();
@@ -224,7 +230,10 @@ async fn analysis_tables_roundtrip_and_baseline_queries() {
 #[ignore = "requires ClickHouse: run against the live stack"]
 async fn replayed_trace_collapses_to_most_complete_row() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(
+        migrate(&s).await.unwrap(),
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    );
     let store = Store::new(&s);
 
     let full = TraceSummaryRow {
@@ -297,7 +306,10 @@ async fn replayed_trace_collapses_to_most_complete_row() {
 #[ignore = "requires ClickHouse: make it"]
 async fn slow_story_traces_are_excluded_from_baselines() {
     let s = settings();
-    assert_eq!(migrate(&s).await.unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(
+        migrate(&s).await.unwrap(),
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    );
     let store = Store::new(&s);
 
     let summaries: Vec<TraceSummaryRow> = (0..60).map(|i| summary_row(i, i % 2 == 0)).collect();
@@ -1241,5 +1253,266 @@ async fn backfill_fills_minutes_before_the_view_without_double_counting() {
         .map(|(m, _, n)| (m, n))
         .collect();
     assert_eq!(all, vec![(0, 4), (10, 3), (20, 10), (30, 3)]);
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn silence_settings_round_trip_and_latest_wins() {
+    let (s, store) = log_store().await;
+    assert_eq!(store.silence_get(1).await.unwrap(), None);
+    store.silence_put(1, true, 10).await.unwrap();
+    store.silence_put(1, true, 30).await.unwrap();
+    store.silence_put(2, true, 5).await.unwrap();
+    store.silence_put(2, false, 5).await.unwrap();
+    store.silence_put(3, true, 1440).await.unwrap();
+    assert_eq!(store.silence_get(1).await.unwrap(), Some((true, 30)));
+    assert_eq!(store.silence_get(2).await.unwrap(), Some((false, 5)));
+    assert_eq!(store.silence_get(99).await.unwrap(), None);
+    assert_eq!(
+        store.silence_enabled().await.unwrap(),
+        vec![(1, 30), (3, 1440)]
+    );
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn silence_inputs_read_template_and_service_last_hit() {
+    let (s, store) = log_store().await;
+    let now = now_ns();
+    store
+        .upsert_templates(&[
+            template(1, "checkout", now - 60 * MIN_NS),
+            template(2, "checkout", now - 50 * MIN_NS),
+            template(3, "checkout", now - 40 * MIN_NS),
+            template(4, "ghost", now - 30 * MIN_NS),
+        ])
+        .await
+        .unwrap();
+    store
+        .insert_log_hits(&[
+            hit(1, 1, now - 20 * MIN_NS, ""),
+            hit(2, 1, now - 15 * MIN_NS, ""),
+            hit(3, 2, now - MIN_NS, ""),
+        ])
+        .await
+        .unwrap();
+    let mut got = store.silence_inputs(&[1, 3, 4, 77]).await.unwrap();
+    got.sort_by_key(|i| i.template_id);
+    let ns = |v: i64| Some(v);
+    assert_eq!(got.len(), 3, "unknown id 77 is left out");
+    assert_eq!(got[0].template_id, 1);
+    assert_eq!(got[0].service, "checkout");
+    assert_eq!(got[0].t_last_ns, ns(now - 15 * MIN_NS));
+    assert_eq!(got[0].s_last_ns, ns(now - MIN_NS));
+    assert_eq!(got[0].first_seen_ns, now - 60 * MIN_NS);
+    // Template without hits in the hits TTL: falls back to its own `last_seen` (the helper
+    // stamps it at insert time), so a long silence keeps one anchor.
+    assert_eq!(got[1].template_id, 3);
+    assert!(
+        got[1].t_last_ns.is_some_and(|v| v >= now),
+        "{:?}",
+        got[1].t_last_ns
+    );
+    assert_eq!(got[1].s_last_ns, ns(now - MIN_NS));
+    // Service without any hit: no `s_last`, so it is never judged silent.
+    assert_eq!(got[2].template_id, 4);
+    assert!(got[2].t_last_ns.is_some_and(|v| v >= now));
+    assert_eq!(got[2].s_last_ns, None);
+    assert!(store.silence_inputs(&[]).await.unwrap().is_empty());
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn enum_migration_keeps_old_alert_rows_and_accepts_silence() {
+    let s = settings();
+    let server = clickhouse::Client::default().with_url(&s.url);
+    server
+        .query(&format!("CREATE DATABASE `{}`", s.database))
+        .execute()
+        .await
+        .unwrap();
+    let db = server.with_database(&s.database);
+    // Schema as of migration 0009 (log_alerts with the two-kind enum), then old rows.
+    for stmt in [
+        include_str!("../migrations/0004_log_templates.sql"),
+        include_str!("../migrations/0008_log_alerts_seasonal.sql"),
+    ] {
+        for q in tayga_store::migrate::split_statements(stmt) {
+            db.query(&q).execute().await.unwrap();
+        }
+    }
+    db.query("CREATE TABLE schema_migrations (version UInt32, applied_at DateTime DEFAULT now()) ENGINE = MergeTree ORDER BY version")
+        .execute()
+        .await
+        .unwrap();
+    for v in 1..=9u32 {
+        db.query("INSERT INTO schema_migrations (version) VALUES (?)")
+            .bind(v)
+            .execute()
+            .await
+            .unwrap();
+    }
+    let store = Store::new(&s);
+    let now = now_ns();
+    store
+        .insert_alerts(&[alert("new:1", 1, 1, now), alert("spike:1", 2, 1, now)])
+        .await
+        .unwrap();
+
+    assert_eq!(migrate(&s).await.unwrap(), vec![10, 11]);
+    let kinds: Vec<(String, i8)> = store
+        .client()
+        .query("SELECT alert_id, kind FROM log_alerts FINAL ORDER BY alert_id")
+        .fetch_all()
+        .await
+        .unwrap();
+    assert_eq!(kinds, vec![("new:1".into(), 1), ("spike:1".into(), 2)]);
+    // The client caches the table schema per instance: a fresh one sees the widened enum.
+    let store = Store::new(&s);
+    store
+        .insert_alerts(&[alert("silence:1", 3, 1, now)])
+        .await
+        .unwrap();
+    let silence: Vec<String> = store
+        .client()
+        .query("SELECT toString(kind) FROM log_alerts FINAL WHERE kind = 'silence'")
+        .fetch_all()
+        .await
+        .unwrap();
+    assert_eq!(silence, vec!["silence".to_string()]);
+
+    // A partially applied 0010 (statements ran, version not recorded) re-runs cleanly.
+    db_exec_all(
+        &store,
+        include_str!("../migrations/0010_log_template_silence.sql"),
+    )
+    .await;
+    drop_db(&s, &store).await;
+}
+
+async fn db_exec_all(store: &Store, sql: &str) {
+    for q in tayga_store::migrate::split_statements(sql) {
+        store.client().query(&q).execute().await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn deliveries_round_trip_and_latest_wins() {
+    use tayga_store::notifier::{DeliveryRow, STATUS_DELIVERED, STATUS_PENDING};
+    let (s, store) = log_store().await;
+    assert_eq!(store.delivery_get("a1", "slack").await.unwrap(), None);
+    let row = |status, attempts, err: &str| DeliveryRow {
+        alert_id: "a1".into(),
+        target: "slack".into(),
+        status,
+        attempts,
+        last_error: err.into(),
+    };
+    store
+        .delivery_put(&row(STATUS_PENDING, 1, "http 503"))
+        .await
+        .unwrap();
+    store
+        .delivery_put(&row(STATUS_DELIVERED, 2, ""))
+        .await
+        .unwrap();
+    store
+        .delivery_put(&DeliveryRow {
+            target: "hook".into(),
+            ..row(STATUS_PENDING, 1, "")
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store.delivery_get("a1", "slack").await.unwrap(),
+        Some(row(STATUS_DELIVERED, 2, ""))
+    );
+    assert_eq!(
+        store
+            .delivery_get("a1", "hook")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        STATUS_PENDING
+    );
+    assert_eq!(store.delivery_get("a2", "slack").await.unwrap(), None);
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: make it"]
+async fn logs_batch_pages_by_ts_and_id_and_truncate_empties_template_tables() {
+    let (s, store) = log_store().await;
+    let base = now_ns() - 10 * MIN_NS;
+    let log = |log_id: u64, ts: i64| LogRow {
+        log_id,
+        ts,
+        observed_ts: 0,
+        trace_id: String::new(),
+        span_id: String::new(),
+        severity_number: 9,
+        severity_text: String::new(),
+        service_name: format!("svc{}", log_id % 2),
+        body: format!("body {log_id}"),
+        resource_attrs: vec![],
+        log_attrs: vec![],
+    };
+    // Ids 1..=5 over three timestamps (ties on ts), inserted out of order and id 3 twice.
+    let logs = [
+        log(4, base + 2),
+        log(1, base),
+        log(3, base + 1),
+        log(2, base),
+        log(5, base + 2),
+        log(3, base + 1),
+    ];
+    store.insert_logs(&logs).await.unwrap();
+
+    let (mut ts, mut id) = (base - 1, u64::MAX);
+    let mut seen = Vec::new();
+    loop {
+        let page = store.logs_batch(ts, id, 2).await.unwrap();
+        let Some(last) = page.last() else { break };
+        (ts, id) = (last.ts, last.log_id);
+        seen.extend(page.iter().map(|r| r.log_id));
+    }
+    assert_eq!(seen, vec![1, 2, 3, 4, 5]);
+    // The start key is exclusive.
+    let rest = store.logs_batch(base, 1, 10).await.unwrap();
+    assert_eq!(
+        rest.iter().map(|r| r.log_id).collect::<Vec<_>>(),
+        [2, 3, 4, 5]
+    );
+    assert_eq!(rest[0].body, "body 2");
+
+    store
+        .upsert_templates(&[template(1, "a", base)])
+        .await
+        .unwrap();
+    store.insert_log_hits(&[hit(1, 1, base, "")]).await.unwrap();
+    store.truncate_templates().await.unwrap();
+    for table in ["log_templates", "log_template_hits", "log_template_minutes"] {
+        let n: u64 = store
+            .client()
+            .query(&format!("SELECT count() FROM {table}"))
+            .fetch_one()
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "{table}");
+    }
+    // The logs themselves stay.
+    assert_eq!(
+        store
+            .logs_batch(base - 1, u64::MAX, 10)
+            .await
+            .unwrap()
+            .len(),
+        5
+    );
     drop_db(&s, &store).await;
 }

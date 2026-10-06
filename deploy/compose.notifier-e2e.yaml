@@ -1,0 +1,11 @@
+# Used only by `make e2e-notifier`: points tayga-notifier at the e2e mock
+# webhook on the host (deploy/tayga-notifier.e2e.toml). The mount has the same
+# container path as the default one, so it replaces it. Docker Desktop
+# resolves host.docker.internal on its own; the extra_hosts entry makes the
+# name resolve on Linux engines too.
+services:
+  tayga-notifier:
+    volumes:
+      - ${TAYGA_ROOT}/deploy/tayga-notifier.e2e.toml:/etc/tayga/notifier.toml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

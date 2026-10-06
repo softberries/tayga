@@ -5,6 +5,7 @@ import lag from '../api/__fixtures__/pipeline-lag.json'
 import { clearOutage } from '../app/apiStatus'
 import { LIVE_INTERVAL_MS } from '../app/live'
 import { formatUntil } from '../app/search'
+import { ALERTS_LAG_SCALE_FLOOR, ALERTS_TOPIC, LAG_SCALE_FLOOR, lagScales } from '../features/pipeline/LagList'
 import { renderApp } from '../test/renderApp'
 
 // ECharts needs a canvas; jsdom has none. The chart is covered by the screenshots.
@@ -58,6 +59,7 @@ describe('status strip', () => {
         'tayga-writer': healthy(1),
         'tayga-assembler': [[minute(120_000), 1], [minute(60_000), 1], [minute(0), 0]],
         'tayga-logminer': healthy(1),
+        'tayga-notifier': healthy(1),
         'tayga-api': healthy(1),
       },
       metrics: [[minute(120_000), 1], [minute(60_000), 3]],
@@ -65,7 +67,7 @@ describe('status strip', () => {
     renderApp('/pipeline')
     const strip = await screen.findByRole('list', { name: 'Job status' })
     const chips = within(strip).getAllByRole('listitem')
-    expect(chips.map((c) => c.getAttribute('data-state'))).toEqual(['up', 'up', 'down', 'up', 'up'])
+    expect(chips.map((c) => c.getAttribute('data-state'))).toEqual(['up', 'up', 'down', 'up', 'up', 'up'])
     const down = chips[2] as HTMLElement
     expect(down).toHaveTextContent('assembler')
     expect(down).toHaveTextContent('down')
@@ -76,7 +78,7 @@ describe('status strip', () => {
 
   it('treats a job with no recent sample as down', async () => {
     stub({
-      up: { 'tayga-ingest': [[minute(30 * 60_000), 1]], 'tayga-writer': healthy(1), 'tayga-assembler': healthy(1), 'tayga-logminer': healthy(1), 'tayga-api': healthy(1) },
+      up: { 'tayga-ingest': [[minute(30 * 60_000), 1]], 'tayga-writer': healthy(1), 'tayga-assembler': healthy(1), 'tayga-logminer': healthy(1), 'tayga-notifier': healthy(1), 'tayga-api': healthy(1) },
       metrics: [[minute(120_000), 1], [minute(60_000), 2]],
     })
     renderApp('/pipeline')
@@ -178,22 +180,61 @@ describe('consumer lag', () => {
     renderApp('/pipeline')
     const list = await screen.findByRole('list', { name: 'Consumer lag' })
     const rows = within(list).getAllByRole('listitem')
-    expect(rows).toHaveLength(3)
+    expect(rows).toHaveLength(4)
     expect(rows[1]).toHaveTextContent('tayga-assembler')
     expect(rows[1]).toHaveTextContent('1.2k')
     expect(rows[1]).toHaveTextContent('committed 17,327,899 · end 17,329,052')
+    expect(rows[1]).toHaveTextContent('tayga.signals · committed')
+    expect(rows[3]).toHaveTextContent('tayga-notifier')
+    expect(rows[3]).toHaveTextContent('tayga.alerts · committed 2,487 · end 2,487')
   })
 
   it('scales bars to at least 1000 messages and keeps an empty track at zero lag', async () => {
+    const sig = 'tayga.signals'
     stub({
       up: { 'tayga-ingest': healthy(1) },
       metrics: [[minute(120_000), 1], [minute(60_000), 2]],
-      lag: { body: [{ group: 'a', committed: 1, end: 21, lag: 20 }, { group: 'b', committed: 5, end: 5, lag: 0 }, { group: 'c', committed: 0, end: 500, lag: 500 }] },
+      lag: {
+        body: [
+          { group: 'a', topic: sig, committed: 1, end: 21, lag: 20 },
+          { group: 'b', topic: sig, committed: 5, end: 5, lag: 0 },
+          { group: 'c', topic: sig, committed: 0, end: 500, lag: 500 },
+        ],
+      },
     })
     renderApp('/pipeline')
     const rows = within(await screen.findByRole('list', { name: 'Consumer lag' })).getAllByRole('listitem')
     const width = (i: number) => (rows[i]?.querySelector('.h-full') as HTMLElement).style.width
     expect([width(0), width(1), width(2)]).toEqual(['2%', '0%', '50%'])
+  })
+
+  it('scales each topic on its own, so a stuck notifier shows next to a large signal lag', async () => {
+    stub({
+      up: { 'tayga-ingest': healthy(1) },
+      metrics: [[minute(120_000), 1], [minute(60_000), 2]],
+      lag: {
+        body: [
+          { group: 'tayga-writer', topic: 'tayga.signals', committed: 0, end: 40_000, lag: 40_000 },
+          { group: 'tayga-assembler', topic: 'tayga.signals', committed: 30_000, end: 40_000, lag: 10_000 },
+          { group: 'tayga-notifier', topic: 'tayga.alerts', committed: 100, end: 130, lag: 30 },
+        ],
+      },
+    })
+    renderApp('/pipeline')
+    const rows = within(await screen.findByRole('list', { name: 'Consumer lag' })).getAllByRole('listitem')
+    const width = (i: number) => (rows[i]?.querySelector('.h-full') as HTMLElement).style.width
+    // 30 alerts against 40,000 signal messages would be 0.075%; on its own topic it fills the bar.
+    expect([width(0), width(1), width(2)]).toEqual(['100%', '25%', '100%'])
+    expect(rows[2]).toHaveTextContent('tayga.alerts')
+    expect(rows[0]).toHaveTextContent('tayga.signals')
+  })
+
+  it('floors the alerts scale at 10 alerts, the signals scale at 1000 messages', () => {
+    const lag = (group: string, topic: string, n: number) => ({ group, topic, committed: 0, end: n, lag: n })
+    const scales = lagScales([lag('w', 'tayga.signals', 20), lag('n', ALERTS_TOPIC, 3)])
+    expect(scales.get('tayga.signals')).toBe(LAG_SCALE_FLOOR)
+    expect(scales.get(ALERTS_TOPIC)).toBe(ALERTS_LAG_SCALE_FLOOR)
+    expect(lagScales([lag('n', ALERTS_TOPIC, 42), lag('m', ALERTS_TOPIC, 7)]).get(ALERTS_TOPIC)).toBe(42)
   })
 
   it('keeps the last lag and says so when a refresh fails', async () => {

@@ -84,3 +84,22 @@ export async function postJson(path: string, body: unknown): Promise<void> {
   }
   if (!res.ok) throw new ApiError(res.status, await errorMessage(res), res.status === 429 ? retryAfter(res) : undefined)
 }
+
+/**
+ * PUT JSON to `/api/v1{path}` and parse the JSON answer as `T`. Non-2xx and network failures
+ * throw an `ApiError` like `postJson`.
+ */
+export async function putJson<T>(path: string, body: unknown): Promise<T> {
+  let res: Response
+  try {
+    res = await fetch(apiUrl(path), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(body),
+    })
+  } catch (e) {
+    throw new ApiError(0, e instanceof Error ? e.message : 'network error')
+  }
+  if (!res.ok) throw new ApiError(res.status, await errorMessage(res), res.status === 429 ? retryAfter(res) : undefined)
+  return (await res.json()) as T
+}

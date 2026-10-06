@@ -4,7 +4,7 @@ import type { SeriesTone } from '../../components/charts/TimeSeries'
 import { bytes, compact, duration } from '../../lib/format'
 
 /** Scrape jobs, in pipeline order (recorder job names). */
-export const JOBS = ['tayga-ingest', 'tayga-writer', 'tayga-assembler', 'tayga-logminer', 'tayga-api'] as const
+export const JOBS = ['tayga-ingest', 'tayga-writer', 'tayga-assembler', 'tayga-logminer', 'tayga-notifier', 'tayga-api'] as const
 
 /** A job whose newest `up` sample is older than this counts as not scraped (the recorder ticks every 15 s). */
 export const STALE_MS = 3 * 60_000

@@ -27,6 +27,7 @@ axum = "0.8.9"
 tower = { version = "0.5", features = ["util"] }
 flate2 = "1"
 hex = "0.4.3"
+httpdate = "1.0.3"
 xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 futures = "0.3.34"
 clap = { version = "4", features = ["derive"] }
@@ -46,7 +47,9 @@ tayga-model = { path = "crates/tayga-model" }
 tayga-analysis = { path = "crates/tayga-analysis" }
 tayga-drain = { path = "crates/tayga-drain" }
 tayga-kafka = { path = "crates/tayga-kafka" }
+tayga-logminer = { path = "crates/tayga-logminer" }
 tayga-store = { path = "crates/tayga-store" }
 tayga-devtools = { path = "crates/tayga-devtools" }
+tayga-e2e = { path = "crates/tayga-e2e" }
 prometheus-client = "0.25.1"
 rust-embed = { version = "8.12.0", features = ["mime-guess"] }

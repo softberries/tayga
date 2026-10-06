@@ -2,7 +2,7 @@
 //! inserts its own rows with random ids and `now`-based timestamps, reads them back and drops
 //! the database. Runs on the empty `make it` ClickHouse and against the live stack alike.
 
-use tayga_api::model::OverviewView;
+use tayga_api::model::{OverviewView, SilenceSetting};
 use tayga_api::params::{
     AlertFilter, GroupFilter, SeriesKind, SeriesQuery, TemplateFilter, TraceFilter, Window,
 };
@@ -530,6 +530,162 @@ async fn reads_seeded_log_templates_alerts_and_trace_links() {
     assert_eq!(c.len(), 1);
     assert_eq!(c[0].alert, None);
     assert!(r.trace_log_templates(&hex32()).await.unwrap().is_empty());
+
+    Store::new(&s)
+        .client()
+        .query(&format!("DROP DATABASE `{}`", s.database))
+        .execute()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: make it, or TAYGA_IT_CLICKHOUSE against the live stack"]
+async fn silence_settings_persist_and_silence_alerts_do_not_mark_templates_alerting() {
+    let s = settings();
+    migrate(&s).await.unwrap();
+    let store = Store::new(&s);
+    let now = now_ns();
+    let min = 60_000_000_000_i64;
+    let (quiet, busy): (u64, u64) = (rand::random::<u32>().into(), rand::random::<u32>().into());
+    let trace = hex32();
+    let template = |id: u64, service: &str| LogTemplateRow {
+        template_id: id,
+        service: service.into(),
+        template: format!("tmpl {id} <*>"),
+        first_seen: now - 30 * min,
+        last_seen: now,
+        count: 1,
+        max_severity: 9,
+        sample: "s".into(),
+        version: 1,
+    };
+    store
+        .upsert_templates(&[template(quiet, "cart"), template(busy, "payment")])
+        .await
+        .unwrap();
+    let hit = |log_id: u64, tmpl: u64, service: &str, trace: &str| LogHitRow {
+        log_id,
+        template_id: tmpl,
+        service: service.into(),
+        ts: now - min,
+        severity_number: 9,
+        trace_id: trace.into(),
+        span_id: "0000000000000002".into(),
+    };
+    let base: u64 = rand::random::<u32>().into();
+    store
+        .insert_log_hits(&[
+            hit(base, quiet, "cart", &trace),
+            hit(base + 1, busy, "payment", ""),
+        ])
+        .await
+        .unwrap();
+    // A silence alert and a `new` alert, both active now, on different templates.
+    let alert = |id: &str, kind: i8, tmpl: u64, service: &str| LogAlertRow {
+        alert_id: id.into(),
+        kind,
+        template_id: tmpl,
+        service: service.into(),
+        template: format!("tmpl {tmpl} <*>"),
+        started_at: now - 5 * min,
+        last_at: now,
+        window_count: 0,
+        peak_count: 0,
+        baseline_per_window: 1.0,
+        example_trace_ids: vec![],
+        version: 1,
+        baseline_day: None,
+        baseline_week: None,
+    };
+    let (silence_id, new_id) = (hex32(), hex32());
+    store
+        .insert_alerts(&[
+            alert(&silence_id, 3, quiet, "cart"),
+            alert(&new_id, 1, busy, "payment"),
+        ])
+        .await
+        .unwrap();
+
+    let r = ChRepo::new(&s);
+    let hour = last(3600);
+    let on = SilenceSetting {
+        enabled: true,
+        minutes: 15,
+    };
+
+    // Settings: unknown template refused and nothing written; known template persists.
+    assert_eq!(r.silence(&quiet.to_string()).await.unwrap(), None);
+    assert!(!r.put_silence("1", on).await.unwrap());
+    assert_eq!(r.silence("1").await.unwrap(), None);
+    assert!(r.put_silence(&quiet.to_string(), on).await.unwrap());
+    assert_eq!(r.silence(&quiet.to_string()).await.unwrap(), Some(on));
+    assert_eq!(r.silence(&busy.to_string()).await.unwrap(), None);
+
+    // The list reflects it, and the silence alert does not make the template `alerting`
+    // while the `new` alert does.
+    let list = r
+        .log_templates(&TemplateFilter {
+            window: hour,
+            service: None,
+            q: None,
+        })
+        .await
+        .unwrap();
+    let find = |id: u64| {
+        list.iter()
+            .find(|t| t.template.template_id == id.to_string())
+            .expect("listed")
+    };
+    assert!(find(quiet).silence_enabled);
+    assert!(!find(busy).silence_enabled);
+    assert!(!find(quiet).template.alerting, "silence is not alerting");
+    assert!(find(busy).template.alerting);
+    let detail = r
+        .log_template(&quiet.to_string(), hour)
+        .await
+        .unwrap()
+        .expect("exists");
+    assert!(!detail.template.alerting);
+    assert_eq!(detail.alerts.len(), 1, "the silence alert is still listed");
+    assert_eq!(detail.alerts[0].kind, "silence");
+
+    // Alert list: the silence kind filters and comes back as stored; the overview counts it.
+    let silent = r
+        .log_alerts(&AlertFilter {
+            window: last(86_400),
+            kind: Some("silence".into()),
+            service: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(silent.len(), 1);
+    assert_eq!(silent[0].alert_id, silence_id);
+    assert_eq!(silent[0].window_count, 0);
+    assert!(silent[0].example_traces.is_empty() && silent[0].active);
+    assert_eq!(r.overview(last(3600)).await.unwrap().active_alerts, 2);
+
+    // A trace hit proves the template was not silent: no alert label from a silence alert.
+    let links = r.trace_log_templates(&trace).await.unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].alert, None);
+
+    // Switching off keeps the minutes and the latest write wins.
+    let off = SilenceSetting {
+        enabled: false,
+        minutes: 15,
+    };
+    assert!(r.put_silence(&quiet.to_string(), off).await.unwrap());
+    assert_eq!(r.silence(&quiet.to_string()).await.unwrap(), Some(off));
+    let list = r
+        .log_templates(&TemplateFilter {
+            window: hour,
+            service: None,
+            q: None,
+        })
+        .await
+        .unwrap();
+    assert!(list.iter().all(|t| !t.silence_enabled));
 
     Store::new(&s)
         .client()

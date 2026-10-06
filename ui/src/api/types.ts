@@ -27,6 +27,7 @@ import type {
   RootCauseSchema,
   SearchGroupSchema,
   SearchTemplateSchema,
+  SilenceSettingSchema,
   SearchViewSchema,
   SeriesKindSchema,
   SeriesViewSchema,
@@ -87,6 +88,7 @@ export type LogTemplateListItem = z.infer<typeof LogTemplateListItemSchema>
 export type LogTemplateView = z.infer<typeof LogTemplateViewSchema>
 export type TemplateHit = z.infer<typeof TemplateHitSchema>
 export type LogTemplateDetail = z.infer<typeof LogTemplateDetailSchema>
+export type SilenceSetting = z.infer<typeof SilenceSettingSchema>
 export type StoriesSeries = z.infer<typeof StoriesSeriesSchema>
 export type OverviewView = z.infer<typeof OverviewSchema>
 export type TraceHit = z.infer<typeof TraceHitSchema>

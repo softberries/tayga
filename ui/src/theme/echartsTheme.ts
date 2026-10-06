@@ -29,6 +29,7 @@ export interface ChartTokens {
   err: string
   slow: string
   ok: string
+  silence: string
   accent: string
   fontSans: string
   fontMono: string
@@ -49,6 +50,7 @@ export function readChartTokens(root: Element = document.documentElement): Chart
     err: v('err'),
     slow: v('slow'),
     ok: v('ok'),
+    silence: v('silence'),
     accent: v('accent'),
     fontSans: v('font-sans'),
     fontMono: v('font-mono'),

@@ -12,7 +12,7 @@ COMPOSE := docker compose --project-directory $(DEMO_DIR) \
 	-f $(TAYGA_ROOT)/deploy/compose.tayga.yaml
 INFRA := docker compose -p tayga-it -f $(TAYGA_ROOT)/deploy/compose.infra.yaml
 
-.PHONY: up up-extras ui-dev ui-e2e down ps logs infra-up infra-down it flags-reset flag verify-raw capture e2e
+.PHONY: up up-extras ui-dev ui-e2e down ps logs infra-up infra-down it flags-reset flag verify-raw capture e2e e2e-notifier
 
 up:
 	git submodule update --init
@@ -63,3 +63,16 @@ capture:
 
 e2e: flags-reset
 	cargo test -p tayga-e2e -- --ignored --test-threads=1 --nocapture
+
+# Live notifier check: recreates tayga-notifier with one webhook target, the
+# e2e mock on the host (deploy/compose.notifier-e2e.yaml), runs the silence
+# scenario with the delivery check, then recreates it with the default,
+# target-less config whether the run passed or not.
+NOTIFIER_E2E := -f $(TAYGA_ROOT)/deploy/compose.notifier-e2e.yaml
+
+e2e-notifier: flags-reset
+	cargo test -p tayga-e2e --test scenarios --no-run
+	$(COMPOSE) $(NOTIFIER_E2E) up -d --no-deps tayga-notifier
+	TAYGA_E2E_NOTIFIER=1 cargo test -p tayga-e2e --test scenarios -- --ignored --exact \
+		silence_alert_and_delivery --nocapture; status=$$?; \
+	$(COMPOSE) up -d --no-deps tayga-notifier; exit $$status

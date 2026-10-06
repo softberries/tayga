@@ -41,6 +41,8 @@ pub struct LogminerMetrics {
     /// Failed saves of the new-template watermark to `logminer_state`.
     pub state_save_failures: Counter,
     /// Template windows not judged for a spike, by reason.
+    /// Templates currently silent (silence alerts being kept), set each pass.
+    pub silence_alerts: Gauge,
     pub spike_skipped: Family<ReasonLabel, Counter>,
     /// Failed seasonal comparator lookups (the tick fell back to flat).
     pub seasonal_failures: Counter,
@@ -61,6 +63,7 @@ impl Default for LogminerMetrics {
             detect_seconds: Histogram::new(exponential_buckets(0.01, 2.0, 12)),
             data_lag_seconds: Gauge::default(),
             state_save_failures: Counter::default(),
+            silence_alerts: Gauge::default(),
             spike_skipped: Family::default(),
             seasonal_failures: Counter::default(),
             new_suppressed: Family::default(),
@@ -117,6 +120,11 @@ impl LogminerMetrics {
             m.state_save_failures.clone(),
         );
         registry.register(
+            "tayga_logminer_silence_alerts",
+            "Templates currently silent (log time) with silence alerts enabled",
+            m.silence_alerts.clone(),
+        );
+        registry.register(
             "tayga_logminer_spike_skipped",
             "Spike candidates not judged, by reason (coverage: under half the baseline minutes had logs)",
             m.spike_skipped.clone(),
@@ -138,7 +146,7 @@ impl LogminerMetrics {
                 .get_or_create(&ReasonLabel::new(PRE_EPOCH_MATCH)),
         );
         // Export both series at 0 so the family is visible before the first alert.
-        for kind in [AlertKind::New, AlertKind::Spike] {
+        for kind in [AlertKind::New, AlertKind::Spike, AlertKind::Silence] {
             drop(m.alerts.get_or_create(&KindLabel::new(kind.as_str())));
         }
         m
@@ -155,6 +163,7 @@ mod tests {
         let m = LogminerMetrics::register(&mut registry);
         m.logs_mined.inc();
         m.templates.set(3);
+        m.silence_alerts.set(2);
         m.alerts.get_or_create(&KindLabel::new("new")).inc();
         m.detect_seconds.observe(0.015);
         m.data_lag_seconds.set(2.5);
@@ -168,6 +177,7 @@ mod tests {
             "tayga_logminer_cluster_cap_hits_total 0",
             "tayga_logminer_write_failures_total 0",
             "tayga_logminer_templates 3",
+            "tayga_logminer_silence_alerts 2",
             "tayga_logminer_alerts_total{kind=\"new\"} 1",
             "tayga_logminer_alerts_total{kind=\"spike\"} 0",
             "# TYPE tayga_logminer_detect_seconds histogram",

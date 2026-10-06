@@ -33,6 +33,7 @@ pub fn default_targets() -> Vec<Target> {
         t("tayga-writer", "http://tayga-writer:9100/metrics"),
         t("tayga-assembler", "http://tayga-assembler:9100/metrics"),
         t("tayga-logminer", "http://tayga-logminer:9100/metrics"),
+        t("tayga-notifier", "http://tayga-notifier:9100/metrics"),
     ]
 }
 
@@ -247,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn default_targets_cover_the_four_services() {
+    fn default_targets_cover_the_five_services() {
         let jobs: Vec<String> = default_targets().into_iter().map(|t| t.job).collect();
         assert_eq!(
             jobs,
@@ -255,7 +256,8 @@ mod tests {
                 "tayga-ingest",
                 "tayga-writer",
                 "tayga-assembler",
-                "tayga-logminer"
+                "tayga-logminer",
+                "tayga-notifier"
             ]
         );
     }

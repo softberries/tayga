@@ -1,0 +1,19 @@
+# tayga-notifier settings for `make e2e-notifier` only, mounted by
+# deploy/compose.notifier-e2e.yaml in place of deploy/tayga-notifier.toml.
+# The one target is the e2e crate's mock webhook, which the silence scenario
+# starts on the host's port 18099; the container reaches the host through
+# host.docker.internal. `make e2e-notifier` recreates the notifier with the
+# default, target-less config when the run ends.
+
+[notifier]
+public_url = "http://localhost:8090"
+kinds = ["new", "spike", "silence"]
+max_attempts = 8
+timeout_secs = 10
+max_age_secs = 3600
+breaker_cooldown_secs = 300
+
+[[notifier.targets]]
+name = "e2e-mock"
+kind = "webhook"
+url = "http://host.docker.internal:18099/hook"

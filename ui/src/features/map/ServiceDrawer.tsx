@@ -25,6 +25,7 @@ import { Skeleton } from '../../components/ui/Skeleton'
 import { RefreshNote, loadFailed } from '../../components/ui/StaleNote'
 import { cx } from '../../lib/cx'
 import { ago, compact, duration, percent } from '../../lib/format'
+import { countVsBaseline } from '../logs/model'
 import { endpointOf, splitSummary } from '../stories/model'
 import { isFailingEdge } from '../stories/mapLayout'
 import { HealthRing } from './ServiceNode'
@@ -207,7 +208,13 @@ function Stories({ groups, range, service, nowMs }: { groups: readonly StoryGrou
   )
 }
 
-type Signal = { kind: 'new' | 'spike' | 'alerting'; templateId: string; template: string; detail: string; active: boolean }
+type Signal = { kind: 'new' | 'spike' | 'silence' | 'alerting'; templateId: string; template: string; detail: string; active: boolean }
+
+function signalDetail(a: LogAlertView): string {
+  if (a.kind === 'new') return `${a.window_count} in its first window`
+  if (a.kind === 'silence') return countVsBaseline(a)
+  return `${a.peak_count} vs ${a.baseline_per_window.toFixed(1)} / window`
+}
 
 /**
  * One signal per template: its latest alert (active ones first), then templates flagged as
@@ -225,7 +232,7 @@ export function logSignals(alerts: readonly LogAlertView[], templates: readonly 
       templateId: a.template_id,
       template: a.template,
       active: a.active,
-      detail: a.kind === 'new' ? `${a.window_count} in its first window` : `${a.peak_count} vs ${a.baseline_per_window.toFixed(1)} / window`,
+      detail: signalDetail(a),
     })
   }
   for (const t of templates) {

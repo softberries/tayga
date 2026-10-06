@@ -230,14 +230,14 @@ export function validateTracesSearch(s: Record<string, unknown>): TracesSearch {
 
 /** `/logs/alerts` search: the API's kind and service filters, and an active-only toggle. */
 export interface LogAlertsSearch {
-  kind?: 'new' | 'spike'
+  kind?: 'new' | 'spike' | 'silence'
   service?: string
   /** Only alerts that are still firing. */
   active?: true
 }
 
 export function validateLogAlertsSearch(s: Record<string, unknown>): LogAlertsSearch {
-  return { kind: s.kind === 'new' || s.kind === 'spike' ? s.kind : undefined, service: str(s.service, 200), active: flag(s.active) }
+  return { kind: s.kind === 'new' || s.kind === 'spike' || s.kind === 'silence' ? s.kind : undefined, service: str(s.service, 200), active: flag(s.active) }
 }
 
 /** `/logs/templates` search: the API's service filter and text search (`q`, at most 200 chars). */

@@ -26,6 +26,7 @@ const KINDS = [
   { value: 'all', label: 'All' },
   { value: 'new', label: 'New' },
   { value: 'spike', label: 'Spike' },
+  { value: 'silence', label: 'Silence' },
 ] as const
 
 function TableSkeleton() {
@@ -111,7 +112,7 @@ export function LogAlertsPage() {
       <Card className="flex min-w-0 flex-col gap-2 px-4 py-3.5">
         <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
           <PanelTitle>Alerts per {stepWord(timelineStep(range.secs))}</PanelTitle>
-          <span className="text-xs text-muted">alerts started in this window, by kind</span>
+          <span className="text-xs text-muted">new and spike by start, silence by latest detection</span>
           <ul aria-label="Legend" className="m-0 flex list-none gap-3 p-0 text-xs text-muted">
             <li className="flex items-center gap-1.5">
               <span aria-hidden className="size-2 rounded-full bg-accent" />
@@ -120,6 +121,10 @@ export function LogAlertsPage() {
             <li className="flex items-center gap-1.5">
               <span aria-hidden className="size-2 rounded-full bg-slow" />
               spike
+            </li>
+            <li className="flex items-center gap-1.5">
+              <span aria-hidden className="size-2 rounded-full bg-silence" />
+              silence
             </li>
           </ul>
         </div>
@@ -143,7 +148,7 @@ export function LogAlertsPage() {
         ) : data === undefined ? null : data.length === 0 ? (
           <EmptyState
             title={filtered ? 'No alerts match these filters' : 'No log alerts in this window'}
-            description={filtered ? 'Clear a filter to see more.' : `No template was new or spiked in ${rangePhrase(range)}.${widerHint(range, 'alerts')}`}
+            description={filtered ? 'Clear a filter to see more.' : `No template was new, spiked or went silent in ${rangePhrase(range)}.${widerHint(range, 'alerts')}`}
             action={
               filtered ? (
                 <Button size="sm" onClick={() => onSearch({ kind: undefined, service: undefined, active: undefined })}>

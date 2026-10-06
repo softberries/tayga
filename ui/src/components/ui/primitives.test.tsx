@@ -63,6 +63,7 @@ describe('Badge', () => {
     ['slow', 'text-slow'],
     ['new', 'text-on-accent'],
     ['spike', 'text-on-slow'],
+    ['silence', 'text-silence'],
     ['ok', 'text-ok'],
   ] as const)('%s uses its tokens', (kind, cls) => {
     render(<Badge kind={kind}>{kind}</Badge>)
