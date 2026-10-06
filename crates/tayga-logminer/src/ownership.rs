@@ -30,6 +30,12 @@ impl Ownership {
         }
     }
 
+    /// Forgets every service, on a new Kafka assignment: ownership is then relearned from the
+    /// records of the partitions assigned now.
+    pub fn clear(&mut self) {
+        self.last_seen_ns.clear();
+    }
+
     /// Services mined within the window ending at `now_ns`, sorted. Expired ones are dropped.
     pub fn owned(&mut self, now_ns: i64) -> Vec<String> {
         let window = self.window_ns;
@@ -67,6 +73,17 @@ mod tests {
         o.touch("b", 50 * MIN_NS);
         assert_eq!(o.owned(61 * MIN_NS), ["b"]);
         assert!(o.owned(111 * MIN_NS).is_empty());
+    }
+
+    #[test]
+    fn clear_forgets_every_service_and_touch_relearns() {
+        let mut o = Ownership::new(60);
+        o.touch("a", 10 * MIN_NS);
+        o.touch("b", 10 * MIN_NS);
+        o.clear();
+        assert!(o.owned(11 * MIN_NS).is_empty());
+        o.touch("b", 12 * MIN_NS);
+        assert_eq!(o.owned(13 * MIN_NS), ["b"]);
     }
 
     #[test]

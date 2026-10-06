@@ -796,6 +796,46 @@ async fn logminer_state_round_trips_and_keeps_latest() {
 
 #[tokio::test]
 #[ignore = "requires ClickHouse: run against the live stack"]
+async fn per_partition_and_per_replica_state_keys_round_trip_by_prefix() {
+    let (s, store) = log_store().await;
+    assert!(store.state_get_prefix("wm").await.unwrap().is_empty());
+    store.state_put_many(&[]).await.unwrap();
+    store.state_put("wm", 1).await.unwrap();
+    store
+        .state_put_many(&[("wm:p0".into(), 10), ("wm:p1".into(), 11)])
+        .await
+        .unwrap();
+    store
+        .state_put_many(&[("wm:p1".into(), 12), ("hb:a".into(), 5)])
+        .await
+        .unwrap();
+    store.state_put("wmx", 9).await.unwrap();
+    assert_eq!(
+        store.state_get_prefix("wm:").await.unwrap(),
+        [("wm:p0".to_string(), 10), ("wm:p1".to_string(), 12)]
+    );
+    assert_eq!(
+        store.state_get_prefix("wm").await.unwrap(),
+        [
+            ("wm".to_string(), 1),
+            ("wm:p0".to_string(), 10),
+            ("wm:p1".to_string(), 12),
+            ("wmx".to_string(), 9)
+        ]
+    );
+    assert_eq!(store.state_get("wm:p1").await.unwrap(), Some(12));
+    // A prefix is matched literally: `_` and `%` are not wildcards.
+    store.state_put("a_b", 3).await.unwrap();
+    store.state_put("axb", 4).await.unwrap();
+    assert_eq!(
+        store.state_get_prefix("a_").await.unwrap(),
+        [("a_b".to_string(), 3)]
+    );
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
 async fn templates_upsert_latest_version_wins() {
     let (s, store) = log_store().await;
     let now = now_ns();

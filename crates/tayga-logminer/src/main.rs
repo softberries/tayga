@@ -1,12 +1,14 @@
 use prometheus_client::registry::Registry;
-use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
+use rdkafka::consumer::{
+    BaseConsumer, CommitMode, Consumer, ConsumerContext, Rebalance, StreamConsumer,
+};
 use rdkafka::message::{BorrowedMessage, Headers};
 use rdkafka::producer::{FutureProducer, FutureRecord};
-use rdkafka::{Message, Offset, TopicPartitionList};
+use rdkafka::{ClientContext, Message, Offset, TopicPartitionList};
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tayga_common::metrics::KindLabel;
 use tayga_common::retry::retry_until;
@@ -19,7 +21,8 @@ use tayga_drain::drain::DrainConfig;
 use tayga_drain::preprocess::masking_version;
 use tayga_kafka::KafkaSettings;
 use tayga_logminer::config::{
-    DrainSettings, KEY_EPOCH_START, KEY_HEARTBEAT, KEY_MASKING_VERSION, KEY_WATERMARK,
+    DrainSettings, KEY_EPOCH_START, KEY_MASKING_VERSION, KEY_WATERMARK, Watermarks, heartbeat_key,
+    watermark_key,
 };
 use tayga_logminer::metrics::{LogminerMetrics, PRE_EPOCH_MATCH, ReasonLabel};
 use tayga_logminer::miner::{Miner, alert_from_row, alert_json, alert_row};
@@ -199,6 +202,113 @@ fn now_ns() -> i64 {
         .unwrap_or(0)
 }
 
+/// One assignment change seen by a rebalance callback: the `tayga.logs` partitions revoked or
+/// assigned. Under the eager protocol (the default) a revoke names every assigned partition and
+/// an assign the whole new set; under the cooperative one, both are increments.
+#[derive(Debug, Clone, PartialEq)]
+enum Change {
+    Revoke(Vec<i32>),
+    Assign(Vec<i32>),
+}
+
+/// Consumer context that records assignment changes. rdkafka 0.39 runs the rebalance callbacks
+/// inside `recv`, on the main task: no ClickHouse call can be awaited there and the loop's state
+/// is out of reach. So the callbacks only record the change, in order, and the main loop applies
+/// it ([`on_rebalance`]) before it handles the record `recv` returned.
+struct Rebalances {
+    topic: String,
+    changes: Mutex<Vec<Change>>,
+}
+
+impl Rebalances {
+    fn new(topic: &str) -> Self {
+        Self {
+            topic: topic.to_string(),
+            changes: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn record(&self, change: Change) {
+        tracing::info!(?change, "kafka rebalance");
+        self.changes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(change);
+    }
+
+    /// The changes since the last call, oldest first.
+    fn take(&self) -> Vec<Change> {
+        std::mem::take(&mut *self.changes.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+}
+
+impl ClientContext for Rebalances {}
+
+impl ConsumerContext for Rebalances {
+    /// Before partitions are revoked. Pending work is flushed by the main loop right after
+    /// (see [`on_rebalance`]).
+    fn pre_rebalance(&self, _consumer: &BaseConsumer<Self>, rebalance: &Rebalance<'_>) {
+        if let Rebalance::Revoke(tpl) = rebalance {
+            self.record(Change::Revoke(topic_partitions(tpl, &self.topic)));
+        }
+    }
+
+    /// After partitions are assigned, so the consumer reads them once the main loop resumes.
+    fn post_rebalance(&self, _consumer: &BaseConsumer<Self>, rebalance: &Rebalance<'_>) {
+        match rebalance {
+            Rebalance::Assign(tpl) => {
+                self.record(Change::Assign(topic_partitions(tpl, &self.topic)));
+            }
+            Rebalance::Error(e) => tracing::warn!(error = %e, "kafka rebalance failed"),
+            Rebalance::Revoke(_) => {}
+        }
+    }
+}
+
+type LogConsumer = StreamConsumer<Rebalances>;
+
+/// Partitions of `topic` in `tpl`.
+fn topic_partitions(tpl: &TopicPartitionList, topic: &str) -> Vec<i32> {
+    tpl.elements()
+        .iter()
+        .filter(|e| e.topic() == topic)
+        .map(|e| e.partition())
+        .collect()
+}
+
+/// The assigned partitions after `changes`, applied in order to `current`; sorted.
+fn apply_changes(current: &[i32], changes: &[Change]) -> Vec<i32> {
+    let mut set: BTreeSet<i32> = current.iter().copied().collect();
+    for change in changes {
+        match change {
+            Change::Revoke(ps) => ps.iter().for_each(|p| {
+                set.remove(p);
+            }),
+            Change::Assign(ps) => set.extend(ps),
+        }
+    }
+    set.into_iter().collect()
+}
+
+/// This replica's id in its heartbeat key: the hostname (`HOSTNAME`, which Docker sets to the
+/// container id, else the kernel's), else a random id chosen at start.
+fn replica_id() -> String {
+    pick_replica_id(
+        std::env::var("HOSTNAME").ok(),
+        std::fs::read_to_string("/proc/sys/kernel/hostname").ok(),
+        rand::random::<u64>(),
+    )
+}
+
+fn pick_replica_id(env: Option<String>, kernel: Option<String>, random: u64) -> String {
+    [env, kernel]
+        .into_iter()
+        .flatten()
+        .map(|h| h.trim().to_string())
+        .find(|h| !h.is_empty())
+        .unwrap_or_else(|| format!("replica-{random:016x}"))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tayga_common::init_logging();
@@ -210,9 +320,9 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     settings.kafka.validate()?;
     let cfg = &settings.logminer;
     cfg.validate()?;
-    let detect_cfg = cfg.detect();
     let store = Store::new(&settings.clickhouse);
-    tayga_kafka::ensure_topic(&settings.kafka).await?;
+    // The logs topic, and the signals topic ingest also writes to.
+    tayga_kafka::ensure_topics(&settings.kafka).await?;
     tayga_kafka::ensure_topic(&KafkaSettings {
         topic: cfg.alerts_topic.clone(),
         partitions: ALERTS_PARTITIONS,
@@ -225,35 +335,12 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     let mut registry = Registry::default();
     let metrics = LogminerMetrics::register(&mut registry);
 
-    let mut miner = Miner::new(cfg.drain());
-    let Some(templates) =
-        retry_until("load templates", || store.load_templates(), &mut stop_rx).await
-    else {
+    let Some(miner) = load_miner(&store, cfg.drain(), &mut stop_rx).await else {
         return Ok(());
     };
-    let restored = templates.len();
-    miner.restore(templates);
-    metrics.templates.set(miner.len() as i64);
-    let mut tracker = Trackers::new(cfg.ownership_window_min);
-    let Some(data_now) = retry_until("load data clock", || store.data_now_ns(), &mut stop_rx).await
-    else {
-        return Ok(());
-    };
-    // Data time up to which new templates have been checked; advanced after each detection pass.
+    let restored = miner.len();
+    metrics.templates.set(restored as i64);
     let now = now_ns();
-    let Some(stored_watermark) = retry_until(
-        "load watermark",
-        || store.state_get(KEY_WATERMARK),
-        &mut stop_rx,
-    )
-    .await
-    else {
-        return Ok(());
-    };
-    // A partial wipe of log_templates needs the new_template_watermark_ns key deleted too.
-    let new_watermark = stored_watermark
-        .map(|w| w.min(now))
-        .unwrap_or_else(|| initial_watermark(&detect_cfg, data_clock(data_now, now), now));
     let Some(stored_version) = retry_until(
         "load masking version",
         || store.state_get(KEY_MASKING_VERSION),
@@ -301,8 +388,13 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
         }
     }
 
-    let consumer = Arc::new(tayga_kafka::consumer(&settings.kafka, GROUP)?);
-    consumer.subscribe(&[&settings.kafka.topic])?;
+    let topic = settings.kafka.logs_topic.as_str();
+    let consumer: Arc<LogConsumer> = Arc::new(tayga_kafka::consumer_with_context(
+        &settings.kafka,
+        GROUP,
+        Rebalances::new(topic),
+    )?);
+    consumer.subscribe(&[topic])?;
 
     let metrics_addr = cfg.metrics_addr;
     let metrics_stop = stop_rx.clone();
@@ -313,17 +405,27 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
             tracing::warn!(error = %e, "metrics server stopped");
         }
     });
-    let mut clock = NewTemplateClock {
-        watermark: new_watermark,
-        epoch_start,
-        partitions: None,
+    let replica = replica_id();
+    let mut st = LoopState {
+        miner,
+        pending: Pending::default(),
+        tracker: Trackers::new(cfg.ownership_window_min),
+        seen: PartitionClocks::default(),
+        clock: NewTemplateClock {
+            // Set by the first assignment. Until then nothing is owned, so it is neither used
+            // nor saved.
+            watermark: 0,
+            epoch_start,
+            partitions: None,
+            assigned: Vec::new(),
+        },
+        heartbeat_key: heartbeat_key(&replica),
     };
-    let mut seen = PartitionClocks::default();
     tracing::info!(
-        topic = %settings.kafka.topic,
+        topic,
         alerts = %cfg.alerts_topic,
+        replica,
         restored,
-        new_watermark,
         epoch_start,
         masking_version = current_version,
         "tayga-logminer consuming"
@@ -337,20 +439,20 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     let ctx = Ctx {
         store: &store,
         consumer: &consumer,
-        topic: &settings.kafka.topic,
+        topic,
         metrics: &metrics,
     };
-    let mut pending = Pending::default();
     // Set when shutdown interrupted a flush: nothing was committed, records are re-read on restart.
     let mut interrupted = false;
     let mut main_stop = stop_rx.clone();
     loop {
         let mut detect_due = false;
+        let mut record = None;
         tokio::select! {
             _ = main_stop.wait_for(|stop| *stop) => break,
             _ = detect_tick.tick() => detect_due = true,
             next = tokio::time::timeout(Duration::from_millis(200), consumer.recv()) => match next {
-                Ok(Ok(msg)) => on_message(&msg, &mut miner, &mut pending, &mut tracker.ownership, &metrics),
+                Ok(Ok(msg)) => record = Some(msg),
                 Ok(Err(e)) => {
                     tracing::warn!(error = %e, "kafka receive error");
                     let mut backoff_stop = stop_rx.clone();
@@ -362,12 +464,29 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
                 Err(_) => {}
             },
         }
+        // The rebalance callbacks ran inside `recv`: apply them before the record it returned.
+        let changes = consumer.context().take();
+        if !changes.is_empty() && !on_rebalance(&ctx, cfg, &changes, &mut st, &mut stop_rx).await? {
+            interrupted = true;
+            break;
+        }
+        if let Some(msg) = &record {
+            on_message(
+                msg,
+                &mut st.miner,
+                &mut st.pending,
+                &mut st.tracker.ownership,
+                &metrics,
+            );
+        }
         // Detection flushes first so it counts every hit mined so far.
-        let flush_now = pending.should_flush(Instant::now(), cfg.max_batch, flush_age)
-            || (detect_due && !pending.is_empty());
+        let flush_now = st
+            .pending
+            .should_flush(Instant::now(), cfg.max_batch, flush_age)
+            || (detect_due && !st.pending.is_empty());
         if flush_now {
-            let batch = std::mem::take(&mut pending);
-            if !flush(&ctx, &mut miner, batch, &mut seen, Some(&mut stop_rx)).await? {
+            let batch = std::mem::take(&mut st.pending);
+            if !flush(&ctx, &mut st.miner, batch, &mut st.seen, Some(&mut stop_rx)).await? {
                 interrupted = true;
                 break;
             }
@@ -375,24 +494,136 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
         if detect_due {
             let mut detect_stop = stop_rx.clone();
             tokio::select! {
-                snapshot = partition_snapshot(&consumer, &settings.kafka.topic, &mut seen, now_ns(), clock.watermark) => {
-                    clock.partitions = snapshot;
+                snapshot = partition_snapshot(&consumer, topic, &mut st.seen, now_ns(), st.clock.watermark) => {
+                    st.clock.partitions = snapshot;
                 }
                 _ = detect_stop.wait_for(|stop| *stop) => break,
             }
             let mut detect_stop = stop_rx.clone();
             tokio::select! {
-                _ = detect(&store, &producer, cfg, &miner, &mut tracker, &mut clock, &metrics) => {}
+                _ = detect(&store, &producer, cfg, &mut st, &metrics) => {}
                 _ = detect_stop.wait_for(|stop| *stop) => break,
             }
         }
     }
-    if !interrupted && !pending.is_empty() {
+    if !interrupted && !st.pending.is_empty() {
         // Single attempt: on failure exit without committing.
-        flush(&ctx, &mut miner, pending, &mut seen, None).await?;
+        flush(&ctx, &mut st.miner, st.pending, &mut st.seen, None).await?;
     }
     tracing::info!("tayga-logminer stopped");
     Ok(())
+}
+
+/// What the consume loop keeps between records.
+struct LoopState {
+    miner: Miner,
+    /// Mined but not yet stored nor committed.
+    pending: Pending,
+    tracker: Trackers,
+    seen: PartitionClocks,
+    clock: NewTemplateClock,
+    /// `logminer_heartbeat_ns:<replica_id>`.
+    heartbeat_key: String,
+}
+
+impl LoopState {
+    /// Takes up a new assignment once pending work is flushed (spec §2.2): a miner freshly
+    /// loaded from the store replaces the old Drain trees, ownership and the per-partition clocks
+    /// are relearned from the records of the partitions assigned now, active spike alerts are
+    /// restored again for each service as it becomes owned, and the new-template watermark is
+    /// the one of the assigned partitions.
+    fn reassign(&mut self, miner: Miner, assigned: Vec<i32>, watermark: i64) {
+        self.miner = miner;
+        self.tracker.ownership.clear();
+        self.tracker.restored.clear();
+        self.seen = PartitionClocks::default();
+        self.clock.partitions = None;
+        self.clock.assigned = assigned;
+        self.clock.watermark = watermark;
+    }
+}
+
+/// A miner restored from every stored template; `None` when shutdown interrupted the load.
+async fn load_miner(
+    store: &Store,
+    drain: DrainConfig,
+    stop: &mut watch::Receiver<bool>,
+) -> Option<Miner> {
+    let templates = retry_until("load templates", || store.load_templates(), stop).await?;
+    let mut miner = Miner::new(drain);
+    miner.restore(templates);
+    Some(miner)
+}
+
+/// The new-template watermark of the `assigned` partitions, from their stored
+/// `new_template_watermark_ns:p<N>` keys (see [`Watermarks::for_partitions`]); `None` when
+/// shutdown interrupted the load. A partial wipe of `log_templates` needs every
+/// `new_template_watermark_ns*` key deleted too.
+async fn load_watermark(
+    store: &Store,
+    cfg: &DetectConfig,
+    assigned: &[i32],
+    stop: &mut watch::Receiver<bool>,
+) -> Option<i64> {
+    let rows = retry_until(
+        "load watermarks",
+        || store.state_get_prefix(KEY_WATERMARK),
+        stop,
+    )
+    .await?;
+    let data_now = retry_until("load data clock", || store.data_now_ns(), stop).await?;
+    let now = now_ns();
+    let initial = initial_watermark(cfg, data_clock(data_now, now), now);
+    Some(Watermarks::from_rows(&rows).for_partitions(assigned, initial, now))
+}
+
+/// Applies the assignment changes of the last poll, before any further record is handled
+/// (spec §2.2). Returns `Ok(false)` when shutdown interrupted it; nothing unstored is committed.
+///
+/// 1. Pending work is flushed and committed: hits and templates are stored, then the offsets
+///    committed. This normally runs right after the revoke (the revoke callback returns, `recv`
+///    times out within 200 ms because a revoked consumer receives nothing until the next assign),
+///    while the group still accepts the commit. If the commit is refused (the group already moved
+///    on), the partition's new owner re-reads the records from the last committed offset: hits
+///    are idempotent by `log_id` and template ids are stable hashes, so the re-read only repeats
+///    work. Dropping pending work instead would be safe under the eager protocol but would lose
+///    records of partitions kept under the cooperative one, whose position is not rewound.
+/// 2. On an assignment, the miner is reloaded and the state reset ([`LoopState::reassign`]).
+///    The flush comes first: the reload discards the old miner's unflushed template changes.
+async fn on_rebalance(
+    ctx: &Ctx<'_>,
+    cfg: &LogminerSettings,
+    changes: &[Change],
+    st: &mut LoopState,
+    stop: &mut watch::Receiver<bool>,
+) -> anyhow::Result<bool> {
+    let assigned = apply_changes(&st.clock.assigned, changes);
+    // Never save the watermark to a revoked partition, even before the reassignment is loaded.
+    st.clock.assigned.retain(|p| assigned.contains(p));
+    if !st.pending.is_empty() {
+        let batch = std::mem::take(&mut st.pending);
+        if !flush(ctx, &mut st.miner, batch, &mut st.seen, Some(stop)).await? {
+            return Ok(false);
+        }
+    }
+    if !changes.iter().any(|c| matches!(c, Change::Assign(_))) {
+        return Ok(true);
+    }
+    let Some(miner) = load_miner(ctx.store, cfg.drain(), stop).await else {
+        return Ok(false);
+    };
+    let Some(watermark) = load_watermark(ctx.store, &cfg.detect(), &assigned, stop).await else {
+        return Ok(false);
+    };
+    ctx.metrics.templates.set(miner.len() as i64);
+    tracing::info!(
+        partitions = ?assigned,
+        templates = miner.len(),
+        watermark,
+        "partitions assigned: templates reloaded"
+    );
+    st.reassign(miner, assigned, watermark);
+    Ok(true)
 }
 
 /// Mines the logs of one record. Every record's offset is recorded, including skipped ones.
@@ -451,7 +682,7 @@ fn is_logs_record(msg: &BorrowedMessage<'_>) -> bool {
 
 struct Ctx<'a> {
     store: &'a Store,
-    consumer: &'a StreamConsumer,
+    consumer: &'a LogConsumer,
     topic: &'a str,
     metrics: &'a LogminerMetrics,
 }
@@ -500,8 +731,8 @@ async fn flush(
         tpl.add_partition_offset(ctx.topic, partition, Offset::Offset(offset))?;
     }
     if let Err(e) = ctx.consumer.commit(&tpl, CommitMode::Sync) {
-        // Typically a revoked partition after rebalance; its records are re-read and the hits
-        // deduplicated by `log_id`.
+        // Typically a revoked partition after a rebalance; its new owner re-reads the records
+        // and the hits are deduplicated by `log_id`.
         tracing::warn!(error = %e, "offset commit failed");
     }
     ctx.metrics.templates.set(miner.len() as i64);
@@ -546,6 +777,8 @@ struct NewTemplateClock {
     /// (empty during a rebalance or rejoin, or the lookup failed): the pass then holds at the
     /// watermark.
     partitions: Option<BTreeMap<i32, (i64, bool)>>,
+    /// The assigned `tayga.logs` partitions, to which the watermark is saved after each pass.
+    assigned: Vec<i32>,
 }
 
 /// A partition whose latest consumed record is older than this is replaying a backlog.
@@ -584,7 +817,8 @@ impl PartitionClocks {
         }
     }
 
-    /// Drops partitions that are no longer assigned (the consumer has no rebalance callbacks).
+    /// Drops partitions that are no longer assigned (a backstop: an assignment resets all of
+    /// them, see [`LoopState::reassign`]).
     fn retain_assigned(&mut self, assigned: &HashSet<i32>) {
         self.by_partition.retain(|p, _| assigned.contains(p));
     }
@@ -668,12 +902,7 @@ fn assigned_partitions(
     seen: &mut PartitionClocks,
 ) -> Option<Vec<i32>> {
     let assigned: Vec<i32> = match assignment {
-        Ok(tpl) => tpl
-            .elements()
-            .iter()
-            .filter(|e| e.topic() == topic)
-            .map(|e| e.partition())
-            .collect(),
+        Ok(tpl) => topic_partitions(&tpl, topic),
         Err(e) => {
             tracing::warn!(error = %e, "reading the consumer assignment failed");
             return None;
@@ -692,7 +921,7 @@ fn assigned_partitions(
 /// (blocking librdkafka calls, run on the blocking pool, `WATERMARK_TIMEOUT` each; a failed
 /// partition is skipped and the others still asked) and classifies it with [`partition_state`].
 async fn partition_snapshot(
-    consumer: &Arc<StreamConsumer>,
+    consumer: &Arc<LogConsumer>,
     topic: &str,
     seen: &mut PartitionClocks,
     now_ns: i64,
@@ -768,24 +997,41 @@ fn pass_clock(
 
 /// One detection pass (spec §6). Failures are logged; the loop continues. The new-template
 /// watermark advances to this pass's data clock only when the pass found and stored its alerts,
-/// so a failed pass is retried over the same range.
+/// so a failed pass is retried over the same range, and is then saved to every assigned
+/// partition's key. The replica's heartbeat is written after every pass.
 async fn detect(
     store: &Store,
     producer: &FutureProducer,
     cfg: &LogminerSettings,
-    miner: &Miner,
-    tracker: &mut Trackers,
-    clock: &mut NewTemplateClock,
+    st: &mut LoopState,
     metrics: &LogminerMetrics,
 ) {
     let started = Instant::now();
     let now = now_ns();
     let detect_cfg = &cfg.detect();
-    match find_alerts(store, detect_cfg, miner, tracker, clock, now, metrics).await {
-        Ok((alerts, data_now)) => {
-            if publish_alerts(store, producer, &cfg.alerts_topic, &alerts, now, metrics).await {
-                clock.watermark = clock.watermark.max(data_now);
-                if let Err(e) = store.state_put(KEY_WATERMARK, clock.watermark).await {
+    match find_alerts(
+        store,
+        detect_cfg,
+        &st.miner,
+        &mut st.tracker,
+        &st.clock,
+        now,
+        metrics,
+    )
+    .await
+    {
+        Ok((alerts, target)) => {
+            if publish_alerts(store, producer, &cfg.alerts_topic, &alerts, now, metrics).await
+                && let Some(target) = target
+            {
+                let clock = &mut st.clock;
+                clock.watermark = clock.watermark.max(target);
+                let entries: Vec<(String, i64)> = clock
+                    .assigned
+                    .iter()
+                    .map(|&p| (watermark_key(p), clock.watermark))
+                    .collect();
+                if let Err(e) = store.state_put_many(&entries).await {
                     metrics.state_save_failures.inc();
                     tracing::warn!(error = %e, "saving the new-template watermark failed");
                 }
@@ -793,14 +1039,23 @@ async fn detect(
         }
         Err(e) => tracing::warn!(error = %e, "detection failed"),
     }
-    if let Err(e) = store.state_put(KEY_HEARTBEAT, now).await {
+    if let Err(e) = store.state_put(&st.heartbeat_key, now).await {
         metrics.state_save_failures.inc();
         tracing::warn!(error = %e, "saving the heartbeat failed");
     }
     metrics
         .detect_seconds
         .observe(started.elapsed().as_secs_f64());
-    tracker.spikes.expire(detect_cfg, now);
+    st.tracker.spikes.expire(detect_cfg, now);
+}
+
+/// The data time the watermark may advance to after a pass with this owned set: `None` (hold)
+/// while nothing is owned. After a restart or a rebalance the first pass can run before the
+/// first log is mined; the pass clock then comes from the store's latest hit (every service,
+/// every partition), and advancing to it would skip the templates of the backlog this replica
+/// has yet to mine.
+fn watermark_target(owned: &[String], pass_clock_ns: i64) -> Option<i64> {
+    (!owned.is_empty()).then_some(pass_clock_ns)
 }
 
 /// Masking epoch at startup: `(epoch start, whether to store the version and start)`.
@@ -869,6 +1124,17 @@ impl Trackers {
             restored: HashSet::new(),
         }
     }
+
+    /// Forgets the restored services that are no longer owned, and returns the owned ones not
+    /// restored yet.
+    fn unrestored(&mut self, owned: &[String]) -> Vec<String> {
+        self.restored.retain(|s| owned.contains(s));
+        owned
+            .iter()
+            .filter(|s| !self.restored.contains(*s))
+            .cloned()
+            .collect()
+    }
 }
 
 /// Restores the active spike alerts of services that became owned since the last pass, and
@@ -880,12 +1146,7 @@ async fn restore_spikes(
     tracker: &mut Trackers,
     owned: &[String],
 ) -> anyhow::Result<()> {
-    tracker.restored.retain(|s| owned.contains(s));
-    let fresh: Vec<String> = owned
-        .iter()
-        .filter(|s| !tracker.restored.contains(*s))
-        .cloned()
-        .collect();
+    let fresh = tracker.unrestored(owned);
     if fresh.is_empty() {
         return Ok(());
     }
@@ -922,7 +1183,8 @@ fn silent_alerts(
 }
 
 /// Alerts to write, each with whether it was created (as opposed to an active spike updated),
-/// and the data clock the new-template check ran against.
+/// and the data clock the new-template check ran against, `None` when nothing is owned (see
+/// [`watermark_target`]).
 async fn find_alerts(
     store: &Store,
     cfg: &DetectConfig,
@@ -931,7 +1193,7 @@ async fn find_alerts(
     clock: &NewTemplateClock,
     now: i64,
     metrics: &LogminerMetrics,
-) -> anyhow::Result<(Vec<(Alert, bool)>, i64)> {
+) -> anyhow::Result<(Vec<(Alert, bool)>, Option<i64>)> {
     let owned = tracker.ownership.owned(now);
     let owned = owned.as_slice();
     restore_spikes(store, cfg, tracker, owned).await?;
@@ -1045,7 +1307,7 @@ async fn find_alerts(
         let examples = examples(store, c.template_id, window).await;
         out.push((new_alert(&c, examples, now), true));
     }
-    Ok((out, data_now))
+    Ok((out, watermark_target(owned, data_now)))
 }
 
 /// Silence alerts of this pass. A failed lookup is logged and skips silence only, so it cannot
@@ -1651,6 +1913,272 @@ mod tests {
             minutes_covering(now + MIN_NS, now, 10),
             10,
             "future first_seen"
+        );
+    }
+
+    fn tpl(entries: &[(&str, i32)]) -> TopicPartitionList {
+        let mut t = TopicPartitionList::new();
+        for &(topic, p) in entries {
+            t.add_partition(topic, p);
+        }
+        t
+    }
+
+    #[test]
+    fn rebalance_changes_are_recorded_in_order_and_taken_once() {
+        let r = Rebalances::new("tayga.logs");
+        assert!(r.take().is_empty());
+        let revoked = tpl(&[("tayga.logs", 0), ("tayga.logs", 1), ("other", 2)]);
+        assert_eq!(topic_partitions(&revoked, "tayga.logs"), [0, 1]);
+        r.record(Change::Revoke(topic_partitions(&revoked, "tayga.logs")));
+        r.record(Change::Assign(vec![1, 2]));
+        assert_eq!(
+            r.take(),
+            [Change::Revoke(vec![0, 1]), Change::Assign(vec![1, 2])]
+        );
+        assert!(r.take().is_empty(), "the main loop sees each change once");
+    }
+
+    #[test]
+    fn changes_apply_in_order_for_both_protocols() {
+        // Eager: everything is revoked, then the whole new set assigned.
+        let eager = [Change::Revoke(vec![0, 1, 2, 3]), Change::Assign(vec![1, 3])];
+        assert_eq!(apply_changes(&[0, 1, 2, 3], &eager), [1, 3]);
+        // Two rebalances before the loop looked: only the last assignment stands.
+        let twice = [
+            Change::Revoke(vec![0, 1]),
+            Change::Assign(vec![0, 1, 2]),
+            Change::Revoke(vec![0, 1, 2]),
+            Change::Assign(vec![5]),
+        ];
+        assert_eq!(apply_changes(&[0, 1], &twice), [5]);
+        // Cooperative: increments on top of the kept partitions.
+        let coop = [Change::Revoke(vec![2]), Change::Assign(vec![7])];
+        assert_eq!(apply_changes(&[1, 2], &coop), [1, 7]);
+        // A revoke without its assignment yet: nothing is assigned.
+        assert!(apply_changes(&[0, 1], &[Change::Revoke(vec![0, 1])]).is_empty());
+    }
+
+    fn state() -> LoopState {
+        LoopState {
+            miner: Miner::new(DrainConfig::default()),
+            pending: Pending::default(),
+            tracker: Trackers::new(60),
+            seen: PartitionClocks::default(),
+            clock: NewTemplateClock {
+                watermark: 0,
+                epoch_start: 0,
+                partitions: None,
+                assigned: Vec::new(),
+            },
+            heartbeat_key: "logminer_heartbeat_ns:test".into(),
+        }
+    }
+
+    fn log(id: u64, service: &str, body: &str) -> tayga_store::rows::LogRow {
+        tayga_store::rows::LogRow {
+            log_id: id,
+            ts: 50 * MIN_NS,
+            observed_ts: 0,
+            trace_id: String::new(),
+            span_id: String::new(),
+            severity_number: 9,
+            severity_text: String::new(),
+            service_name: service.into(),
+            body: body.into(),
+            resource_attrs: vec![],
+            log_attrs: vec![],
+        }
+    }
+
+    #[test]
+    fn an_assignment_reloads_the_miner_and_resets_ownership_clocks_and_watermark() {
+        let mut st = state();
+        st.clock.assigned = vec![0, 1];
+        st.clock.watermark = 900;
+        st.clock.partitions = Some(parts(&[(0, 5, true)]));
+        // The old miner holds a template no store has (its records were re-read elsewhere).
+        let (hit, _) = st.miner.mine(&log(1, "api", "stale tree only"));
+        st.tracker.ownership.touch(&hit.service, 10 * MIN_NS);
+        st.tracker.restored.insert("api".into());
+        let mut b = Pending::default();
+        b.record(0, 4, 10, Instant::now());
+        st.seen.record_flush(&b);
+
+        let mut fresh = Miner::new(DrainConfig::default());
+        fresh.restore(vec![template_row(7, "db", "db down", MIN_NS)]);
+        st.reassign(fresh, vec![1, 4], 300);
+
+        assert_eq!(st.miner.len(), 1);
+        assert_eq!(st.miner.template(7).as_deref(), Some("db down"));
+        assert_eq!(
+            st.miner.template(hit.template_id),
+            None,
+            "the stale tree is gone"
+        );
+        assert!(st.tracker.ownership.owned(11 * MIN_NS).is_empty());
+        assert!(st.tracker.restored.is_empty());
+        assert!(st.seen.by_partition.is_empty());
+        assert_eq!(st.clock.partitions, None);
+        assert_eq!(
+            (st.clock.assigned.as_slice(), st.clock.watermark),
+            (&[1, 4][..], 300)
+        );
+    }
+
+    #[test]
+    fn the_watermark_holds_while_nothing_is_owned() {
+        // After a restart the first pass runs before the first mined log: the pass clock is the
+        // store's latest hit, far ahead of the backlog still to mine.
+        let mut ownership = Ownership::new(60);
+        let watermark = 100 * MIN_NS;
+        let store_latest = 500 * MIN_NS;
+        let target = watermark_target(&ownership.owned(500 * MIN_NS), store_latest);
+        assert_eq!(target, None);
+        assert_eq!(watermark.max(target.unwrap_or(watermark)), watermark);
+        // Once a log is mined, the pass may advance.
+        ownership.touch("api", 500 * MIN_NS);
+        assert_eq!(
+            watermark_target(&ownership.owned(500 * MIN_NS), store_latest),
+            Some(store_latest)
+        );
+    }
+
+    fn owned(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn spikes_are_restored_only_for_newly_owned_services_and_pruned_when_ownership_is_lost() {
+        let mut t = Trackers::new(60);
+        assert!(t.unrestored(&[]).is_empty());
+        assert_eq!(t.unrestored(&owned(&["a", "b"])), ["a", "b"]);
+        t.restored.extend(owned(&["a", "b"]));
+        assert!(
+            t.unrestored(&owned(&["a", "b"])).is_empty(),
+            "restored once"
+        );
+        // `a` moved away, `c` arrived: only `c` is restored, `a` is forgotten.
+        assert_eq!(t.unrestored(&owned(&["b", "c"])), ["c"]);
+        assert_eq!(t.restored, HashSet::from(["b".to_string()]));
+        // `a` coming back is restored again: its alert may have moved on at the other owner.
+        assert_eq!(t.unrestored(&owned(&["a", "b"])), ["a"]);
+        assert!(t.unrestored(&[]).is_empty());
+        assert!(t.restored.is_empty());
+    }
+
+    fn unreachable_store() -> Store {
+        Store::new(&ClickHouseSettings {
+            url: "http://127.0.0.1:1".into(),
+            database: "tayga".into(),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_failed_spike_restore_is_retried_next_pass() {
+        let store = unreachable_store();
+        let mut t = Trackers::new(60);
+        let cfg = DetectConfig::default();
+        let services = owned(&["a"]);
+        assert!(
+            restore_spikes(&store, &cfg, &mut t, &services)
+                .await
+                .is_err()
+        );
+        assert!(t.restored.is_empty());
+        assert_eq!(t.unrestored(&services), ["a"], "still due");
+        // Nothing owned: no lookup, so no failure.
+        assert!(restore_spikes(&store, &cfg, &mut t, &[]).await.is_ok());
+    }
+
+    fn offline_consumer() -> LogConsumer {
+        let kafka: KafkaSettings = serde_json::from_str(r#"{"brokers":"127.0.0.1:1"}"#).unwrap();
+        tayga_kafka::consumer_with_context(&kafka, GROUP, Rebalances::new("tayga.logs")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_rebalance_during_pending_work_commits_only_flushed_offsets() {
+        let store = unreachable_store();
+        let consumer = offline_consumer();
+        let metrics = LogminerMetrics::default();
+        let ctx = Ctx {
+            store: &store,
+            consumer: &consumer,
+            topic: "tayga.logs",
+            metrics: &metrics,
+        };
+        let cfg = LogminerSettings::default();
+        let mut st = state();
+        st.clock.assigned = vec![0, 1];
+        let (hit, _) = st.miner.mine(&log(1, "api", "payment failed"));
+        st.pending.record(0, 4, 10, Instant::now());
+        st.pending.record(1, 9, 10, Instant::now());
+        st.pending.hits.push(hit);
+        let (tx, mut stop) = watch::channel(false);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let _ = tx.send(true);
+        });
+        // The store is down while partition 0 is revoked: the flush retries until shutdown and
+        // then gives up without committing or reloading.
+        let changes = [Change::Revoke(vec![0, 1]), Change::Assign(vec![1])];
+        let done = on_rebalance(&ctx, &cfg, &changes, &mut st, &mut stop)
+            .await
+            .unwrap();
+        assert!(!done);
+        assert!(metrics.write_failures.get() >= 1);
+        // Offsets are committed right after `record_flush`, which never ran.
+        assert!(st.seen.by_partition.is_empty());
+        assert!(st.pending.is_empty(), "the batch went to the flush");
+        assert_eq!(
+            st.clock.assigned,
+            [1],
+            "the revoked partition gets no watermark"
+        );
+        assert_eq!(st.miner.len(), 1, "no reload after a failed flush");
+    }
+
+    #[tokio::test]
+    async fn a_revoke_with_nothing_pending_needs_no_store() {
+        let store = unreachable_store();
+        let consumer = offline_consumer();
+        let metrics = LogminerMetrics::default();
+        let ctx = Ctx {
+            store: &store,
+            consumer: &consumer,
+            topic: "tayga.logs",
+            metrics: &metrics,
+        };
+        let mut st = state();
+        st.clock.assigned = vec![0, 1, 2];
+        let (_tx, mut stop) = watch::channel(false);
+        let done = on_rebalance(
+            &ctx,
+            &LogminerSettings::default(),
+            &[Change::Revoke(vec![0, 1, 2])],
+            &mut st,
+            &mut stop,
+        )
+        .await
+        .unwrap();
+        assert!(done);
+        assert!(st.clock.assigned.is_empty());
+        assert_eq!(metrics.write_failures.get(), 0);
+    }
+
+    #[test]
+    fn the_replica_id_is_the_hostname_with_a_random_fallback() {
+        assert_eq!(
+            pick_replica_id(Some("c0ffee".into()), Some("kernel\n".into()), 1),
+            "c0ffee"
+        );
+        assert_eq!(
+            pick_replica_id(Some(" ".into()), Some("kernel\n".into()), 1),
+            "kernel"
+        );
+        assert_eq!(
+            pick_replica_id(None, None, 0xab),
+            "replica-00000000000000ab"
         );
     }
 

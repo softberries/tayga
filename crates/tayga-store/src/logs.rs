@@ -99,6 +99,12 @@ struct SilenceSettingRow {
 }
 
 #[derive(clickhouse::Row, Deserialize)]
+struct StateRow {
+    key: String,
+    value: i64,
+}
+
+#[derive(clickhouse::Row, Deserialize)]
 struct SilenceEnabledRow {
     template_id: u64,
     minutes: u32,
@@ -399,6 +405,22 @@ impl Store {
             .await
     }
 
+    /// Every persisted logminer state `(key, value)` whose key starts with `prefix`, by key.
+    pub async fn state_get_prefix(
+        &self,
+        prefix: &str,
+    ) -> clickhouse::error::Result<Vec<(String, i64)>> {
+        let rows: Vec<StateRow> = self
+            .client()
+            .query(
+                "SELECT key, value FROM logminer_state FINAL WHERE startsWith(key, ?) ORDER BY key",
+            )
+            .bind(prefix)
+            .fetch_all()
+            .await?;
+        Ok(rows.into_iter().map(|r| (r.key, r.value)).collect())
+    }
+
     /// Stores `value` under `key`; the latest write wins.
     pub async fn state_put(&self, key: &str, value: i64) -> clickhouse::error::Result<()> {
         self.client()
@@ -407,6 +429,21 @@ impl Store {
             .bind(value)
             .execute()
             .await
+    }
+
+    /// Stores each `(key, value)` in one insert; the latest write per key wins. No-op when empty.
+    pub async fn state_put_many(&self, entries: &[(String, i64)]) -> clickhouse::error::Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let rows = vec!["(?, ?, now64(9))"; entries.len()].join(", ");
+        let mut q = self.client().query(&format!(
+            "INSERT INTO logminer_state (key, value, updated) VALUES {rows}"
+        ));
+        for (key, value) in entries {
+            q = q.bind(key.as_str()).bind(*value);
+        }
+        q.execute().await
     }
 
     /// Distinct trace ids of recent hits of a template, newest first.
