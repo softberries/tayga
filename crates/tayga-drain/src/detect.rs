@@ -306,7 +306,7 @@ pub fn is_silent(
 /// The alert of a silent template. The id hashes the template and the `t_last` (or `first_seen`)
 /// at which the silence began, so it is the same on every pass of one silence period, and across
 /// a logminer restart, and changes once the template gets a hit and goes silent again.
-/// `started_at` is that `t_last` plus `minutes`; `last_at` is `now_ns`. `baseline_per_window`
+/// `started_at` is that `t_last` (or `first_seen`); `last_at` is `now_ns`. `baseline_per_window`
 /// is informational.
 pub fn silence_alert(
     input: &SilenceInput,
