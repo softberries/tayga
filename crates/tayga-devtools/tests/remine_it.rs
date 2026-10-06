@@ -5,7 +5,10 @@ use std::collections::BTreeSet;
 use tayga_devtools::remine::{Options, remine, remine_paged};
 use tayga_drain::drain::DrainConfig;
 use tayga_drain::preprocess::masking_version;
-use tayga_logminer::config::{KEY_EPOCH_START, KEY_HEARTBEAT, KEY_MASKING_VERSION, KEY_WATERMARK};
+use tayga_logminer::config::{
+    KEY_EPOCH_START, KEY_HEARTBEAT, KEY_MASKING_VERSION, KEY_WATERMARK, heartbeat_key,
+    watermark_key,
+};
 use tayga_logminer::miner::Miner;
 use tayga_store::ClickHouseSettings;
 use tayga_store::migrate::migrate;
@@ -305,5 +308,52 @@ async fn a_fresh_heartbeat_refuses_a_real_run_but_not_a_dry_run() {
     .unwrap();
     assert_eq!(forced.logs_read, 90);
     assert_eq!(store.state_get(KEY_EPOCH_START).await.unwrap(), Some(now));
+    drop_db(&s, &store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse"]
+async fn a_fresh_replica_heartbeat_refuses_and_partition_watermarks_follow_the_remine() {
+    let (s, store, logs) = seeded_store().await;
+    let drain = DrainConfig::default();
+    let now = now_ns();
+    // A stale legacy key and a stale replica, but one replica is alive.
+    store
+        .state_put(KEY_HEARTBEAT, now - 60 * MIN_NS)
+        .await
+        .unwrap();
+    store
+        .state_put(&heartbeat_key("a"), now - 10 * MIN_NS)
+        .await
+        .unwrap();
+    store
+        .state_put(&heartbeat_key("b"), now - 5_000_000_000)
+        .await
+        .unwrap();
+    let err = remine(&store, &drain, Options::default(), now)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("looks alive"), "{err}");
+    assert_eq!(count(&store, "log_template_hits").await, 0);
+
+    // Every replica stopped: the run proceeds and moves the per-partition watermarks too.
+    store
+        .state_put(&heartbeat_key("b"), now - 10 * MIN_NS)
+        .await
+        .unwrap();
+    store.state_put(&watermark_key(0), 3).await.unwrap();
+    store.state_put(&watermark_key(5), 4).await.unwrap();
+    remine(&store, &drain, Options::default(), now)
+        .await
+        .unwrap();
+    let max_ts = logs.iter().map(|l| l.ts).max().unwrap();
+    assert_eq!(
+        store.state_get_prefix(KEY_WATERMARK).await.unwrap(),
+        [
+            (KEY_WATERMARK.to_string(), max_ts),
+            (watermark_key(0), max_ts),
+            (watermark_key(5), max_ts)
+        ]
+    );
     drop_db(&s, &store).await;
 }

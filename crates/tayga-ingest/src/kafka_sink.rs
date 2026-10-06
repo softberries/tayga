@@ -1,4 +1,4 @@
-use crate::records::OutRecord;
+use crate::records::{OutRecord, Topic};
 use crate::sink::{Sink, SinkError};
 use futures::future::join_all;
 use rdkafka::error::KafkaError;
@@ -9,11 +9,16 @@ use std::time::Duration;
 pub struct KafkaSink {
     producer: FutureProducer,
     topic: String,
+    logs_topic: String,
 }
 
 impl KafkaSink {
-    pub fn new(producer: FutureProducer, topic: String) -> Self {
-        Self { producer, topic }
+    pub fn new(producer: FutureProducer, topic: String, logs_topic: String) -> Self {
+        Self {
+            producer,
+            topic,
+            logs_topic,
+        }
     }
 
     pub fn producer(&self) -> &FutureProducer {
@@ -24,7 +29,11 @@ impl KafkaSink {
 impl Sink for KafkaSink {
     async fn publish(&self, records: Vec<OutRecord>) -> Result<(), SinkError> {
         let sends = records.iter().map(|r| {
-            let rec = FutureRecord::to(&self.topic)
+            let topic = match r.topic {
+                Topic::Signals => &self.topic,
+                Topic::Logs => &self.logs_topic,
+            };
+            let rec = FutureRecord::to(topic)
                 .key(&r.key)
                 .payload(&r.payload)
                 .headers(tayga_kafka::headers(r.kind, r.key_kind));

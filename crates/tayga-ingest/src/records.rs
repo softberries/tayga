@@ -9,10 +9,30 @@ use tayga_model::otlp::collector::trace::v1::ExportTraceServiceRequest;
 use tayga_model::otlp::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
 use tayga_model::otlp::resource::v1::Resource;
 use tayga_model::otlp::trace::v1::{ResourceSpans, ScopeSpans, Span};
-use tayga_model::split::{Routed, RoutingKey, split_logs, split_traces};
+use tayga_model::split::{Routed, RoutingKey, split_logs, split_logs_by_service, split_traces};
+
+/// Kafka topic a record is published to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Topic {
+    /// `kafka.topic`: everything, keyed by trace (service for items without a trace id).
+    Signals,
+    /// `kafka.logs_topic`: logs only, keyed by service.
+    Logs,
+}
+
+impl Topic {
+    /// Metric label value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Topic::Signals => "signals",
+            Topic::Logs => "logs",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutRecord {
+    pub topic: Topic,
     pub key: Vec<u8>,
     /// `tayga-key` header value: "trace" or "service".
     pub key_kind: &'static str,
@@ -27,7 +47,10 @@ pub struct Converted {
     /// Spans/logs routed by service name because their trace id was missing or invalid.
     pub routed_by_service: usize,
     /// Spans/logs dropped because a record holding only that item exceeds the byte budget.
+    /// Counted for the signals topic; see `dropped_oversized_logs_topic` for the other copy.
     pub dropped_oversized: usize,
+    /// Logs dropped from the service-keyed copy on the logs topic.
+    pub dropped_oversized_logs_topic: usize,
 }
 
 pub fn now_unix_nano() -> u64 {
@@ -42,21 +65,48 @@ pub fn trace_records(
     now_unix_nano: u64,
     max_record_bytes: usize,
 ) -> Converted {
-    convert(split_traces(req), now_unix_nano, max_record_bytes)
+    convert(
+        split_traces(req),
+        Topic::Signals,
+        now_unix_nano,
+        max_record_bytes,
+    )
 }
 
+/// Logs go out twice: keyed by trace on `Signals` (writer, assembler) and keyed by service on
+/// `Logs` (logminer), each within the byte budget.
 pub fn log_records(
     req: ExportLogsServiceRequest,
     now_unix_nano: u64,
     max_record_bytes: usize,
 ) -> Converted {
-    convert(split_logs(req), now_unix_nano, max_record_bytes)
+    let mut out = convert(
+        split_logs(req.clone()),
+        Topic::Signals,
+        now_unix_nano,
+        max_record_bytes,
+    );
+    let by_service = convert(
+        split_logs_by_service(req),
+        Topic::Logs,
+        now_unix_nano,
+        max_record_bytes,
+    );
+    out.dropped_oversized_logs_topic = by_service.dropped_oversized;
+    out.records.extend(by_service.records);
+    out
 }
 
-fn convert<S: Signal>(routed: Vec<Routed<S>>, now: u64, max_record_bytes: usize) -> Converted {
+fn convert<S: Signal>(
+    routed: Vec<Routed<S>>,
+    topic: Topic,
+    now: u64,
+    max_record_bytes: usize,
+) -> Converted {
     let mut out = Converted::default();
     for Routed { key, mut request } in routed {
-        if matches!(key, RoutingKey::Service(_)) {
+        // Service keys on the logs topic are by design, not the missing-trace-id fallback.
+        if topic == Topic::Signals && matches!(key, RoutingKey::Service(_)) {
             out.routed_by_service += request.item_count();
         }
         let mut payloads = Vec::new();
@@ -70,6 +120,7 @@ fn convert<S: Signal>(routed: Vec<Routed<S>>, now: u64, max_record_bytes: usize)
         let key_bytes = key.to_bytes();
         out.records
             .extend(payloads.into_iter().map(|payload| OutRecord {
+                topic,
                 key: key_bytes.clone(),
                 key_kind: key.kind_str(),
                 kind: S::KIND,
@@ -461,7 +512,7 @@ mod tests {
             }],
         };
         let out = log_records(req, 1, 1_000);
-        assert_eq!(out.routed_by_service, 50);
+        assert_eq!(out.routed_by_service, 50, "counted once, not per topic");
         assert_eq!(out.dropped_oversized, 0);
         assert!(out.records.len() > 1);
         assert!(
@@ -469,9 +520,13 @@ mod tests {
                 .iter()
                 .all(|r| r.payload.len() <= 1_000 && r.key == b"cart" && r.key_kind == "service")
         );
-        let total: usize = out
+        let signals: Vec<_> = out
             .records
             .iter()
+            .filter(|r| r.topic == Topic::Signals)
+            .collect();
+        let total: usize = signals
+            .into_iter()
             .map(|r| match Envelope::decode(&r.payload).unwrap().payload {
                 Some(Payload::Logs(l)) => l
                     .resource_logs
@@ -508,5 +563,134 @@ mod tests {
                 .encode()
                 .len()
         );
+    }
+
+    fn log(trace: u8, body: String) -> LogRecord {
+        LogRecord {
+            trace_id: if trace == 0 { vec![] } else { vec![trace; 16] },
+            body: Some(AnyValue {
+                value: Some(Value::StringValue(body)),
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn logs_req(parts: Vec<(&str, Vec<LogRecord>)>) -> ExportLogsServiceRequest {
+        ExportLogsServiceRequest {
+            resource_logs: parts
+                .into_iter()
+                .map(|(svc, log_records)| ResourceLogs {
+                    resource: resource(svc),
+                    scope_logs: vec![ScopeLogs {
+                        log_records,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })
+                .collect(),
+        }
+    }
+
+    fn log_count(payload: &[u8]) -> usize {
+        match Envelope::decode(payload).unwrap().payload {
+            Some(Payload::Logs(l)) => l
+                .resource_logs
+                .iter()
+                .flat_map(|r| &r.scope_logs)
+                .map(|s| s.log_records.len())
+                .sum(),
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn logs_are_keyed_by_trace_on_signals_and_by_service_on_logs() {
+        let req = logs_req(vec![
+            ("cart", vec![log(1, "a".into()), log(2, "b".into())]),
+            ("ad", vec![log(1, "c".into()), log(0, "d".into())]),
+        ]);
+        let out = log_records(req, 1, BIG);
+        let on = |t| {
+            out.records
+                .iter()
+                .filter(move |r| r.topic == t)
+                .collect::<Vec<_>>()
+        };
+
+        let signals = on(Topic::Signals);
+        let mut keys: Vec<_> = signals
+            .iter()
+            .map(|r| (r.key.clone(), r.key_kind))
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                (vec![1; 16], "trace"),
+                (vec![2; 16], "trace"),
+                (b"ad".to_vec(), "service"),
+            ]
+        );
+        assert_eq!(out.routed_by_service, 1);
+
+        let logs = on(Topic::Logs);
+        let mut per_service: Vec<_> = logs
+            .iter()
+            .map(|r| (r.key.clone(), r.key_kind, log_count(&r.payload)))
+            .collect();
+        per_service.sort();
+        assert_eq!(
+            per_service,
+            vec![
+                (b"ad".to_vec(), "service", 2),
+                (b"cart".to_vec(), "service", 2)
+            ]
+        );
+        assert!(logs.iter().all(|r| r.kind == Kind::Logs));
+    }
+
+    #[test]
+    fn spans_never_go_to_the_logs_topic() {
+        let req = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                scope_spans: vec![ScopeSpans {
+                    spans: vec![span(1, "a".into(), 0)],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        let out = trace_records(req, 1, BIG);
+        assert!(out.records.iter().all(|r| r.topic == Topic::Signals));
+    }
+
+    #[test]
+    fn byte_budget_applies_to_each_topic_and_loses_no_log() {
+        let logs = (0..60).map(|i| log(7, format!("{i:0>100}"))).collect();
+        let out = log_records(logs_req(vec![("cart", logs)]), 1, 1_500);
+        assert_eq!(out.dropped_oversized, 0);
+        assert_eq!(out.dropped_oversized_logs_topic, 0);
+        for topic in [Topic::Signals, Topic::Logs] {
+            let recs: Vec<_> = out.records.iter().filter(|r| r.topic == topic).collect();
+            assert!(recs.len() > 1, "{topic:?} not chunked");
+            assert!(recs.iter().all(|r| r.payload.len() <= 1_500));
+            assert_eq!(
+                recs.iter().map(|r| log_count(&r.payload)).sum::<usize>(),
+                60
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_log_is_dropped_from_each_topic_and_counted_per_topic() {
+        let req = logs_req(vec![(
+            "cart",
+            vec![log(7, "x".repeat(10_000)), log(7, "ok".into())],
+        )]);
+        let out = log_records(req, 1, 2_000);
+        assert_eq!(out.dropped_oversized, 1);
+        assert_eq!(out.dropped_oversized_logs_topic, 1);
+        assert_eq!(out.records.len(), 2);
+        assert!(out.records.iter().all(|r| log_count(&r.payload) == 1));
     }
 }

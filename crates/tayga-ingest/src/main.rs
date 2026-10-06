@@ -40,10 +40,11 @@ async fn main() -> anyhow::Result<()> {
     tayga_common::init_logging();
     let settings: Settings = tayga_common::load_settings()?;
     settings.kafka.validate()?;
-    tayga_kafka::ensure_topic(&settings.kafka).await?;
+    tayga_kafka::ensure_topics(&settings.kafka).await?;
     let sink = Arc::new(KafkaSink::new(
         tayga_kafka::producer(&settings.kafka)?,
         settings.kafka.topic.clone(),
+        settings.kafka.logs_topic.clone(),
     ));
 
     // Bind both listeners eagerly so a bind failure aborts startup before anything serves.
@@ -52,7 +53,11 @@ async fn main() -> anyhow::Result<()> {
 
     let (stop_tx, stop_rx) = watch::channel(());
     let mut registry = Registry::default();
-    let metrics = IngestMetrics::register(&mut registry);
+    let metrics = IngestMetrics::register(
+        &mut registry,
+        &settings.kafka.topic,
+        &settings.kafka.logs_topic,
+    );
     let registry = Arc::new(registry);
     let grpc = OtlpGrpc::new(
         sink.clone(),
@@ -87,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
         let _ = http_stop.changed().await;
     });
 
-    tracing::info!(grpc = %settings.grpc_addr, http = %settings.http_addr, topic = %settings.kafka.topic, "tayga-ingest listening");
+    tracing::info!(grpc = %settings.grpc_addr, http = %settings.http_addr, topic = %settings.kafka.topic, logs_topic = %settings.kafka.logs_topic, "tayga-ingest listening");
 
     let served = supervise(
         grpc_server,

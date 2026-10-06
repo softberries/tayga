@@ -2482,6 +2482,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "prometheus-client",
+ "rand 0.10.3",
  "rdkafka",
  "serde",
  "serde_json",

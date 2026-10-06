@@ -8,7 +8,9 @@ use std::fmt::Write as _;
 use std::time::Instant;
 use tayga_drain::drain::DrainConfig;
 use tayga_drain::preprocess::masking_version;
-use tayga_logminer::config::{KEY_EPOCH_START, KEY_HEARTBEAT, KEY_MASKING_VERSION, KEY_WATERMARK};
+use tayga_logminer::config::{
+    KEY_EPOCH_START, KEY_HEARTBEAT, KEY_MASKING_VERSION, KEY_WATERMARK, Watermarks, watermark_key,
+};
 use tayga_logminer::miner::Miner;
 use tayga_store::logs::LogMineRow;
 use tayga_store::rows::LogRow;
@@ -92,8 +94,14 @@ impl RemineSummary {
     }
 }
 
-/// Refuses while the logminer is alive: its last heartbeat is under 3 minutes old. A heartbeat
-/// in the future counts as fresh.
+/// The newest of the heartbeat values read by prefix [`KEY_HEARTBEAT`]: every replica's key and
+/// the legacy single-replica key. `None` when there is none.
+pub fn newest_heartbeat(rows: &[(String, i64)]) -> Option<i64> {
+    rows.iter().map(|&(_, v)| v).max()
+}
+
+/// Refuses while a logminer replica is alive: its last heartbeat is under 3 minutes old. A
+/// heartbeat in the future counts as fresh.
 pub fn heartbeat_ok(heartbeat_ns: Option<i64>, now_ns: i64, force: bool) -> Result<(), String> {
     let Some(hb) = heartbeat_ns else {
         return Ok(());
@@ -147,7 +155,9 @@ fn log_row(r: LogMineRow) -> LogRow {
 /// Mines the stored logs of the last 3 days into fresh templates. With `opts.dry_run` nothing is
 /// written and the logminer heartbeat is not checked (read-only, safe on a live stack).
 /// Otherwise it refuses while the logminer is alive (unless `opts.force`), the three template
-/// tables are truncated first, and afterwards the watermark, the masking epoch start (`now_ns`) and the masking version are stored.
+/// tables are truncated first, and afterwards the watermark (the legacy key and every stored
+/// per-partition key), the masking epoch start (`now_ns`) and the masking version are stored.
+/// The logminer is alive when any replica's heartbeat is fresh.
 pub async fn remine(
     store: &Store,
     drain: &DrainConfig,
@@ -175,10 +185,11 @@ pub async fn remine_paged(
     let heartbeat = if opts.dry_run {
         None
     } else {
-        store
-            .state_get(KEY_HEARTBEAT)
+        let rows = store
+            .state_get_prefix(KEY_HEARTBEAT)
             .await
-            .context("read logminer heartbeat")?
+            .context("read logminer heartbeats")?;
+        newest_heartbeat(&rows)
     };
     if !opts.dry_run {
         heartbeat_ok(heartbeat, now_ns, opts.force).map_err(anyhow::Error::msg)?;
@@ -259,8 +270,21 @@ pub async fn remine_paged(
 
     if !opts.dry_run {
         if let Some(ts) = max_ts {
+            // The per-partition keys take precedence over the legacy one, so each stored one is
+            // moved to the re-mined watermark too.
+            let stored = store
+                .state_get_prefix(KEY_WATERMARK)
+                .await
+                .context("read watermarks")?;
+            let mut entries = vec![(KEY_WATERMARK.to_string(), ts)];
+            entries.extend(
+                Watermarks::from_rows(&stored)
+                    .partitions
+                    .keys()
+                    .map(|&p| (watermark_key(p), ts)),
+            );
             store
-                .state_put(KEY_WATERMARK, ts)
+                .state_put_many(&entries)
                 .await
                 .context("store watermark")?;
         }
@@ -318,6 +342,33 @@ mod tests {
         let just_under = NOW - (3 * 60 * NS_PER_SEC - 1);
         assert!(heartbeat_ok(Some(just_under), NOW, false).is_err());
         assert!(heartbeat_ok(Some(NOW + 5 * NS_PER_SEC), NOW, false).is_err());
+    }
+
+    #[test]
+    fn the_freshest_of_all_replica_heartbeats_decides() {
+        let rows = |v: &[(&str, i64)]| -> Vec<(String, i64)> {
+            v.iter().map(|&(k, n)| (k.to_string(), n)).collect()
+        };
+        assert_eq!(newest_heartbeat(&[]), None);
+        // The legacy key is stale, one replica is stale, another is fresh: refuse.
+        let fresh = rows(&[
+            ("logminer_heartbeat_ns", NOW - 3_600 * NS_PER_SEC),
+            ("logminer_heartbeat_ns:a", NOW - 600 * NS_PER_SEC),
+            ("logminer_heartbeat_ns:b", NOW - 10 * NS_PER_SEC),
+        ]);
+        assert_eq!(newest_heartbeat(&fresh), Some(NOW - 10 * NS_PER_SEC));
+        assert!(heartbeat_ok(newest_heartbeat(&fresh), NOW, false).is_err());
+        // Only the legacy key is fresh (a logminer from before replicas): refuse too.
+        let legacy = rows(&[
+            ("logminer_heartbeat_ns", NOW - 10 * NS_PER_SEC),
+            ("logminer_heartbeat_ns:a", NOW - 600 * NS_PER_SEC),
+        ]);
+        assert!(heartbeat_ok(newest_heartbeat(&legacy), NOW, false).is_err());
+        let stale = rows(&[
+            ("logminer_heartbeat_ns:a", NOW - 600 * NS_PER_SEC),
+            ("logminer_heartbeat_ns:b", NOW - 300 * NS_PER_SEC),
+        ]);
+        assert!(heartbeat_ok(newest_heartbeat(&stale), NOW, false).is_ok());
     }
 
     #[test]

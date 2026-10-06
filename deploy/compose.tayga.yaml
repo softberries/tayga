@@ -54,12 +54,20 @@ services:
       tayga-migrate:
         condition: service_completed_successfully
 
+  # Consumes tayga.logs (keyed by service) in consumer group tayga-logminer.
+  # No container_name, so it can scale: LOGMINER_REPLICAS (default 1) sets the
+  # replica count, and each replica mines the services of its partitions.
+  # Address it as the compose service (`docker compose ... logs tayga-logminer`);
+  # the DNS name tayga-logminer returns every replica, in shuffled order.
   tayga-logminer:
     image: tayga:dev
-    container_name: tayga-logminer
     command: ["tayga-logminer"]
     environment: *tayga-env
     restart: unless-stopped
+    # Shutdown flushes pending work, then runs one new-template pass bounded at 20 s.
+    stop_grace_period: 40s
+    deploy:
+      replicas: ${LOGMINER_REPLICAS:-1}
     depends_on:
       redpanda:
         condition: service_healthy

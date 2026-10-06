@@ -99,6 +99,12 @@ struct SilenceSettingRow {
 }
 
 #[derive(clickhouse::Row, Deserialize)]
+struct StateRow {
+    key: String,
+    value: i64,
+}
+
+#[derive(clickhouse::Row, Deserialize)]
 struct SilenceEnabledRow {
     template_id: u64,
     minutes: u32,
@@ -162,31 +168,44 @@ impl Store {
             .await
     }
 
+    /// Spike alerts of `services` still active within `active_min`. An empty `services` (a
+    /// replica that owns nothing yet) yields no rows.
     pub async fn active_spike_alerts(
         &self,
         active_min: u32,
+        services: &[String],
     ) -> clickhouse::error::Result<Vec<LogAlertRow>> {
+        if services.is_empty() {
+            return Ok(Vec::new());
+        }
         self.client()
             .query(
                 "SELECT alert_id, kind, template_id, service, template, started_at, last_at, \
                  window_count, peak_count, baseline_per_window, example_trace_ids, version, \
                  baseline_day, baseline_week \
                  FROM log_alerts FINAL WHERE kind = 'spike' \
-                 AND last_at > now64(9) - toIntervalMinute(?)",
+                 AND last_at > now64(9) - toIntervalMinute(?) \
+                 AND service IN ?",
             )
             .bind(active_min)
+            .bind(services)
             .fetch_all()
             .await
     }
 
     /// Templates with at least `min_count` hits in the last `spike_min` minutes, with their
-    /// hit total over the `baseline_min` minutes before that.
+    /// hit total over the `baseline_min` minutes before that, restricted to `services`. An empty
+    /// `services` yields no rows.
     pub async fn template_windows(
         &self,
         spike_min: u32,
         baseline_min: u32,
         min_count: u64,
+        services: &[String],
     ) -> clickhouse::error::Result<Vec<TemplateWindowRow>> {
+        if services.is_empty() {
+            return Ok(Vec::new());
+        }
         self.client()
             .query(
                 "SELECT h.template_id AS template_id, t.service AS service, t.template AS template, \
@@ -197,7 +216,7 @@ impl Store {
                             uniqExactIf(log_id, ts > now64(9) - toIntervalMinute(?)) AS current, \
                             uniqExactIf(log_id, ts <= now64(9) - toIntervalMinute(?)) AS baseline_total \
                      FROM log_template_hits \
-                     WHERE ts > now64(9) - toIntervalMinute(?) \
+                     WHERE ts > now64(9) - toIntervalMinute(?) AND service IN ? \
                      GROUP BY template_id \
                      HAVING current >= ? \
                  ) AS h \
@@ -207,6 +226,7 @@ impl Store {
             .bind(spike_min)
             .bind(spike_min)
             .bind(spike_min.saturating_add(baseline_min))
+            .bind(services)
             .bind(min_count)
             .fetch_all()
             .await
@@ -311,23 +331,31 @@ impl Store {
     }
 
     /// Templates first seen after `since_ns` (exclusive) with no `new` alert yet, with the
-    /// oldest first-seen of their service (to tell a new service from a new template).
+    /// oldest first-seen of their service (to tell a new service from a new template), restricted
+    /// to `services`. An empty `services` yields no rows.
     pub async fn new_template_candidates(
         &self,
         since_ns: i64,
+        services: &[String],
     ) -> clickhouse::error::Result<Vec<NewCandidateRow>> {
+        if services.is_empty() {
+            return Ok(Vec::new());
+        }
         self.client()
             .query(
                 "SELECT t.template_id AS template_id, t.service AS service, t.template AS template, \
                  toUnixTimestamp64Nano(t.first_seen) AS first_seen_ns, \
                  toUnixTimestamp64Nano(s.oldest) AS service_oldest_ns \
                  FROM (SELECT template_id, service, template, first_seen FROM log_templates FINAL \
-                       WHERE first_seen > fromUnixTimestamp64Nano(?)) AS t \
-                 INNER JOIN (SELECT service, min(first_seen) AS oldest FROM log_templates FINAL GROUP BY service) AS s \
+                       WHERE first_seen > fromUnixTimestamp64Nano(?) AND service IN ?) AS t \
+                 INNER JOIN (SELECT service, min(first_seen) AS oldest FROM log_templates FINAL \
+                             WHERE service IN ? GROUP BY service) AS s \
                      ON s.service = t.service \
                  WHERE t.template_id NOT IN (SELECT template_id FROM log_alerts WHERE kind = 'new')",
             )
             .bind(since_ns)
+            .bind(services)
+            .bind(services)
             .fetch_all()
             .await
     }
@@ -377,6 +405,22 @@ impl Store {
             .await
     }
 
+    /// Every persisted logminer state `(key, value)` whose key starts with `prefix`, by key.
+    pub async fn state_get_prefix(
+        &self,
+        prefix: &str,
+    ) -> clickhouse::error::Result<Vec<(String, i64)>> {
+        let rows: Vec<StateRow> = self
+            .client()
+            .query(
+                "SELECT key, value FROM logminer_state FINAL WHERE startsWith(key, ?) ORDER BY key",
+            )
+            .bind(prefix)
+            .fetch_all()
+            .await?;
+        Ok(rows.into_iter().map(|r| (r.key, r.value)).collect())
+    }
+
     /// Stores `value` under `key`; the latest write wins.
     pub async fn state_put(&self, key: &str, value: i64) -> clickhouse::error::Result<()> {
         self.client()
@@ -385,6 +429,21 @@ impl Store {
             .bind(value)
             .execute()
             .await
+    }
+
+    /// Stores each `(key, value)` in one insert; the latest write per key wins. No-op when empty.
+    pub async fn state_put_many(&self, entries: &[(String, i64)]) -> clickhouse::error::Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let rows = vec!["(?, ?, now64(9))"; entries.len()].join(", ");
+        let mut q = self.client().query(&format!(
+            "INSERT INTO logminer_state (key, value, updated) VALUES {rows}"
+        ));
+        for (key, value) in entries {
+            q = q.bind(key.as_str()).bind(*value);
+        }
+        q.execute().await
     }
 
     /// Distinct trace ids of recent hits of a template, newest first.
@@ -457,12 +516,14 @@ impl Store {
     }
 
     /// Silence detection inputs for `template_ids`, read from the hits within their 3-day TTL.
-    /// Ids without a template row are left out.
+    /// Ids without a template row, or whose template belongs to a service outside `services`,
+    /// are left out. An empty `services` yields nothing.
     pub async fn silence_inputs(
         &self,
         template_ids: &[u64],
+        services: &[String],
     ) -> clickhouse::error::Result<Vec<SilenceInput>> {
-        if template_ids.is_empty() {
+        if template_ids.is_empty() || services.is_empty() {
             return Ok(Vec::new());
         }
         let templates: Vec<SilenceTemplateRow> = self
@@ -470,9 +531,11 @@ impl Store {
             .query(
                 "SELECT template_id, service, toUnixTimestamp64Nano(first_seen) AS first_seen_ns, \
                  toUnixTimestamp64Nano(last_seen) AS last_seen_ns \
-                 FROM log_templates FINAL WHERE template_id IN ? ORDER BY template_id",
+                 FROM log_templates FINAL WHERE template_id IN ? AND service IN ? \
+                 ORDER BY template_id",
             )
             .bind(template_ids)
+            .bind(services)
             .fetch_all()
             .await?;
         let t_last: Vec<TemplateLastRow> = self

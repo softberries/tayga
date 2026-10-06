@@ -221,7 +221,10 @@ impl SignalShape for LogsShape {
 }
 
 /// Generic implementation of the regrouping algorithm.
-fn split_impl<Shape: SignalShape>(req: Shape::Request) -> Vec<Routed<Shape::Request>> {
+fn split_impl<Shape: SignalShape>(
+    req: Shape::Request,
+    by_service_only: bool,
+) -> Vec<Routed<Shape::Request>> {
     let mut groups: Vec<Group<Shape::Resource>> = Vec::new();
     let mut index = HashMap::new();
 
@@ -235,9 +238,13 @@ fn split_impl<Shape: SignalShape>(req: Shape::Request) -> Vec<Routed<Shape::Requ
             let (scope_field, scope_schema_url, items) = Shape::consume_items_from_scope(ss);
 
             for item in items {
-                let key = TraceId::from_slice(Shape::item_trace_id(&item))
-                    .map(RoutingKey::Trace)
-                    .unwrap_or_else(|| RoutingKey::Service(service.clone()));
+                let key = if by_service_only {
+                    RoutingKey::Service(service.clone())
+                } else {
+                    TraceId::from_slice(Shape::item_trace_id(&item))
+                        .map(RoutingKey::Trace)
+                        .unwrap_or_else(|| RoutingKey::Service(service.clone()))
+                };
 
                 let g = group_for(&mut groups, &mut index, key);
 
@@ -275,11 +282,18 @@ fn split_impl<Shape: SignalShape>(req: Shape::Request) -> Vec<Routed<Shape::Requ
 }
 
 pub fn split_traces(req: ExportTraceServiceRequest) -> Vec<Routed<ExportTraceServiceRequest>> {
-    split_impl::<TracesShape>(req)
+    split_impl::<TracesShape>(req, false)
 }
 
 pub fn split_logs(req: ExportLogsServiceRequest) -> Vec<Routed<ExportLogsServiceRequest>> {
-    split_impl::<LogsShape>(req)
+    split_impl::<LogsShape>(req, false)
+}
+
+/// Like [`split_logs`], but every record is routed by its service name, trace id or not.
+pub fn split_logs_by_service(
+    req: ExportLogsServiceRequest,
+) -> Vec<Routed<ExportLogsServiceRequest>> {
+    split_impl::<LogsShape>(req, true)
 }
 
 #[cfg(test)]

@@ -153,7 +153,7 @@ mod tests {
             (WRITER, 21),
             (ASSEMBLER, 10),
             (LOGMINER, 23),
-            (INGEST, 6),
+            (INGEST, 7),
             (API, 1),
         ] {
             let p = parse_counted(text);

@@ -18,6 +18,9 @@ pub struct KafkaSettings {
     pub topic: String,
     #[serde(default = "default_partitions")]
     pub partitions: i32,
+    /// Logs keyed by service name, for the logminer replicas.
+    #[serde(default = "default_logs_topic")]
+    pub logs_topic: String,
     /// Byte budget for one record value; ingest splits larger groups. Must stay below
     /// `MAX_MESSAGE_BYTES` to leave room for the key, headers and record overhead.
     #[serde(default = "default_max_record_bytes")]
@@ -29,6 +32,10 @@ pub const MAX_MESSAGE_BYTES: usize = 1_048_576;
 
 fn default_topic() -> String {
     "tayga.signals".to_string()
+}
+
+fn default_logs_topic() -> String {
+    "tayga.logs".to_string()
 }
 
 fn default_partitions() -> i32 {
@@ -47,6 +54,11 @@ impl KafkaSettings {
             "kafka.max_record_bytes must be between 1 and {} (got {})",
             MAX_MESSAGE_BYTES - 1,
             self.max_record_bytes
+        );
+        anyhow::ensure!(
+            self.logs_topic != self.topic,
+            "kafka.logs_topic must differ from kafka.topic (both are {:?})",
+            self.topic
         );
         anyhow::ensure!(
             self.partitions > 0,
@@ -123,13 +135,27 @@ pub fn consumer_with_context<C: ConsumerContext + 'static>(
 /// Creates the topic if missing (with `max.message.bytes` matching the producer);
 /// an existing topic is left as is.
 pub async fn ensure_topic(s: &KafkaSettings) -> anyhow::Result<()> {
+    create_topics(s, &[&s.topic]).await
+}
+
+/// [`ensure_topic`] for the signals topic and the logs topic.
+pub async fn ensure_topics(s: &KafkaSettings) -> anyhow::Result<()> {
+    create_topics(s, &[&s.topic, &s.logs_topic]).await
+}
+
+async fn create_topics(s: &KafkaSettings, names: &[&str]) -> anyhow::Result<()> {
     let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
         .set("bootstrap.servers", &s.brokers)
         .create()?;
     let max_message_bytes = MAX_MESSAGE_BYTES.to_string();
-    let topic = NewTopic::new(&s.topic, s.partitions, TopicReplication::Fixed(1))
-        .set("max.message.bytes", &max_message_bytes);
-    for result in admin.create_topics(&[topic], &AdminOptions::new()).await? {
+    let topics: Vec<NewTopic> = names
+        .iter()
+        .map(|name| {
+            NewTopic::new(name, s.partitions, TopicReplication::Fixed(1))
+                .set("max.message.bytes", &max_message_bytes)
+        })
+        .collect();
+    for result in admin.create_topics(&topics, &AdminOptions::new()).await? {
         match result {
             Ok(_) | Err((_, RDKafkaErrorCode::TopicAlreadyExists)) => {}
             Err((name, code)) => anyhow::bail!("create topic {name}: {code}"),
@@ -164,6 +190,7 @@ mod tests {
     fn settings_defaults() {
         let s: KafkaSettings = serde_json::from_str(r#"{"brokers":"b:1"}"#).unwrap();
         assert_eq!(s.topic, "tayga.signals");
+        assert_eq!(s.logs_topic, "tayga.logs");
         assert_eq!(s.partitions, 12);
         assert_eq!(s.max_record_bytes, 900_000);
         assert!(s.max_record_bytes < MAX_MESSAGE_BYTES);
@@ -203,6 +230,7 @@ mod tests {
         KafkaSettings {
             brokers: "b:1".into(),
             topic: "t".into(),
+            logs_topic: "l".into(),
             partitions: 3,
             max_record_bytes,
         }
@@ -225,6 +253,13 @@ mod tests {
     fn validate_rejects_non_positive_partitions() {
         let mut s = settings(1000);
         s.partitions = 0;
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_logs_topic_equal_to_topic() {
+        let mut s = settings(1000);
+        s.logs_topic = s.topic.clone();
         assert!(s.validate().is_err());
     }
 }

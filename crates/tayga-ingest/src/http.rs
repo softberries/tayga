@@ -1,6 +1,6 @@
 //! OTLP/HTTP: protobuf or JSON bodies, optionally gzip-compressed.
 
-use crate::metrics::IngestMetrics;
+use crate::metrics::{IngestMetrics, Published};
 use crate::records::{Converted, log_records, now_unix_nano, trace_records};
 use crate::sink::Sink;
 use axum::Router;
@@ -173,12 +173,13 @@ where
     let records = converted.records;
     let count = records.len();
     if count > 0 {
+        let published = Published::of(&records);
         if let Err(e) = ingest.sink.publish(records).await {
             ingest.metrics.publish_failures.inc();
             tracing::warn!(records = count, error = %e, "otlp/http export failed: kafka publish");
             return (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response();
         }
-        ingest.metrics.record_published(kind, count);
+        ingest.metrics.record_published(kind, &published);
     }
     encode(fmt, &response)
 }
@@ -186,7 +187,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grpc::tests::{FakeSink, TEST_MAX_RECORD_BYTES, two_trace_request};
+    use crate::grpc::tests::{FakeSink, TEST_MAX_RECORD_BYTES, one_log_request, two_trace_request};
+    use crate::records::Topic;
     use axum::body::Body;
     use axum::http::Request;
     use flate2::Compression;
@@ -268,23 +270,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_accepts_logs_protobuf() {
-        use tayga_model::otlp::collector::logs::v1::ExportLogsServiceRequest;
-        use tayga_model::otlp::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
+    async fn http_logs_go_to_both_topics() {
         let sink = Arc::new(FakeSink::default());
-        let req = ExportLogsServiceRequest {
-            resource_logs: vec![ResourceLogs {
-                scope_logs: vec![ScopeLogs {
-                    log_records: vec![LogRecord {
-                        trace_id: vec![3; 16],
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-        };
-        let body = prost::Message::encode_to_vec(&req);
+        let body = prost::Message::encode_to_vec(&one_log_request());
         assert_eq!(
             post_to(
                 sink.clone(),
@@ -296,7 +284,27 @@ mod tests {
             .await,
             StatusCode::OK
         );
-        assert_eq!(sink.published.lock().unwrap().len(), 1);
+        let topics: Vec<_> = sink
+            .published
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.topic)
+            .collect();
+        assert_eq!(topics, vec![Topic::Signals, Topic::Logs]);
+    }
+
+    #[tokio::test]
+    async fn http_logs_failure_on_either_topic_is_503() {
+        for fail_topic in [Topic::Signals, Topic::Logs] {
+            let sink = Arc::new(FakeSink {
+                fail_topic: Some(fail_topic),
+                ..Default::default()
+            });
+            let body = prost::Message::encode_to_vec(&one_log_request());
+            let status = post_to(sink, "/v1/logs", "application/x-protobuf", false, body).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{fail_topic:?}");
+        }
     }
 
     #[tokio::test]
@@ -317,7 +325,7 @@ mod tests {
     async fn http_counts_published_and_rejected() {
         use tayga_common::metrics::KindLabel;
         let mut registry = Registry::default();
-        let metrics = IngestMetrics::register(&mut registry);
+        let metrics = IngestMetrics::register(&mut registry, "tayga.signals", "tayga.logs");
         let app = router(
             Arc::new(FakeSink::default()),
             TEST_MAX_RECORD_BYTES,
