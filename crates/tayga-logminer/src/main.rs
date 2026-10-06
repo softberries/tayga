@@ -12,8 +12,8 @@ use tayga_common::metrics::KindLabel;
 use tayga_common::retry::retry_until;
 use tayga_drain::detect::{
     Alert, BaselineMode, DetectConfig, NewCandidate, SpikeSkip, SpikeTracker, TemplateWindow,
-    initial_watermark, is_new, new_alert, new_template_since, seasonal_decision, spike_baseline,
-    template_coverage,
+    initial_watermark, is_new, is_silent, new_alert, new_template_since, seasonal_decision,
+    silence_alert, spike_baseline, template_coverage,
 };
 use tayga_drain::drain::DrainConfig;
 use tayga_drain::preprocess::masking_version;
@@ -23,7 +23,7 @@ use tayga_logminer::miner::{Miner, alert_from_row, alert_json, alert_row};
 use tayga_model::envelope::{Envelope, HEADER_KIND, Kind};
 use tayga_store::ClickHouseSettings;
 use tayga_store::flatten::rows_from_envelope;
-use tayga_store::logs::{LogHitRow, SeasonalWindow};
+use tayga_store::logs::{LogHitRow, SeasonalWindow, SilenceInput};
 use tayga_store::store::Store;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
@@ -228,7 +228,7 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     let restored = templates.len();
     miner.restore(templates);
     metrics.templates.set(miner.len() as i64);
-    let mut tracker = SpikeTracker::default();
+    let mut tracker = Trackers::default();
     let Some(active) = retry_until(
         "load active spike alerts",
         || store.active_spike_alerts(cfg.alert_active_min),
@@ -240,7 +240,7 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     };
     let active: Vec<Alert> = active.iter().filter_map(alert_from_row).collect();
     let active_spikes = active.len();
-    tracker.restore(active);
+    tracker.spikes.restore(active);
     let Some(data_now) = retry_until("load data clock", || store.data_now_ns(), &mut stop_rx).await
     else {
         return Ok(());
@@ -778,7 +778,7 @@ async fn detect(
     producer: &FutureProducer,
     cfg: &LogminerSettings,
     miner: &Miner,
-    tracker: &mut SpikeTracker,
+    tracker: &mut Trackers,
     clock: &mut NewTemplateClock,
     metrics: &LogminerMetrics,
 ) {
@@ -804,7 +804,7 @@ async fn detect(
     metrics
         .detect_seconds
         .observe(started.elapsed().as_secs_f64());
-    tracker.expire(detect_cfg, now);
+    tracker.spikes.expire(detect_cfg, now);
 }
 
 /// Masking epoch at startup: `(epoch start, whether to store the version and start)`.
@@ -846,13 +846,45 @@ fn minutes_covering(first_seen_ns: i64, now_ns: i64, floor_min: u32) -> u32 {
     u32::try_from(age_min).unwrap_or(u32::MAX).max(floor_min)
 }
 
+/// Alert state kept between detection passes.
+#[derive(Debug, Default)]
+struct Trackers {
+    spikes: SpikeTracker,
+    /// Ids of the silence alerts raised so far, to tell a new silence period (counted) from a
+    /// refresh. Pruned to the currently silent templates each pass. Silence alerts need no restore:
+    /// their id and `started_at` are recomputed from `t_last`, so a restart continues the same
+    /// alert; the only effect is that a silence alert still running is counted once more.
+    silent: HashSet<String>,
+}
+
+/// Silence alerts of the silent templates among `inputs` (log time, spec 7b §2.2), `settings`
+/// being `(template_id, minutes)` of the enabled templates. The template text comes from the
+/// miner; a template it does not know is left out. `baseline_per_window` is 0.0: the spec marks
+/// it informational, and no query for the hour before `t_last` exists.
+fn silent_alerts(
+    settings: &[(u64, u32)],
+    inputs: &[SilenceInput],
+    miner: &Miner,
+    now: i64,
+) -> Vec<Alert> {
+    inputs
+        .iter()
+        .filter_map(|i| {
+            let &(_, minutes) = settings.iter().find(|(id, _)| *id == i.template_id)?;
+            is_silent(minutes, i.first_seen_ns, i.t_last_ns, i.s_last_ns).then_some(())?;
+            let template = miner.template(i.template_id)?;
+            Some(silence_alert(i, &template, minutes, 0.0, now))
+        })
+        .collect()
+}
+
 /// Alerts to write, each with whether it was created (as opposed to an active spike updated),
 /// and the data clock the new-template check ran against.
 async fn find_alerts(
     store: &Store,
     cfg: &DetectConfig,
     miner: &Miner,
-    tracker: &mut SpikeTracker,
+    tracker: &mut Trackers,
     clock: &NewTemplateClock,
     now: i64,
     metrics: &LogminerMetrics,
@@ -940,8 +972,13 @@ async fn find_alerts(
         }
         let examples = examples(store, w.template_id, cfg.spike_window_min).await;
         let comparators = (day.map(|n| n as f64), week.map(|n| n as f64));
-        out.push(tracker.observe(cfg, &w, baseline, comparators, examples, now));
+        out.push(
+            tracker
+                .spikes
+                .observe(cfg, &w, baseline, comparators, examples, now),
+        );
     }
+    out.extend(silence_pass(store, miner, tracker, now, metrics).await);
     let since = new_template_since(clock.watermark);
     let candidates = store.new_template_candidates(since).await?;
     for r in candidates {
@@ -962,6 +999,46 @@ async fn find_alerts(
         out.push((new_alert(&c, examples, now), true));
     }
     Ok((out, data_now))
+}
+
+/// Silence alerts of this pass. A failed lookup is logged and skips silence only, so it cannot
+/// drop the pass's spike and new-template alerts; the gauge then keeps its last value.
+async fn silence_pass(
+    store: &Store,
+    miner: &Miner,
+    tracker: &mut Trackers,
+    now: i64,
+    metrics: &LogminerMetrics,
+) -> Vec<(Alert, bool)> {
+    let lookup = async {
+        let settings = store.silence_enabled().await?;
+        let ids: Vec<u64> = settings.iter().map(|&(id, _)| id).collect();
+        let inputs = store.silence_inputs(&ids).await?;
+        anyhow::Ok((settings, inputs))
+    };
+    let (settings, inputs) = match lookup.await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "silence lookup failed, silence alerts skipped this pass");
+            return Vec::new();
+        }
+    };
+    let alerts = silent_alerts(&settings, &inputs, miner, now);
+    metrics.silence_alerts.set(alerts.len() as i64);
+    mark_created(&mut tracker.silent, alerts)
+}
+
+/// Pairs each alert with whether its id is new, and keeps only the current ids.
+fn mark_created(seen: &mut HashSet<String>, alerts: Vec<Alert>) -> Vec<(Alert, bool)> {
+    let out: Vec<_> = alerts
+        .into_iter()
+        .map(|a| {
+            let created = !seen.contains(&a.alert_id);
+            (a, created)
+        })
+        .collect();
+    *seen = out.iter().map(|(a, _)| a.alert_id.clone()).collect();
+    out
 }
 
 /// A `new` candidate whose kept status code merely split it out of a template that existed before
@@ -1156,6 +1233,76 @@ mod tests {
             first_seen_ns,
             service_oldest_ns: 0,
         }
+    }
+
+    fn silence_input(id: u64, t_last: Option<i64>, s_last: Option<i64>) -> SilenceInput {
+        SilenceInput {
+            template_id: id,
+            service: "svc".into(),
+            first_seen_ns: MIN_NS,
+            t_last_ns: t_last,
+            s_last_ns: s_last,
+        }
+    }
+
+    fn silence_miner(id: u64) -> Miner {
+        let mut miner = Miner::new(DrainConfig::default());
+        miner.restore(vec![template_row(id, "svc", "db down", MIN_NS)]);
+        miner
+    }
+
+    #[test]
+    fn a_silent_template_keeps_one_alert_id_and_refreshes_last_at() {
+        let miner = silence_miner(7);
+        let settings = [(7, 10)];
+        let t = 100 * MIN_NS;
+        let inputs = [silence_input(7, Some(t), Some(t + 12 * MIN_NS))];
+        let mut seen = HashSet::new();
+        let first = mark_created(&mut seen, silent_alerts(&settings, &inputs, &miner, 5));
+        assert_eq!(first.len(), 1);
+        assert!(first[0].1, "the first pass creates the alert");
+        assert_eq!(first[0].0.kind, tayga_drain::detect::AlertKind::Silence);
+        assert_eq!(first[0].0.template, "db down");
+        // A later pass, and a restart (fresh `seen`), keep the id and move `last_at`.
+        let later = [silence_input(7, Some(t), Some(t + 30 * MIN_NS))];
+        let second = mark_created(&mut seen, silent_alerts(&settings, &later, &miner, 9));
+        assert!(!second[0].1);
+        assert_eq!(second[0].0.alert_id, first[0].0.alert_id);
+        assert_eq!(second[0].0.last_at_ns, 9);
+        assert_eq!(second[0].0.started_at_ns, first[0].0.started_at_ns);
+        let restarted = silent_alerts(&settings, &later, &miner, 11);
+        assert_eq!(restarted[0].alert_id, first[0].0.alert_id);
+    }
+
+    #[test]
+    fn silence_stops_with_a_hit_and_starts_a_new_period_afterwards() {
+        let miner = silence_miner(7);
+        let settings = [(7, 10)];
+        let t = 100 * MIN_NS;
+        let mut seen = HashSet::new();
+        let a = silent_alerts(
+            &settings,
+            &[silence_input(7, Some(t), Some(t + 20 * MIN_NS))],
+            &miner,
+            1,
+        );
+        mark_created(&mut seen, a.clone());
+        // A hit arrives: not silent, nothing is refreshed.
+        let t2 = t + 25 * MIN_NS;
+        let hit = [silence_input(7, Some(t2), Some(t2 + 2 * MIN_NS))];
+        assert!(mark_created(&mut seen, silent_alerts(&settings, &hit, &miner, 2)).is_empty());
+        // Silent again: a new id, counted as created.
+        let again = [silence_input(7, Some(t2), Some(t2 + 15 * MIN_NS))];
+        let b = mark_created(&mut seen, silent_alerts(&settings, &again, &miner, 3));
+        assert!(b[0].1);
+        assert_ne!(b[0].0.alert_id, a[0].alert_id);
+    }
+
+    #[test]
+    fn a_service_without_hits_raises_no_silence_alert() {
+        let miner = silence_miner(7);
+        let inputs = [silence_input(7, None, None)];
+        assert!(silent_alerts(&[(7, 1)], &inputs, &miner, 1).is_empty());
     }
 
     #[test]

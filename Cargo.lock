@@ -2020,6 +2020,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "tayga-analysis",
+ "tayga-store",
 ]
 
 [[package]]

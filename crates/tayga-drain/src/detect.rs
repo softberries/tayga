@@ -3,6 +3,7 @@
 use crate::drain::OVERFLOW;
 use std::collections::HashMap;
 use tayga_analysis::fingerprint::fingerprint;
+use tayga_store::logs::SilenceInput;
 
 const MIN_NS: i64 = 60_000_000_000;
 
@@ -267,6 +268,57 @@ pub fn new_alert(c: &NewCandidate, examples: Vec<String>, now_ns: i64) -> Alert 
         baseline_day: None,
         baseline_week: None,
         example_trace_ids: examples,
+    }
+}
+
+/// Silence test in log time (spec 7b §2.2): the template is silent when the newest hit of its
+/// service is at least `minutes` past the template's own newest hit, or past `first_seen` when it
+/// has none inside the hits TTL. A service without any hit (`s_last_ns` is `None`, e.g. a
+/// pipeline outage) is never judged, so a missing feed cannot look like silence.
+pub fn is_silent(
+    minutes: u32,
+    first_seen_ns: i64,
+    t_last_ns: Option<i64>,
+    s_last_ns: Option<i64>,
+) -> bool {
+    let Some(s_last) = s_last_ns else {
+        return false;
+    };
+    let since = t_last_ns.unwrap_or(first_seen_ns);
+    s_last.saturating_sub(since) >= i64::from(minutes) * MIN_NS
+}
+
+/// The alert of a silent template. The id hashes the template and the `t_last` (or `first_seen`)
+/// at which the silence began, so it is the same on every pass of one silence period, and across
+/// a logminer restart, and changes once the template gets a hit and goes silent again.
+/// `started_at` is that `t_last` plus `minutes`; `last_at` is `now_ns`. `baseline_per_window`
+/// is informational.
+pub fn silence_alert(
+    input: &SilenceInput,
+    template: &str,
+    minutes: u32,
+    baseline_per_window: f64,
+    now_ns: i64,
+) -> Alert {
+    let since = input.t_last_ns.unwrap_or(input.first_seen_ns);
+    Alert {
+        alert_id: id_hex(&[
+            "silence",
+            &input.template_id.to_string(),
+            &since.to_string(),
+        ]),
+        kind: AlertKind::Silence,
+        template_id: input.template_id,
+        service: input.service.clone(),
+        template: template.to_string(),
+        started_at_ns: since.saturating_add(i64::from(minutes) * MIN_NS),
+        last_at_ns: now_ns,
+        window_count: 0,
+        peak_count: 0,
+        baseline_per_window,
+        baseline_day: None,
+        baseline_week: None,
+        example_trace_ids: Vec::new(),
     }
 }
 
@@ -683,6 +735,71 @@ mod tests {
         );
         assert!(created);
         assert_ne!(a3.alert_id, a1.alert_id);
+    }
+
+    fn silence_input(t_last: Option<i64>, s_last: Option<i64>) -> SilenceInput {
+        SilenceInput {
+            template_id: 7,
+            service: "svc".into(),
+            first_seen_ns: 5 * MIN_NS,
+            t_last_ns: t_last,
+            s_last_ns: s_last,
+        }
+    }
+
+    #[test]
+    fn silent_at_exactly_the_minutes_and_not_one_ns_before() {
+        let t = 100 * MIN_NS;
+        assert!(is_silent(10, 0, Some(t), Some(t + 10 * MIN_NS)));
+        assert!(!is_silent(10, 0, Some(t), Some(t + 10 * MIN_NS - 1)));
+    }
+
+    #[test]
+    fn no_service_hit_is_never_silent() {
+        assert!(!is_silent(1, 0, Some(0), None));
+        assert!(!is_silent(1, 0, None, None));
+    }
+
+    #[test]
+    fn a_template_without_hits_falls_back_to_first_seen() {
+        let fs = 5 * MIN_NS;
+        assert!(is_silent(10, fs, None, Some(fs + 10 * MIN_NS)));
+        assert!(!is_silent(10, fs, None, Some(fs + 9 * MIN_NS)));
+    }
+
+    #[test]
+    fn silence_alert_id_is_stable_per_period() {
+        let t = 100 * MIN_NS;
+        let a = silence_alert(
+            &silence_input(Some(t), Some(t + 20 * MIN_NS)),
+            "x",
+            10,
+            0.0,
+            1,
+        );
+        let b = silence_alert(
+            &silence_input(Some(t), Some(t + 30 * MIN_NS)),
+            "x",
+            10,
+            0.0,
+            2,
+        );
+        assert_eq!(a.alert_id, b.alert_id);
+        assert_eq!(a.kind, AlertKind::Silence);
+        assert_eq!(a.started_at_ns, t + 10 * MIN_NS);
+        assert_eq!((a.last_at_ns, b.last_at_ns), (1, 2));
+        assert_eq!(a.window_count, 0);
+        let t2 = t + 40 * MIN_NS; // a new hit, then silent again: a new period
+        let c = silence_alert(
+            &silence_input(Some(t2), Some(t2 + 20 * MIN_NS)),
+            "x",
+            10,
+            0.0,
+            3,
+        );
+        assert_ne!(a.alert_id, c.alert_id);
+        let d = silence_alert(&silence_input(None, Some(t)), "x", 10, 0.0, 3);
+        assert_eq!(d.started_at_ns, 15 * MIN_NS);
     }
 
     #[test]

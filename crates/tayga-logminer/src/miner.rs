@@ -72,6 +72,11 @@ impl Miner {
             .would_have_matched_pre_epoch(service, &tokens, epoch_start_ns)
     }
 
+    /// Current template text of `template_id`, if the miner knows it.
+    pub fn template(&self, template_id: u64) -> Option<String> {
+        self.drain.cluster(template_id).map(Cluster::template)
+    }
+
     pub fn len(&self) -> usize {
         self.drain.len()
     }
