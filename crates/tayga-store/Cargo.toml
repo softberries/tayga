@@ -14,5 +14,11 @@ tracing.workspace = true
 xxhash-rust.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
+flate2.workspace = true
 rand.workspace = true
 tokio.workspace = true
+
+[[bench]]
+name = "flatten"
+harness = false

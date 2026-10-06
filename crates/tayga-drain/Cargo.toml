@@ -8,4 +8,11 @@ license.workspace = true
 tayga-analysis.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 flate2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[[bench]]
+name = "mining"
+harness = false
