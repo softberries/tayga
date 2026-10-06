@@ -3,6 +3,10 @@ DEMO_DIR := $(TAYGA_ROOT)/vendor/opentelemetry-demo
 export TAYGA_ROOT
 export DEMO_VERSION := 3.1.0
 export OTEL_COLLECTOR_CONFIG_EXTRAS := $(TAYGA_ROOT)/deploy/otelcol-config-tayga.yml
+# Logminer replicas (deploy.replicas in deploy/compose.tayga.yaml), e.g.
+# `LOGMINER_REPLICAS=2 make up`. tayga.logs has 12 partitions, so replicas
+# beyond 12 get none and idle.
+export LOGMINER_REPLICAS ?= 1
 
 COMPOSE := docker compose --project-directory $(DEMO_DIR) \
 	-f $(DEMO_DIR)/compose.yaml \
