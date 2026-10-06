@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 tayga-analysis.workspace = true
-tayga-store.workspace = true
 
 [dev-dependencies]
 flate2.workspace = true

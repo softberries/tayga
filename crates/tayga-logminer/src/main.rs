@@ -11,9 +11,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tayga_common::metrics::KindLabel;
 use tayga_common::retry::retry_until;
 use tayga_drain::detect::{
-    Alert, BaselineMode, DetectConfig, NewCandidate, SpikeSkip, SpikeTracker, TemplateWindow,
-    initial_watermark, is_new, is_silent, new_alert, new_template_since, seasonal_decision,
-    silence_alert, spike_baseline, template_coverage,
+    Alert, BaselineMode, DetectConfig, NewCandidate, SilenceInput, SpikeSkip, SpikeTracker,
+    TemplateWindow, initial_watermark, is_new, is_silent, new_alert, new_template_since,
+    seasonal_decision, silence_alert, spike_baseline, template_coverage,
 };
 use tayga_drain::drain::DrainConfig;
 use tayga_drain::preprocess::masking_version;
@@ -23,7 +23,7 @@ use tayga_logminer::miner::{Miner, alert_from_row, alert_json, alert_row};
 use tayga_model::envelope::{Envelope, HEADER_KIND, Kind};
 use tayga_store::ClickHouseSettings;
 use tayga_store::flatten::rows_from_envelope;
-use tayga_store::logs::{LogHitRow, SeasonalWindow, SilenceInput};
+use tayga_store::logs::{LogHitRow, SeasonalWindow};
 use tayga_store::store::Store;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
@@ -865,13 +865,14 @@ fn silent_alerts(
     settings: &[(u64, u32)],
     inputs: &[SilenceInput],
     miner: &Miner,
+    clock_ns: i64,
     now: i64,
 ) -> Vec<Alert> {
     inputs
         .iter()
         .filter_map(|i| {
             let &(_, minutes) = settings.iter().find(|(id, _)| *id == i.template_id)?;
-            is_silent(minutes, i.first_seen_ns, i.t_last_ns, i.s_last_ns).then_some(())?;
+            is_silent(minutes, i.first_seen_ns, i.t_last_ns, i.s_last_ns, clock_ns).then_some(())?;
             let template = miner.template(i.template_id)?;
             Some(silence_alert(i, &template, minutes, 0.0, now))
         })
@@ -978,7 +979,7 @@ async fn find_alerts(
                 .observe(cfg, &w, baseline, comparators, examples, now),
         );
     }
-    out.extend(silence_pass(store, miner, tracker, now, metrics).await);
+    out.extend(silence_pass(store, miner, tracker, data_now, now, metrics).await);
     let since = new_template_since(clock.watermark);
     let candidates = store.new_template_candidates(since).await?;
     for r in candidates {
@@ -1007,13 +1008,25 @@ async fn silence_pass(
     store: &Store,
     miner: &Miner,
     tracker: &mut Trackers,
+    clock_ns: i64,
     now: i64,
     metrics: &LogminerMetrics,
 ) -> Vec<(Alert, bool)> {
     let lookup = async {
         let settings = store.silence_enabled().await?;
         let ids: Vec<u64> = settings.iter().map(|&(id, _)| id).collect();
-        let inputs = store.silence_inputs(&ids).await?;
+        let inputs: Vec<SilenceInput> = store
+            .silence_inputs(&ids)
+            .await?
+            .into_iter()
+            .map(|i| SilenceInput {
+                template_id: i.template_id,
+                service: i.service,
+                first_seen_ns: i.first_seen_ns,
+                t_last_ns: i.t_last_ns,
+                s_last_ns: i.s_last_ns,
+            })
+            .collect();
         anyhow::Ok((settings, inputs))
     };
     let (settings, inputs) = match lookup.await {
@@ -1023,7 +1036,7 @@ async fn silence_pass(
             return Vec::new();
         }
     };
-    let alerts = silent_alerts(&settings, &inputs, miner, now);
+    let alerts = silent_alerts(&settings, &inputs, miner, clock_ns, now);
     metrics.silence_alerts.set(alerts.len() as i64);
     mark_created(&mut tracker.silent, alerts)
 }
@@ -1258,19 +1271,25 @@ mod tests {
         let t = 100 * MIN_NS;
         let inputs = [silence_input(7, Some(t), Some(t + 12 * MIN_NS))];
         let mut seen = HashSet::new();
-        let first = mark_created(&mut seen, silent_alerts(&settings, &inputs, &miner, 5));
+        let first = mark_created(
+            &mut seen,
+            silent_alerts(&settings, &inputs, &miner, i64::MAX, 5),
+        );
         assert_eq!(first.len(), 1);
         assert!(first[0].1, "the first pass creates the alert");
         assert_eq!(first[0].0.kind, tayga_drain::detect::AlertKind::Silence);
         assert_eq!(first[0].0.template, "db down");
         // A later pass, and a restart (fresh `seen`), keep the id and move `last_at`.
         let later = [silence_input(7, Some(t), Some(t + 30 * MIN_NS))];
-        let second = mark_created(&mut seen, silent_alerts(&settings, &later, &miner, 9));
+        let second = mark_created(
+            &mut seen,
+            silent_alerts(&settings, &later, &miner, i64::MAX, 9),
+        );
         assert!(!second[0].1);
         assert_eq!(second[0].0.alert_id, first[0].0.alert_id);
         assert_eq!(second[0].0.last_at_ns, 9);
         assert_eq!(second[0].0.started_at_ns, first[0].0.started_at_ns);
-        let restarted = silent_alerts(&settings, &later, &miner, 11);
+        let restarted = silent_alerts(&settings, &later, &miner, i64::MAX, 11);
         assert_eq!(restarted[0].alert_id, first[0].0.alert_id);
     }
 
@@ -1284,25 +1303,47 @@ mod tests {
             &settings,
             &[silence_input(7, Some(t), Some(t + 20 * MIN_NS))],
             &miner,
+            i64::MAX,
             1,
         );
         mark_created(&mut seen, a.clone());
         // A hit arrives: not silent, nothing is refreshed.
         let t2 = t + 25 * MIN_NS;
         let hit = [silence_input(7, Some(t2), Some(t2 + 2 * MIN_NS))];
-        assert!(mark_created(&mut seen, silent_alerts(&settings, &hit, &miner, 2)).is_empty());
+        assert!(
+            mark_created(
+                &mut seen,
+                silent_alerts(&settings, &hit, &miner, i64::MAX, 2)
+            )
+            .is_empty()
+        );
         // Silent again: a new id, counted as created.
         let again = [silence_input(7, Some(t2), Some(t2 + 15 * MIN_NS))];
-        let b = mark_created(&mut seen, silent_alerts(&settings, &again, &miner, 3));
+        let b = mark_created(
+            &mut seen,
+            silent_alerts(&settings, &again, &miner, i64::MAX, 3),
+        );
         assert!(b[0].1);
         assert_ne!(b[0].0.alert_id, a[0].alert_id);
+    }
+
+    #[test]
+    fn a_held_back_clock_suppresses_silence_alerts() {
+        let miner = silence_miner(7);
+        let t = 100 * MIN_NS;
+        let inputs = [silence_input(7, Some(t), Some(t + 20 * MIN_NS))];
+        assert!(silent_alerts(&[(7, 10)], &inputs, &miner, t + 5 * MIN_NS, 1).is_empty());
+        assert_eq!(
+            silent_alerts(&[(7, 10)], &inputs, &miner, t + 10 * MIN_NS, 1).len(),
+            1
+        );
     }
 
     #[test]
     fn a_service_without_hits_raises_no_silence_alert() {
         let miner = silence_miner(7);
         let inputs = [silence_input(7, None, None)];
-        assert!(silent_alerts(&[(7, 1)], &inputs, &miner, 1).is_empty());
+        assert!(silent_alerts(&[(7, 1)], &inputs, &miner, i64::MAX, 1).is_empty());
     }
 
     #[test]

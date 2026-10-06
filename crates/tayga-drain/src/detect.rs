@@ -3,7 +3,6 @@
 use crate::drain::OVERFLOW;
 use std::collections::HashMap;
 use tayga_analysis::fingerprint::fingerprint;
-use tayga_store::logs::SilenceInput;
 
 const MIN_NS: i64 = 60_000_000_000;
 
@@ -271,17 +270,33 @@ pub fn new_alert(c: &NewCandidate, examples: Vec<String>, now_ns: i64) -> Alert 
     }
 }
 
+/// Detection inputs of one template for silence alerts (log time, ns). `t_last_ns` is the
+/// template's newest hit, `s_last_ns` the newest hit over its service's templates; both are
+/// `None` when no hit is left within the hits TTL.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SilenceInput {
+    pub template_id: u64,
+    pub service: String,
+    pub first_seen_ns: i64,
+    pub t_last_ns: Option<i64>,
+    pub s_last_ns: Option<i64>,
+}
+
 /// Silence test in log time (spec 7b §2.2): the template is silent when the newest hit of its
 /// service is at least `minutes` past the template's own newest hit, or past `first_seen` when it
 /// has none inside the hits TTL. A service without any hit (`s_last_ns` is `None`, e.g. a
 /// pipeline outage) is never judged, so a missing feed cannot look like silence.
+/// `clock_ns` is the detection's partition data clock, which holds back for a lagging partition:
+/// the service's newest hit counts only up to it (`min(s_last, clock)`), so lines still sitting
+/// in the lag cannot make a template look silent.
 pub fn is_silent(
     minutes: u32,
     first_seen_ns: i64,
     t_last_ns: Option<i64>,
     s_last_ns: Option<i64>,
+    clock_ns: i64,
 ) -> bool {
-    let Some(s_last) = s_last_ns else {
+    let Some(s_last) = s_last_ns.map(|s| s.min(clock_ns)) else {
         return false;
     };
     let since = t_last_ns.unwrap_or(first_seen_ns);
@@ -750,21 +765,48 @@ mod tests {
     #[test]
     fn silent_at_exactly_the_minutes_and_not_one_ns_before() {
         let t = 100 * MIN_NS;
-        assert!(is_silent(10, 0, Some(t), Some(t + 10 * MIN_NS)));
-        assert!(!is_silent(10, 0, Some(t), Some(t + 10 * MIN_NS - 1)));
+        assert!(is_silent(10, 0, Some(t), Some(t + 10 * MIN_NS), i64::MAX));
+        assert!(!is_silent(
+            10,
+            0,
+            Some(t),
+            Some(t + 10 * MIN_NS - 1),
+            i64::MAX
+        ));
+    }
+
+    #[test]
+    fn a_clock_below_the_service_hit_suppresses_silence() {
+        let t = 100 * MIN_NS;
+        let s = Some(t + 20 * MIN_NS);
+        assert!(is_silent(10, 0, Some(t), s, t + 20 * MIN_NS));
+        // The clock holds at 5 min past t_last: the lagging lines may still hold a hit.
+        assert!(!is_silent(10, 0, Some(t), s, t + 5 * MIN_NS));
+        assert!(!is_silent(10, 0, Some(t), s, t + 10 * MIN_NS - 1));
+        assert!(is_silent(10, 0, Some(t), s, t + 10 * MIN_NS));
+    }
+
+    #[test]
+    fn a_clock_at_or_above_the_service_hit_changes_nothing() {
+        let t = 100 * MIN_NS;
+        let s = Some(t + 12 * MIN_NS);
+        for clock in [t + 12 * MIN_NS, t + 13 * MIN_NS, i64::MAX] {
+            assert!(is_silent(10, 0, Some(t), s, clock));
+        }
+        assert!(!is_silent(20, 0, Some(t), s, i64::MAX));
     }
 
     #[test]
     fn no_service_hit_is_never_silent() {
-        assert!(!is_silent(1, 0, Some(0), None));
-        assert!(!is_silent(1, 0, None, None));
+        assert!(!is_silent(1, 0, Some(0), None, i64::MAX));
+        assert!(!is_silent(1, 0, None, None, i64::MAX));
     }
 
     #[test]
     fn a_template_without_hits_falls_back_to_first_seen() {
         let fs = 5 * MIN_NS;
-        assert!(is_silent(10, fs, None, Some(fs + 10 * MIN_NS)));
-        assert!(!is_silent(10, fs, None, Some(fs + 9 * MIN_NS)));
+        assert!(is_silent(10, fs, None, Some(fs + 10 * MIN_NS), i64::MAX));
+        assert!(!is_silent(10, fs, None, Some(fs + 9 * MIN_NS), i64::MAX));
     }
 
     #[test]
