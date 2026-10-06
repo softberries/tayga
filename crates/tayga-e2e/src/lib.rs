@@ -21,8 +21,10 @@ pub const SHIPPING_TIMEOUT: Duration = Duration::from_secs(300);
 pub const ORDER_EVERY: Duration = Duration::from_secs(20);
 /// `adFailure` fails one `GetAds` in ten (`AdService.java:238`). At the 20.4–22.2 ad requests a
 /// minute measured on 2026-10-06 that is about 2.1 failures a minute, and the first minute
-/// after the flip goes to detection and assembly: 3 stories in 180 s fail about 1 run in 5
-/// (Poisson mean ≈ 4.2), as one recorded run did. 300 s gives a mean ≈ 8.4, P(miss) ≈ 0.01.
+/// after the flip goes to detection and assembly. The stories split into one group per calling
+/// endpoint, so the scenario sums them over the GetAds groups and the rate counts all of them:
+/// 3 stories in 180 s fail about 1 run in 5 (Poisson mean ≈ 4.2), as one recorded run did.
+/// 300 s gives a mean ≈ 8.4, P(miss) ≈ 0.01.
 pub const AD_FAILURE_TIMEOUT: Duration = Duration::from_secs(300);
 /// The demo shop's frontend proxy: the shop API, and the demo collector under `/otlp-http/`.
 pub const FRONTEND: &str = "http://localhost:8080";

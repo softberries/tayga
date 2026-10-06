@@ -88,16 +88,26 @@ scenario!(
     |g| s(g, "summary").contains("Product Catalog Fail Feature Flag Enabled")
 );
 
-scenario!(
-    ad_failure_blames_ad,
-    "adFailure",
-    "on",
-    "kind=error&service=ad",
-    3,
-    AD_FAILURE_TIMEOUT,
-    "adFailure",
-    |g| s(g, "summary").contains("GetAds failed")
-);
+/// The stories split across one group per calling endpoint (`frontend-web GET /api/data`,
+/// `load-generator user_get_ads`, ...), so the count is summed over the GetAds groups.
+#[tokio::test]
+#[ignore = "end-to-end: requires `make up`"]
+async fn ad_failure_blames_ad() -> anyhow::Result<()> {
+    let api = Api::new(API);
+    let flipped = now_ns();
+    let _flag = FlagGuard::set("adFailure", "on")?;
+    let (_g, waited) = wait_for_group_sum(
+        &api,
+        "kind=error&service=ad",
+        flipped,
+        3,
+        AD_FAILURE_TIMEOUT,
+        |g| s(g, "summary").contains("GetAds failed"),
+    )
+    .await?;
+    report("adFailure", waited);
+    Ok(())
+}
 
 /// Places its own international orders (one every `ORDER_EVERY`) instead of waiting for the
 /// load generator's rare ones; the baseline pre-check still fails fast when no checkout endpoint
