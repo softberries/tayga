@@ -522,10 +522,12 @@ const SHUTDOWN_PASS_TIMEOUT: Duration = Duration::from_secs(20);
 /// new-template pass for the owned services ([`announce_new_templates`]), so a template mined
 /// after the last pass is not left to a service that may never log again.
 ///
-/// A crash skips this pass. Nothing is lost for a service that logs again: the persisted
-/// watermark only advances after a successful pass, so the template is a candidate once more as
-/// soon as any replica owns its service, which it does from that service's next mined log. A
-/// service that never logs again after a crash is the accepted edge.
+/// A crash (or a failed or timed-out pass here or at revoke) skips this announcement. The
+/// committed records are not re-read, so the template is a candidate again only if its service
+/// logs again, and soon: the partition's watermark keeps advancing on its owner's passes, and
+/// once it is more than `NEW_TEMPLATE_MARGIN_NS` past the template's `first_seen` the template
+/// is no longer a candidate. In practice the service must log again within about one detection
+/// tick; otherwise its "new" alert is missed. This narrow window is the accepted edge.
 async fn shut_down(
     ctx: &Ctx<'_>,
     cfg: &LogminerSettings,
