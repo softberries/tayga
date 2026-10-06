@@ -553,6 +553,30 @@ describe('silence setting on the template page', () => {
     await waitFor(() => expect(calls(fetch, `log-templates/${TID}`).length).toBeGreaterThanOrEqual(3))
   })
 
+  it('sends one PUT when Enter is pressed again while a save is pending', async () => {
+    const user = userEvent.setup()
+    const fetch = stubApi(routes({ [SILENCE]: { body: { enabled: true, minutes: 20 } } }))
+    // Hold the PUT open so the second Enter lands while the first save is pending.
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => (release = r))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (init?.method === 'PUT') await gate
+        return fetch(input, init)
+      }),
+    )
+    renderApp(`/logs/templates/${TID}`)
+    await user.click(await screen.findByRole('switch', { name: 'Alert when silent' }))
+    const minutes = screen.getByRole('textbox', { name: 'Silent minutes' })
+    await user.clear(minutes)
+    await user.type(minutes, '20{Enter}')
+    await user.type(minutes, '{Enter}')
+    release()
+    await waitFor(() => expect(puts(fetch)).toHaveLength(1))
+    expect(puts(fetch)[0]!.body).toEqual({ enabled: true, minutes: 20 })
+  })
+
   it('starts from the stored setting and turns it off while keeping the minutes', async () => {
     const user = userEvent.setup()
     const fetch = stubApi(routes({ [`/log-templates/${TID}`]: { body: { ...detail, silence: { enabled: true, minutes: 45 } } }, [SILENCE]: { body: { enabled: false, minutes: 45 } } }))

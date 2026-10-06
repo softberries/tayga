@@ -148,7 +148,7 @@ export function LogAlertsPage() {
         ) : data === undefined ? null : data.length === 0 ? (
           <EmptyState
             title={filtered ? 'No alerts match these filters' : 'No log alerts in this window'}
-            description={filtered ? 'Clear a filter to see more.' : `No template was new or spiked in ${rangePhrase(range)}.${widerHint(range, 'alerts')}`}
+            description={filtered ? 'Clear a filter to see more.' : `No template was new, spiked or went silent in ${rangePhrase(range)}.${widerHint(range, 'alerts')}`}
             action={
               filtered ? (
                 <Button size="sm" onClick={() => onSearch({ kind: undefined, service: undefined, active: undefined })}>

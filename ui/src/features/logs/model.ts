@@ -48,7 +48,8 @@ export function exampleLink(e: ExampleTrace):
 
 /**
  * "35 vs 1.8 / window" for a spike; "first seen" for a new template (no baseline exists);
- * "silent 12 min" for a silence, the time from the threshold being crossed to the last pass.
+ * "silent 12 min" for a silence: the quiet time from the template's last hit (`started_at`) to
+ * the latest detection pass (`last_at`).
  */
 export function countVsBaseline(
   a: Pick<LogAlertView, 'kind' | 'peak_count' | 'baseline_per_window' | 'started_at_ns' | 'last_at_ns'>,

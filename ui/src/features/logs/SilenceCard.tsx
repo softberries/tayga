@@ -79,7 +79,7 @@ export function SilenceCard({ templateId, silence }: { templateId: string; silen
         className="flex flex-wrap items-center gap-x-5 gap-y-3"
         onSubmit={(e) => {
           e.preventDefault()
-          if (!invalid && dirty) save.mutate({ enabled: cur.enabled, minutes })
+          if (!invalid && dirty && !save.isPending) save.mutate({ enabled: cur.enabled, minutes })
         }}
       >
         <span className="flex items-center gap-2.5">
