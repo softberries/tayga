@@ -79,6 +79,12 @@ async fn main() -> anyhow::Result<()> {
     let auth = auth::Auth::from_settings(&settings.auth)?;
     tracing::info!(enabled = auth.is_some(), "auth");
     tracing::info!(brokers = %settings.kafka.brokers, topic = %settings.kafka.topic, "kafka for consumer-group lag");
+    if (1..5).contains(&settings.record_secs) {
+        tracing::warn!(
+            record_secs = settings.record_secs,
+            "record_secs is small: small parts; use >= 5 or 0 to turn off"
+        );
+    }
     let repo = Arc::new(
         ChRepo::new(&settings.clickhouse).with_max_execution_time(settings.query_timeout_secs),
     );
@@ -117,7 +123,11 @@ async fn main() -> anyhow::Result<()> {
         // Only paths no other route matched fall through to the app.
         .merge(spa::router());
     if settings.query_timeout_secs > 0 {
-        let limit = Duration::from_secs(settings.query_timeout_secs + timeout::SLACK_SECS);
+        let limit = Duration::from_secs(
+            settings
+                .query_timeout_secs
+                .saturating_add(timeout::SLACK_SECS),
+        );
         app = app.layer(middleware::from_fn_with_state(limit, timeout::api_timeout));
     }
     if let Some(auth) = auth {

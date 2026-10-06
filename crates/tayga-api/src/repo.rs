@@ -643,6 +643,7 @@ impl Repo for ChRepo {
         }))
     }
 
+    /// A trace shows no templates until its logs are stored (writer lag; transient).
     async fn trace_log_templates(&self, trace_id: &str) -> anyhow::Result<Vec<TraceLogTemplate>> {
         // The trace's log time range: `logs` has a bloom index on `trace_id`, and a hit carries
         // its log's own `ts`, so bounding the hits by it lets ClickHouse skip other days' parts

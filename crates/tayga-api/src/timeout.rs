@@ -21,13 +21,28 @@ pub async fn api_timeout(State(limit): State<Duration>, req: Request, next: Next
         Ok(res) => res,
         Err(_) => {
             tracing::warn!(limit_ms = limit.as_millis() as u64, "api request timed out");
-            (
-                StatusCode::GATEWAY_TIMEOUT,
-                Json(serde_json::json!({ "error": "storage timeout" })),
-            )
-                .into_response()
+            storage_timeout()
         }
     }
+}
+
+/// The one answer for "storage too slow": a JSON 504.
+pub fn storage_timeout() -> Response {
+    (
+        StatusCode::GATEWAY_TIMEOUT,
+        Json(serde_json::json!({ "error": "storage timeout" })),
+    )
+        .into_response()
+}
+
+/// True when ClickHouse stopped the query at `max_execution_time` (error 159, TIMEOUT_EXCEEDED).
+pub fn is_clickhouse_timeout(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<clickhouse::error::Error>(),
+            Some(clickhouse::error::Error::BadResponse(m)) if m.contains("Code: 159")
+        )
+    })
 }
 
 #[cfg(test)]
