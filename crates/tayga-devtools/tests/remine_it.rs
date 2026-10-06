@@ -2,7 +2,7 @@
 //! Run: `TAYGA_IT_CLICKHOUSE=http://localhost:18123 cargo test -p tayga-devtools --test remine_it -- --ignored`
 
 use std::collections::BTreeSet;
-use tayga_devtools::remine::{Options, remine};
+use tayga_devtools::remine::{Options, remine, remine_paged};
 use tayga_drain::drain::DrainConfig;
 use tayga_drain::preprocess::masking_version;
 use tayga_logminer::config::{KEY_EPOCH_START, KEY_HEARTBEAT, KEY_MASKING_VERSION, KEY_WATERMARK};
@@ -140,6 +140,66 @@ async fn real_run_matches_the_miner_and_stores_state() {
     assert_eq!((again.added, again.removed), (0, 0));
     assert_eq!(again.unchanged, expected.len());
     assert_eq!(count(&store, "log_template_hits FINAL").await, 90);
+    drop_db(&s, &store).await;
+}
+
+/// Seven logs per page: 13 pages, and each of the three templates changes on every page. The
+/// stored row must be the one from the last page (full `count` and `last_seen`), which the
+/// strictly increasing per-page version guarantees without relying on an equal-version tie.
+#[tokio::test]
+#[ignore = "requires ClickHouse"]
+async fn templates_spanning_many_pages_keep_the_last_page() {
+    const PAGE: u32 = 7;
+    let (s, store, logs) = seeded_store().await;
+    let drain = DrainConfig::default();
+    let now = now_ns();
+    let sum = remine_paged(&store, &drain, Options::default(), now, PAGE)
+        .await
+        .unwrap();
+    assert_eq!(sum.logs_read, 90);
+    let pages = 90u64.div_ceil(u64::from(PAGE));
+    assert_eq!(pages, 13);
+
+    // Expected per template, from mining the same logs directly in one pass.
+    let mut sorted: Vec<&LogRow> = logs.iter().collect();
+    sorted.sort_by_key(|l| (l.ts, l.log_id));
+    let mut miner = Miner::new(DrainConfig::default());
+    for l in &sorted {
+        miner.mine(l);
+    }
+    let mut expected = miner.dirty_templates(1);
+    expected.sort_by_key(|t| t.template_id);
+    assert_eq!(expected.len(), 3);
+
+    let mut stored = store.load_templates().await.unwrap();
+    stored.sort_by_key(|t| t.template_id);
+    assert_eq!(stored.len(), expected.len());
+    for (got, want) in stored.iter().zip(&expected) {
+        assert_eq!(got.template_id, want.template_id);
+        assert_eq!(got.count, 30, "{}", got.template);
+        assert_eq!(
+            (got.count, got.first_seen, got.last_seen, &got.template),
+            (want.count, want.first_seen, want.last_seen, &want.template)
+        );
+        // Each template changed on every page, so its winning row is the last page's.
+        assert_eq!(got.version, u64::try_from(now).unwrap() + pages - 1);
+    }
+    // Every template was written once per page, each time with a new version.
+    let per_template: Vec<(u64, u64, u64)> = store
+        .client()
+        .query(
+            "SELECT template_id, count(), uniqExact(version) FROM log_templates \
+             GROUP BY template_id ORDER BY template_id",
+        )
+        .fetch_all()
+        .await
+        .unwrap();
+    for (id, rows, versions) in per_template {
+        assert_eq!(
+            rows, versions,
+            "template {id}: a version repeats across pages"
+        );
+    }
     drop_db(&s, &store).await;
 }
 

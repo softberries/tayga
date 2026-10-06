@@ -154,6 +154,23 @@ pub async fn remine(
     opts: Options,
     now_ns: i64,
 ) -> anyhow::Result<RemineSummary> {
+    remine_paged(store, drain, opts, now_ns, BATCH).await
+}
+
+/// [`remine`] reading `batch` logs per page; tests use a small one to span several pages.
+///
+/// Templates written after page `n` (from 0) carry version `now_ns + n`. A template that changes
+/// on several pages is upserted once per page into `log_templates`
+/// (`ReplacingMergeTree(version)`), so the versions must strictly increase for the row of the
+/// last page, with its final `count` and `last_seen`, to win without an equal-version tie.
+pub async fn remine_paged(
+    store: &Store,
+    drain: &DrainConfig,
+    opts: Options,
+    now_ns: i64,
+    batch: u32,
+) -> anyhow::Result<RemineSummary> {
+    anyhow::ensure!(batch > 0, "remine: the page size must be positive");
     let started = Instant::now();
     let heartbeat = if opts.dry_run {
         None
@@ -197,29 +214,31 @@ pub async fn remine(
     let (mut logs_read, mut hits) = (0u64, 0u64);
     let mut max_ts: Option<i64> = None;
     let (mut after_ts, mut after_id) = (now_ns.saturating_sub(WINDOW_NS) - 1, u64::MAX);
+    let mut version = now_ns;
     loop {
         let page = store
-            .logs_batch(after_ts, after_id, BATCH)
+            .logs_batch(after_ts, after_id, batch)
             .await
             .context("read logs")?;
         let Some(last) = page.last() else { break };
         (after_ts, after_id) = (last.ts, last.log_id);
-        let full = page.len() == BATCH as usize;
+        let full = page.len() == batch as usize;
         logs_read += page.len() as u64;
-        let mut batch = Vec::with_capacity(page.len());
+        let mut page_hits = Vec::with_capacity(page.len());
         for row in page {
             let (hit, _) = miner.mine(&log_row(row));
             max_ts = max_ts.max(Some(hit.ts));
-            batch.push(hit);
+            page_hits.push(hit);
         }
-        hits += batch.len() as u64;
-        let templates = miner.dirty_templates(now_ns);
+        hits += page_hits.len() as u64;
+        let templates = miner.dirty_templates(version);
+        version = version.saturating_add(1);
         for t in &templates {
             mined.insert(t.template_id, t.service.clone());
         }
         if !opts.dry_run {
             store
-                .insert_log_hits(&batch)
+                .insert_log_hits(&page_hits)
                 .await
                 .context("insert log hits")?;
             store

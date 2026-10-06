@@ -395,7 +395,7 @@ Use it after changing masking or a Drain setting (`sim_threshold`, `max_clusters
 `remine` does the following:
 1. It truncates `log_templates`, `log_template_hits` and `log_template_minutes`.
 2. It reads `logs` from the last 3 days in `(ts, log_id)` order, 10,000 rows per page, and mines them with the logminer's own code and its current `[logminer]` settings, taken from the `TAYGA_CONFIG` file and the `TAYGA__LOGMINER__*` environment variables. The compose logminer is configured by environment variables only, so give the CLI the same ones.
-3. After each page it writes the hits and the changed templates; `log_template_minutes` is filled through its materialized view.
+3. After each page it writes the hits and the changed templates; `log_template_minutes` is filled through its materialized view. Template rows of page n carry version `now + n` ns, so a template written on several pages keeps the row of its last page (final `count` and `last_seen`) without depending on how ClickHouse breaks an equal-version tie.
 4. It stores `new_template_watermark_ns` (the newest mined `ts`), `masking_epoch_start_ns = now` and the current `masking_version` in `logminer_state`.
 
 The watermark means the restarted logminer does not report the rebuilt templates as new. The new masking epoch adds the 15-minute warmup: no `new` alert fires for templates first seen in the 15 minutes after the re-mine. `log_alerts` and `log_template_silence` are kept. ClickHouse defaults to `http://localhost:18123`, database `tayga`; `--clickhouse` and `--database` override them.
