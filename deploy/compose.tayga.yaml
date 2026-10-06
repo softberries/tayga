@@ -58,7 +58,7 @@ services:
   # No container_name, so it can scale: LOGMINER_REPLICAS (default 1) sets the
   # replica count, and each replica mines the services of its partitions.
   # Address it as the compose service (`docker compose ... logs tayga-logminer`);
-  # the DNS name tayga-logminer resolves to one replica per lookup.
+  # the DNS name tayga-logminer returns every replica, in shuffled order.
   tayga-logminer:
     image: tayga:dev
     command: ["tayga-logminer"]
