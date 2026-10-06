@@ -67,14 +67,14 @@ enum Cmd {
     /// Rebuild log templates from the stored logs of the last 3 days with the logminer's current
     /// `[logminer]` config (same `TAYGA_CONFIG` file and `TAYGA__` env). Truncates
     /// `log_templates`, `log_template_hits` and `log_template_minutes`, then stores the
-    /// watermark, a fresh masking epoch and the masking version. Refuses while the logminer's
-    /// heartbeat is under 3 minutes old. Stop the logminer first
+    /// watermark, a fresh masking epoch and the masking version. A real run refuses while the
+    /// logminer's heartbeat is under 3 minutes old; `--dry-run` is read-only and always allowed. Stop the logminer first
     /// (`docker compose ... stop tayga-logminer`) and start it again afterwards.
     Remine {
         /// Mine and print the summary; write nothing.
         #[arg(long)]
         dry_run: bool,
-        /// Run although the logminer heartbeat is fresh.
+        /// Run a real re-mine although the logminer heartbeat is fresh.
         #[arg(long)]
         force: bool,
         /// ClickHouse HTTP URL; default `clickhouse.url` of the config, else http://localhost:18123.

@@ -105,23 +105,23 @@ impl LogminerSettings {
             self.spike_window_min > 0,
             "logminer.spike_window_min must be positive"
         );
-        anyhow::ensure!(
-            self.max_clusters_per_service > 0,
-            "logminer.max_clusters_per_service must be positive"
-        );
+        self.drain_settings().validate()?;
         self.baseline_mode
             .parse::<BaselineMode>()
             .map_err(|e| anyhow::anyhow!("logminer.baseline_mode: {e}"))?;
         Ok(())
     }
 
-    fn drain(&self) -> DrainConfig {
+    fn drain_settings(&self) -> DrainSettings {
         DrainSettings {
             sim_threshold: self.sim_threshold,
             max_clusters_per_service: self.max_clusters_per_service,
             keep_http_status: self.keep_http_status,
         }
-        .drain()
+    }
+
+    fn drain(&self) -> DrainConfig {
+        self.drain_settings().drain()
     }
 
     fn detect(&self) -> DetectConfig {

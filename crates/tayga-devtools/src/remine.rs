@@ -145,8 +145,9 @@ fn log_row(r: LogMineRow) -> LogRow {
 }
 
 /// Mines the stored logs of the last 3 days into fresh templates. With `opts.dry_run` nothing is
-/// written; otherwise the three template tables are truncated first, and afterwards the
-/// watermark, the masking epoch start (`now_ns`) and the masking version are stored.
+/// written and the logminer heartbeat is not checked (read-only, safe on a live stack).
+/// Otherwise it refuses while the logminer is alive (unless `opts.force`), the three template
+/// tables are truncated first, and afterwards the watermark, the masking epoch start (`now_ns`) and the masking version are stored.
 pub async fn remine(
     store: &Store,
     drain: &DrainConfig,
@@ -154,11 +155,17 @@ pub async fn remine(
     now_ns: i64,
 ) -> anyhow::Result<RemineSummary> {
     let started = Instant::now();
-    let heartbeat = store
-        .state_get(KEY_HEARTBEAT)
-        .await
-        .context("read logminer heartbeat")?;
-    heartbeat_ok(heartbeat, now_ns, opts.force).map_err(anyhow::Error::msg)?;
+    let heartbeat = if opts.dry_run {
+        None
+    } else {
+        store
+            .state_get(KEY_HEARTBEAT)
+            .await
+            .context("read logminer heartbeat")?
+    };
+    if !opts.dry_run {
+        heartbeat_ok(heartbeat, now_ns, opts.force).map_err(anyhow::Error::msg)?;
+    }
 
     let stored = store
         .load_templates()

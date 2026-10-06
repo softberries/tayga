@@ -200,7 +200,7 @@ async fn dry_run_writes_nothing() {
 
 #[tokio::test]
 #[ignore = "requires ClickHouse"]
-async fn a_fresh_heartbeat_refuses_without_touching_anything() {
+async fn a_fresh_heartbeat_refuses_a_real_run_but_not_a_dry_run() {
     let (s, store, _) = seeded_store().await;
     let drain = DrainConfig::default();
     let now = now_ns();
@@ -208,20 +208,27 @@ async fn a_fresh_heartbeat_refuses_without_touching_anything() {
         .state_put(KEY_HEARTBEAT, now - 5_000_000_000)
         .await
         .unwrap();
-    for dry_run in [false, true] {
-        let err = remine(
-            &store,
-            &drain,
-            Options {
-                dry_run,
-                force: false,
-            },
-            now,
-        )
+    let err = remine(&store, &drain, Options::default(), now)
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("looks alive"), "{err}");
-    }
+    assert!(err.to_string().contains("looks alive"), "{err}");
+    assert_eq!(count(&store, "log_template_hits").await, 0);
+    assert_eq!(store.state_get(KEY_EPOCH_START).await.unwrap(), None);
+
+    // A dry run is read-only, so a live logminer does not stop it.
+    let dry = remine(
+        &store,
+        &drain,
+        Options {
+            dry_run: true,
+            force: false,
+        },
+        now,
+    )
+    .await
+    .unwrap();
+    assert_eq!(dry.logs_read, 90);
+    assert_eq!(count(&store, "log_templates").await, 0);
     assert_eq!(count(&store, "log_template_hits").await, 0);
     assert_eq!(store.state_get(KEY_EPOCH_START).await.unwrap(), None);
 

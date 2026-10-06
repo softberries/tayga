@@ -32,6 +32,19 @@ impl Default for DrainSettings {
 }
 
 impl DrainSettings {
+    /// Checks shared by the logminer and `remine`.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (0.0..=1.0).contains(&self.sim_threshold),
+            "logminer.sim_threshold must be within 0..=1"
+        );
+        anyhow::ensure!(
+            self.max_clusters_per_service > 0,
+            "logminer.max_clusters_per_service must be positive"
+        );
+        Ok(())
+    }
+
     pub fn drain(&self) -> DrainConfig {
         DrainConfig {
             sim_threshold: self.sim_threshold,
@@ -49,6 +62,7 @@ impl DrainSettings {
             logminer: DrainSettings,
         }
         let root: Root = tayga_common::load_settings()?;
+        root.logminer.validate()?;
         Ok(root.logminer)
     }
 }
@@ -60,6 +74,21 @@ mod tests {
     #[test]
     fn defaults_match_the_drain_defaults() {
         assert_eq!(DrainSettings::default().drain(), DrainConfig::default());
+    }
+
+    #[test]
+    fn invalid_drain_settings_are_rejected() {
+        let bad = |json: &str| {
+            serde_json::from_str::<DrainSettings>(json)
+                .unwrap()
+                .validate()
+                .is_err()
+        };
+        assert!(bad(r#"{"sim_threshold":1.5}"#));
+        assert!(bad(r#"{"sim_threshold":-0.1}"#));
+        assert!(bad(r#"{"max_clusters_per_service":0}"#));
+        assert!(!bad(r#"{"sim_threshold":1.0}"#));
+        assert!(DrainSettings::default().validate().is_ok());
     }
 
     #[test]
