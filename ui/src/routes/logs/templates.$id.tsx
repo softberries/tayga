@@ -22,6 +22,7 @@ import { ErrorState } from '../../components/ui/ErrorState'
 import { Skeleton } from '../../components/ui/Skeleton'
 import { RefreshNote } from '../../components/ui/StaleNote'
 import { AlertsTable } from '../../features/logs/AlertsTable'
+import { SilenceCard } from '../../features/logs/SilenceCard'
 import { bucketPoints, stepWord } from '../../features/logs/model'
 import { ago, compact, dateTime, shortId } from '../../lib/format'
 import { serviceColor } from '../../lib/serviceColor'
@@ -189,6 +190,8 @@ export function LogTemplatePage() {
         </dl>
       </Card>
 
+      <SilenceCard key={t.template_id} templateId={t.template_id} silence={detail.data.silence} />
+
       <Card className="flex min-w-0 flex-col gap-2 px-4 py-3.5">
         <PanelTitle>Hits per {stepWord(detail.data.bucket_secs)}</PanelTitle>
         {detail.data.buckets.length === 0 ? (
@@ -220,7 +223,7 @@ export function LogTemplatePage() {
           <PanelTitle>Alerts</PanelTitle>
         </div>
         {detail.data.alerts.length === 0 ? (
-          <EmptyState title="No alerts for this template" description="It has not spiked and was not flagged as new." />
+          <EmptyState title="No alerts for this template" description="It has not spiked, gone silent or been flagged as new." />
         ) : (
           <AlertsTable alerts={detail.data.alerts} range={range} nowMs={nowMs} showTemplate={false} label="Alerts of this template" />
         )}

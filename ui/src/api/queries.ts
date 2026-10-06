@@ -3,7 +3,7 @@
  * can be invalidated together. Every queryFn forwards Query's AbortSignal to fetch.
  */
 import { queryOptions } from '@tanstack/react-query'
-import { getJson, postJson } from './client'
+import { getJson, postJson, putJson } from './client'
 import type { Params } from './client'
 import type {
   ClientConfig,
@@ -18,6 +18,7 @@ import type {
   SeriesView,
   ServiceMapView,
   ServiceView,
+  SilenceSetting,
   StoriesSeries,
   StoryGroup,
   StoryView,
@@ -66,6 +67,9 @@ export const api = {
     q<LogTemplateListItem[]>('log-templates', '/log-templates', p),
   logTemplate: (id: string, w: Win) =>
     q<LogTemplateDetail>('log-templates', `/log-templates/${encodeURIComponent(id)}`, w),
+  /** Switches "alert when silent" on or off for a template (a write: use it in a mutation). */
+  putSilence: (templateId: string, setting: SilenceSetting) =>
+    putJson<SilenceSetting>(`/log-templates/${encodeURIComponent(templateId)}/silence`, setting),
   search: (text: string) => q<SearchView>('search', '/search', { q: text }),
   pipelineSeries: (p: Win & { metric: string; kind: string; job?: string; labels?: string }) =>
     q<SeriesView>('pipeline-series', '/pipeline/series', p),

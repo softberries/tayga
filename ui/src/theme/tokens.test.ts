@@ -118,12 +118,13 @@ describe('contrast (spec §5: text at least 4.5:1 in both themes)', () => {
   /** Text colors the components use, on every surface they sit on. */
   const surfaces = ['ground', 'panel', 'inner', 'field', 'row-selected', 'rail-active']
   const pairs: Array<[string, string]> = [
-    ...['ink', 'ink-2', 'muted', 'accent', 'err', 'slow', 'ok'].flatMap((fg) =>
+    ...['ink', 'ink-2', 'muted', 'accent', 'err', 'slow', 'ok', 'silence'].flatMap((fg) =>
       surfaces.map((bg): [string, string] => [fg, bg]),
     ),
     ['err', 'err-soft'],
     ['slow', 'slow-soft'],
     ['ok', 'ok-soft'],
+    ['silence', 'silence-soft'],
     ['on-accent', 'accent-strong'],
     ['on-slow', 'slow'],
     ['muted', 'inner'],

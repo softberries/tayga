@@ -16,6 +16,7 @@ export interface TimelineBar {
   t: number
   new: number
   spike: number
+  silence: number
 }
 
 /**
@@ -27,7 +28,7 @@ export function timeline(alerts: readonly LogAlertView[], range: Range, endMs: n
   const last = Math.floor(endMs / 1000 / step) * step
   const first = Math.floor((endMs / 1000 - range.secs) / step) * step
   const bars: TimelineBar[] = []
-  for (let t = first; t <= last; t += step) bars.push({ t: t * 1000, new: 0, spike: 0 })
+  for (let t = first; t <= last; t += step) bars.push({ t: t * 1000, new: 0, spike: 0, silence: 0 })
   for (const a of alerts) {
     const i = Math.round((Math.floor(a.started_at_ns / 1e9 / step) * step - first) / step)
     const bar = bars[i]
@@ -45,9 +46,18 @@ export function exampleLink(e: ExampleTrace):
     : { to: '/traces/$traceId', params: { traceId: e.trace_id } }
 }
 
-/** "35 vs 1.8 / window" for a spike; "first seen" for a new template (no baseline exists). */
-export function countVsBaseline(a: Pick<LogAlertView, 'kind' | 'peak_count' | 'baseline_per_window'>): string {
+/**
+ * "35 vs 1.8 / window" for a spike; "first seen" for a new template (no baseline exists);
+ * "silent 12 min" for a silence, the time from the threshold being crossed to the last pass.
+ */
+export function countVsBaseline(
+  a: Pick<LogAlertView, 'kind' | 'peak_count' | 'baseline_per_window' | 'started_at_ns' | 'last_at_ns'>,
+): string {
   if (a.kind === 'new') return 'first seen'
+  if (a.kind === 'silence') {
+    const min = Math.max(0, Math.round((a.last_at_ns - a.started_at_ns) / 60e9))
+    return `silent ${min} min`
+  }
   const b = a.baseline_per_window
   return `${a.peak_count} vs ${b < 10 ? b.toFixed(1) : Math.round(b)} / window`
 }

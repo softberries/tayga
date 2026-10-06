@@ -82,12 +82,13 @@ export function deltaText(current: number, previous: number): string {
   return `${d > 0 ? '+' : '−'}${Math.abs(d)} vs prev`
 }
 
-/** `"2 spike · 1 new"` over the active alerts, or `"none active"`. */
+/** `"2 spike · 1 new · 1 silence"` over the active alerts, or `"none active"`. */
 export function activeAlertsText(alerts: readonly LogAlertView[]): string {
   const spike = alerts.filter((a) => a.active && a.kind === 'spike').length
   const fresh = alerts.filter((a) => a.active && a.kind === 'new').length
-  if (spike + fresh === 0) return 'none active'
-  return [spike ? `${spike} spike` : '', fresh ? `${fresh} new` : ''].filter(Boolean).join(' · ')
+  const silent = alerts.filter((a) => a.active && a.kind === 'silence').length
+  if (spike + fresh + silent === 0) return 'none active'
+  return [spike ? `${spike} spike` : '', fresh ? `${fresh} new` : '', silent ? `${silent} silence` : ''].filter(Boolean).join(' · ')
 }
 
 /**

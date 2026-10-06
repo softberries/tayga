@@ -10,6 +10,7 @@ import authMe from './__fixtures__/auth-me.json'
 import clientConfig from './__fixtures__/config.json'
 import error400 from './__fixtures__/error-400.json'
 import logAlerts from './__fixtures__/log-alerts.json'
+import logAlertsSilence from './__fixtures__/log-alerts-silence.json'
 import logTemplate from './__fixtures__/log-template.json'
 import logTemplates from './__fixtures__/log-templates.json'
 import overview from './__fixtures__/overview.json'
@@ -44,6 +45,7 @@ const cases: Array<[string, ZodType, unknown]> = [
   ['traces/{id}/log-templates', z.array(S.TraceLogTemplateSchema), traceLogTemplates],
   ['service-map', S.ServiceMapSchema, serviceMap],
   ['log-alerts', z.array(S.LogAlertViewSchema), logAlerts],
+  ['log-alerts?kind=silence', z.array(S.LogAlertViewSchema), logAlertsSilence],
   ['log-templates', z.array(S.LogTemplateListItemSchema), logTemplates],
   ['log-templates/{id}', S.LogTemplateDetailSchema, logTemplate],
   ['overview', S.OverviewSchema, overview],
@@ -85,6 +87,24 @@ describe('API contract (live fixtures)', () => {
     expect(S.LogAlertViewSchema.safeParse(a).success).toBe(true)
     expect(S.LogAlertViewSchema.safeParse({ ...a, baseline_week: null }).success).toBe(true)
     expect(S.LogAlertViewSchema.safeParse(logAlerts[0]).success).toBe(true)
+  })
+
+  it('silence: the kind, the template setting and the list flag are in the contract', () => {
+    expect(S.AlertKindSchema.safeParse('silence').success).toBe(true)
+    expect(S.AlertKindSchema.safeParse('other').success).toBe(false)
+    expect(logAlertsSilence[0]).toMatchObject({ kind: 'silence', window_count: 0, example_traces: [] })
+    expect(logTemplates.some((t) => t.silence_enabled)).toBe(true)
+    const on = { ...logTemplate, silence: { enabled: true, minutes: 15 } }
+    expect(S.LogTemplateDetailSchema.safeParse(on).success).toBe(true)
+    expect(S.LogTemplateDetailSchema.safeParse({ ...logTemplate, silence: { enabled: true } }).success).toBe(false)
+    expect(S.LogTemplateDetailSchema.safeParse({ ...logTemplate, silence: { enabled: true, minutes: 15, x: 1 } }).success).toBe(false)
+    const without: Record<string, unknown> = { ...logTemplate }
+    delete without.silence
+    expect(S.LogTemplateDetailSchema.safeParse(without).success).toBe(false)
+    expect(S.SilenceSettingSchema.safeParse({ enabled: false, minutes: 10 }).success).toBe(true)
+    const old: Record<string, unknown> = { ...logTemplates[0] }
+    delete old.silence_enabled
+    expect(S.LogTemplateListItemSchema.safeParse(old).success).toBe(false)
   })
 
   it('a config without infra_services (an older API) means flagd', () => {

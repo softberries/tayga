@@ -420,6 +420,12 @@ describe('service map', () => {
 })
 
 describe('logSignals', () => {
+  it('describes a silence signal as "silent N min"', () => {
+    const a = logAlerts[0] as (typeof logAlerts)[number]
+    const silent = { ...a, kind: 'silence', template_id: 't1', active: true, started_at_ns: 60e9, last_at_ns: 60e9 + 7 * 60e9 } as Parameters<typeof logSignals>[0][number]
+    expect(logSignals([silent], []).map((s) => [s.kind, s.detail])).toEqual([['silence', 'silent 7 min']])
+  })
+
   it('keeps one signal per template, active alerts first, then alerting templates', () => {
     const a = logAlerts[0] as (typeof logAlerts)[number]
     const alerts = [

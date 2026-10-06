@@ -1,4 +1,4 @@
-import { QueryCache, QueryClient } from '@tanstack/react-query'
+import { MutationCache, QueryCache, QueryClient } from '@tanstack/react-query'
 import type { Query } from '@tanstack/react-query'
 import { isApiError } from '../api/client'
 import { clearOutage, reportOutage } from './apiStatus'
@@ -37,6 +37,15 @@ export function createQueryClient(): QueryClient {
       },
       onSuccess: (_data, query) => {
         if (isOutageQuery(query)) clearOutage()
+      },
+    }),
+    // A write that comes back 401 means the same as a read doing so, but only mutations that opt
+    // in (`meta: { sessionAware: true }`) say so: a wrong password on /login is a 401 too.
+    mutationCache: new MutationCache({
+      onError: (error, _vars, _ctx, mutation) => {
+        if (isApiError(error) && error.status === 401 && mutation.meta?.sessionAware === true && authEnabledInCache(client)) {
+          sessionLost()
+        }
       },
     }),
     defaultOptions: {

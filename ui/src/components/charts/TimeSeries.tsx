@@ -5,7 +5,7 @@ import { useAppliedTheme } from '../../theme/useAppliedTheme'
 import { EChart } from './EChart'
 import { timeAxisLabel } from './timeAxis'
 
-export type SeriesTone = 'accent' | 'err' | 'slow' | 'ok'
+export type SeriesTone = 'accent' | 'err' | 'slow' | 'ok' | 'silence'
 
 export interface TimeSeriesSeries {
   name: string

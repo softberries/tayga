@@ -8,6 +8,7 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import logAlerts from '../../api/__fixtures__/log-alerts.json'
+import logAlertsSilence from '../../api/__fixtures__/log-alerts-silence.json'
 import logTemplate from '../../api/__fixtures__/log-template.json'
 import logTemplates from '../../api/__fixtures__/log-templates.json'
 import services from '../../api/__fixtures__/services.json'
@@ -42,6 +43,7 @@ afterEach(() => {
 })
 
 const alerts = logAlerts as LogAlertView[]
+const silenceAlerts = logAlertsSilence as LogAlertView[]
 const templates = logTemplates as unknown as LogTemplateListItem[]
 const detail = logTemplate as unknown as LogTemplateDetail
 const TID = detail.template.template_id
@@ -67,18 +69,21 @@ describe('model', () => {
   it('counts alerts per bucket and kind over the whole window', () => {
     const now = Date.UTC(2026, 9, 4, 12, 30)
     const at = (min: number) => (now - min * 60_000) * 1e6
-    const a = (kind: 'new' | 'spike', min: number) => ({ kind, started_at_ns: at(min) }) as LogAlertView
-    const bars = timeline([a('new', 5), a('spike', 5), a('spike', 6), a('spike', 24 * 60 * 2)], presetRange('24h'), now)
+    const a = (kind: 'new' | 'spike' | 'silence', min: number) => ({ kind, started_at_ns: at(min) }) as LogAlertView
+    const bars = timeline([a('new', 5), a('spike', 5), a('spike', 6), a('silence', 7), a('spike', 24 * 60 * 2)], presetRange('24h'), now)
     expect(bars).toHaveLength(25)
     expect(bars.reduce((n, b) => n + b.new, 0)).toBe(1)
     expect(bars.reduce((n, b) => n + b.spike, 0)).toBe(2) // the 2-day-old alert is outside
-    expect(bars.at(-1)).toMatchObject({ new: 1, spike: 2 })
+    expect(bars.at(-1)).toMatchObject({ new: 1, spike: 2, silence: 1 })
     expect(bars[1]!.t - bars[0]!.t).toBe(3_600_000)
   })
 
   it('describes the count against the baseline, and sorts templates', () => {
-    expect(countVsBaseline({ kind: 'spike', peak_count: 35, baseline_per_window: 1.75 })).toBe('35 vs 1.8 / window')
-    expect(countVsBaseline({ kind: 'new', peak_count: 0, baseline_per_window: 0 })).toBe('first seen')
+    const at = { started_at_ns: 0, last_at_ns: 0 }
+    expect(countVsBaseline({ kind: 'spike', peak_count: 35, baseline_per_window: 1.75, ...at })).toBe('35 vs 1.8 / window')
+    expect(countVsBaseline({ kind: 'new', peak_count: 0, baseline_per_window: 0, ...at })).toBe('first seen')
+    expect(countVsBaseline({ kind: 'silence', peak_count: 0, baseline_per_window: 0, started_at_ns: 60e9, last_at_ns: 60e9 + 12 * 60e9 })).toBe('silent 12 min')
+    expect(countVsBaseline({ kind: 'silence', peak_count: 0, baseline_per_window: 0, ...at })).toBe('silent 0 min')
     const mk = (id: string, active: boolean, last: number) => ({ alert_id: id, active, last_at_ns: last }) as LogAlertView
     expect(sortAlerts([mk('old-active', true, 1), mk('new-ended', false, 9), mk('new-active', true, 5), mk('old-ended', false, 2)]).map((a) => a.alert_id)).toEqual([
       'new-active',
@@ -123,11 +128,12 @@ describe('log alerts', () => {
     renderApp('/logs/alerts?since=7d')
     await screen.findByRole('table', { name: 'Log alerts' })
     await waitFor(() => expect(chart).toBeDefined())
-    expect(screen.getByText(/^Log alerts started per hour over the last 7d: \d+ new, \d+ spike\.$/)).toBeInTheDocument()
+    expect(screen.getByText(/^Log alerts started per hour over the last 7d: \d+ new, \d+ spike, \d+ silence\.$/)).toBeInTheDocument()
     const series = (chart!.option.series as Array<{ name: string; type: string; stack: string; data: unknown[] }>)
     expect(series.map((s) => [s.name, s.type, s.stack])).toEqual([
       ['new', 'bar', 'total'],
       ['spike', 'bar', 'total'],
+      ['silence', 'bar', 'total'],
     ])
     expect(series[0]!.data).toHaveLength(169)
   })
@@ -237,6 +243,35 @@ describe('log alerts', () => {
     await waitFor(() => expect(router.state.location.search).toEqual({}))
   })
 
+  it('shows a silence alert with its own badge and "silent N min" in place of the count', async () => {
+    stubApi(routes({ '/log-alerts': { body: [...alerts, ...silenceAlerts] } }))
+    renderApp('/logs/alerts')
+    const table = await screen.findByRole('table', { name: 'Log alerts' })
+    const sa = silenceAlerts[0]!
+    // Active alerts come first.
+    const row = within(table).getAllByRole('row')[1] as HTMLElement
+    expect(within(row).getByText('silence')).toHaveAttribute('data-kind', 'silence')
+    expect(within(row).getByText(`silent ${Math.round((sa.last_at_ns - sa.started_at_ns) / 60e9)} min`)).toBeInTheDocument()
+    expect(within(row).getByText('none')).toBeInTheDocument()
+  })
+
+  it('the Silence kind filter goes into the URL and the API query, and loads from it', async () => {
+    const user = userEvent.setup()
+    const fetch = stubApi(routes({ '/log-alerts': { body: silenceAlerts } }))
+    const { router } = renderApp('/logs/alerts')
+    await screen.findByRole('table', { name: 'Log alerts' })
+    await user.click(screen.getByRole('radio', { name: 'Silence' }))
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ kind: 'silence' }))
+    await waitFor(() => expect(calls(fetch, 'log-alerts').at(-1)).toBe('/api/v1/log-alerts?since=1h&kind=silence'))
+  })
+
+  it('keeps kind=silence from the URL', async () => {
+    const fetch = stubApi(routes({ '/log-alerts': { body: silenceAlerts } }))
+    renderApp('/logs/alerts?kind=silence')
+    expect(await screen.findByRole('radio', { name: 'Silence' })).toHaveAttribute('aria-checked', 'true')
+    expect(calls(fetch, 'log-alerts').at(-1)).toBe('/api/v1/log-alerts?since=1h&kind=silence')
+  })
+
   it('reads the filters from the URL', async () => {
     const fetch = stubApi(routes())
     renderApp('/logs/alerts?kind=new&service=checkout')
@@ -305,6 +340,17 @@ describe('log templates', () => {
     const rows = await bodyRows()
     expect(within(rows[1] as HTMLElement).getByText('alerting')).toHaveAttribute('data-kind', 'spike')
     expect(screen.getAllByText('alerting')).toHaveLength(1)
+  })
+
+  it('shows a bell on templates with silence alerts on', async () => {
+    stubApi(routes())
+    renderApp('/logs/templates')
+    const rows = await bodyRows()
+    expect(templates.filter((t) => t.silence_enabled)).toHaveLength(1)
+    for (const r of rows) {
+      const t = templates.find((x) => x.template_id === (r as HTMLElement).dataset.templateId)!
+      expect(Boolean(within(r as HTMLElement).queryByText('alerts when silent'))).toBe(t.silence_enabled)
+    }
   })
 
   it('sorts by a column', async () => {
@@ -467,5 +513,124 @@ describe('log template page', () => {
     stubApi(routes())
     renderApp('/logs/templates/not-a-number')
     expect(await screen.findByText(/not found/i)).toBeInTheDocument()
+  })
+})
+
+describe('silence setting on the template page', () => {
+  const SILENCE = `/log-templates/${TID}/silence`
+  const puts = (fetch: ReturnType<typeof stubApi>) =>
+    fetch.mock.calls.filter((c) => c[1]?.method === 'PUT').map((c) => ({ url: String(c[0]), body: JSON.parse(String(c[1]?.body)) as unknown, headers: c[1]?.headers }))
+
+  it('saves the switch and the minutes with one PUT of JSON and shows the saved state', async () => {
+    const user = userEvent.setup()
+    const r = routes({ [SILENCE]: { body: { enabled: true, minutes: 15 } } })
+    const fetch = stubApi(r)
+    renderApp(`/logs/templates/${TID}`)
+    const sw = await screen.findByRole('switch', { name: 'Alert when silent' })
+    expect(sw).not.toBeChecked()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    const minutes = screen.getByRole('textbox', { name: 'Silent minutes' })
+    expect(minutes).toBeDisabled()
+    expect(minutes).toHaveValue('10')
+
+    await user.click(sw)
+    expect(minutes).toBeEnabled()
+    await user.clear(minutes)
+    await user.type(minutes, '15')
+    // The refetch after the save returns what the API now stores.
+    r[`/log-templates/${TID}`] = { body: { ...detail, silence: { enabled: true, minutes: 15 } } }
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Saved: alerts after 15 min of silence')
+    const sent = puts(fetch)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({ url: `/api/v1${SILENCE}`, body: { enabled: true, minutes: 15 } })
+    expect(sent[0]!.headers).toMatchObject({ 'Content-Type': 'application/json' })
+    expect(screen.getByRole('switch', { name: 'Alert when silent' })).toBeChecked()
+    expect(screen.getByRole('textbox', { name: 'Silent minutes' })).toHaveValue('15')
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    // The detail and list queries are fetched again.
+    await waitFor(() => expect(calls(fetch, `log-templates/${TID}`).length).toBeGreaterThanOrEqual(3))
+  })
+
+  it('starts from the stored setting and turns it off while keeping the minutes', async () => {
+    const user = userEvent.setup()
+    const fetch = stubApi(routes({ [`/log-templates/${TID}`]: { body: { ...detail, silence: { enabled: true, minutes: 45 } } }, [SILENCE]: { body: { enabled: false, minutes: 45 } } }))
+    renderApp(`/logs/templates/${TID}`)
+    const sw = await screen.findByRole('switch', { name: 'Alert when silent' })
+    expect(sw).toBeChecked()
+    expect(screen.getByRole('textbox', { name: 'Silent minutes' })).toHaveValue('45')
+    await user.click(sw)
+    expect(screen.getByRole('textbox', { name: 'Silent minutes' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(puts(fetch)).toHaveLength(1))
+    expect(puts(fetch)[0]!.body).toEqual({ enabled: false, minutes: 45 })
+  })
+
+  it.each(['0', '1441', '', '1.5', 'abc', '-3'])('rejects %j minutes without sending anything', async (text) => {
+    const user = userEvent.setup()
+    const fetch = stubApi(routes({ [SILENCE]: { body: { enabled: true, minutes: 10 } } }))
+    renderApp(`/logs/templates/${TID}`)
+    await user.click(await screen.findByRole('switch', { name: 'Alert when silent' }))
+    const minutes = screen.getByRole('textbox', { name: 'Silent minutes' })
+    await user.clear(minutes)
+    if (text) await user.type(minutes, text)
+    expect(await screen.findByRole('alert')).toHaveTextContent('from 1 to 1440')
+    expect(minutes).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    await user.type(minutes, '{Enter}')
+    expect(puts(fetch)).toHaveLength(0)
+  })
+
+  it.each(['1', '1440'])('accepts the bound %s', async (text) => {
+    const user = userEvent.setup()
+    const fetch = stubApi(routes({ [SILENCE]: { body: { enabled: true, minutes: Number(text) } } }))
+    renderApp(`/logs/templates/${TID}`)
+    await user.click(await screen.findByRole('switch', { name: 'Alert when silent' }))
+    const minutes = screen.getByRole('textbox', { name: 'Silent minutes' })
+    await user.clear(minutes)
+    await user.type(minutes, text)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(puts(fetch)).toHaveLength(1))
+    expect(puts(fetch)[0]!.body).toEqual({ enabled: true, minutes: Number(text) })
+  })
+
+  it('shows an API error inline as an alert and keeps the edit', async () => {
+    const user = userEvent.setup()
+    stubApi(routes({ [SILENCE]: { status: 400, body: { error: 'minutes must be 1..=1440' } } }))
+    renderApp(`/logs/templates/${TID}`)
+    await user.click(await screen.findByRole('switch', { name: 'Alert when silent' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('minutes must be 1..=1440')
+    expect(screen.getByRole('switch', { name: 'Alert when silent' })).toBeChecked()
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
+  })
+
+  it('a 401 with auth on follows the session-lost flow, and nothing is shown as saved', async () => {
+    const user = userEvent.setup()
+    const r = routes({
+      '/config': { body: { jaeger_url: null, grafana_url: null, auth_enabled: true, infra_services: ['flagd'] } },
+      '/auth/me': { body: { username: 'admin' } },
+      [SILENCE]: { status: 401, body: { error: 'unauthorized' } },
+    })
+    stubApi(r)
+    const { router } = renderApp(`/logs/templates/${TID}`)
+    await user.click(await screen.findByRole('switch', { name: 'Alert when silent' }))
+    // The session is gone: /auth/me now answers 401, as the API would.
+    r['/auth/me'] = { status: 401, body: { error: 'unauthorized' } }
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(router.state.location.pathname).toBe('/login'))
+    expect(router.state.location.search).toMatchObject({ next: `/logs/templates/${TID}` })
+  })
+
+  it('a 401 with auth off is only an inline error', async () => {
+    const user = userEvent.setup()
+    stubApi(routes({ [SILENCE]: { status: 401, body: { error: 'unauthorized' } } }))
+    const { router } = renderApp(`/logs/templates/${TID}`)
+    await user.click(await screen.findByRole('switch', { name: 'Alert when silent' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('unauthorized')
+    expect(router.state.location.pathname).toBe(`/logs/templates/${TID}`)
   })
 })

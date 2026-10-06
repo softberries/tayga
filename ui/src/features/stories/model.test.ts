@@ -81,7 +81,7 @@ describe('window deltas', () => {
   })
 })
 
-const alert = (kind: 'new' | 'spike', active: boolean, startS: number, lastS: number): LogAlertView => ({
+const alert = (kind: 'new' | 'spike' | 'silence', active: boolean, startS: number, lastS: number): LogAlertView => ({
   alert_id: `${kind}${startS}`,
   kind,
   template_id: '1',
@@ -101,6 +101,7 @@ describe('alerts', () => {
     expect(activeAlertsText([alert('spike', true, 0, 1), alert('spike', true, 0, 1), alert('new', true, 0, 1)])).toBe(
       '2 spike · 1 new',
     )
+    expect(activeAlertsText([alert('silence', true, 0, 1), alert('new', true, 0, 1)])).toBe('1 new · 1 silence')
     expect(activeAlertsText([alert('new', false, 0, 1)])).toBe('none active')
   })
   it('counts open alerts per bucket', () => {

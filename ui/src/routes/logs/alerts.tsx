@@ -26,6 +26,7 @@ const KINDS = [
   { value: 'all', label: 'All' },
   { value: 'new', label: 'New' },
   { value: 'spike', label: 'Spike' },
+  { value: 'silence', label: 'Silence' },
 ] as const
 
 function TableSkeleton() {
@@ -120,6 +121,10 @@ export function LogAlertsPage() {
             <li className="flex items-center gap-1.5">
               <span aria-hidden className="size-2 rounded-full bg-slow" />
               spike
+            </li>
+            <li className="flex items-center gap-1.5">
+              <span aria-hidden className="size-2 rounded-full bg-silence" />
+              silence
             </li>
           </ul>
         </div>
