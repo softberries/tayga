@@ -136,7 +136,6 @@ console.log(`${mp4}: ${(statSync(mp4).size / 1e6).toFixed(1)} MB, ${probeDuratio
 
 // 4. Captions from the alignment: sentence or clause chunks of at most two short lines.
 const SHOW: [RegExp, string][] = [
-	[/hello at softberries dot dev/g, 'hello@softberries.dev'],
 	[/two point eight microseconds/g, '2.8 µs'],
 	[/forty-five to ninety-five seconds/g, '45 to 95 seconds'],
 	[/p ninety-nine/g, 'p99'],

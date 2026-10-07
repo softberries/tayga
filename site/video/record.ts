@@ -252,8 +252,8 @@ class Seg {
 		await this.ctx.addInitScript(OVERLAY);
 		await this.ctx.route('http://cards.local/**', async (route) => {
 			const path = new URL(route.request().url()).pathname;
-			const file = path.startsWith('/fonts/') || path === '/logo.svg' ? `${UI_PUBLIC}${path.slice(1)}` : `${VIDEO_DIR}cards${path}`;
-			const type = path.endsWith('.css') ? 'text/css' : path.endsWith('.svg') ? 'image/svg+xml' : path.endsWith('.woff2') ? 'font/woff2' : 'text/html';
+			const file = path.startsWith('/fonts/') || path === '/logo.jpg' ? `${UI_PUBLIC}${path.slice(1)}` : `${VIDEO_DIR}cards${path}`;
+			const type = path.endsWith('.css') ? 'text/css' : path.endsWith('.jpg') ? 'image/jpeg' : path.endsWith('.woff2') ? 'font/woff2' : 'text/html';
 			await route.fulfill({ body: readFileSync(file), contentType: type });
 		});
 		this.t0 = Date.now();
@@ -377,7 +377,10 @@ class Seg {
 		renameSync(raw, `${CLIPS}${this.id}.webm`);
 		const start = (this.base - this.t0) / 1000;
 		const pieces = this.pieces ?? [{ a0: -LEAD, a1: this.n.duration + TAIL, v0: start - LEAD, v1: start + this.n.duration + TAIL }];
-		writeFileSync(`${CLIPS}${this.id}.json`, JSON.stringify({ lead: LEAD, tail: TAIL, duration: this.n.duration, pieces, ...this.extra }, null, 1));
+		// `recorded` keeps the narration this clip was filmed against, so retime.ts can re-fit it
+		// to a regenerated narration of the same text.
+		const recorded = { text: this.n.text, duration: this.n.duration, alignment: this.n.alignment, pieces };
+		writeFileSync(`${CLIPS}${this.id}.json`, JSON.stringify({ lead: LEAD, tail: TAIL, duration: this.n.duration, pieces, ...this.extra, recorded }, null, 1));
 		console.log(`  ${this.id}.webm  narration ${this.n.duration.toFixed(1)} s`);
 	}
 }
@@ -708,7 +711,8 @@ const run: Record<string, Run> = {
 		await s.finish();
 	},
 
-	// 10. Enterprise and the docs site.
+	// 10. The docs site's closing section. The video leaves out the Enterprise section above it
+	// and the header's contact link (the site keeps both): they are hidden while filming.
 	async '10'(s) {
 		await s.open();
 		await s.goto(DOCS, 1200);
@@ -716,25 +720,23 @@ const run: Record<string, Run> = {
 		// The docs site is laid out for reading, not for 1080p video: enlarge it.
 		// Zoom the page's own elements, not the overlay, so the cursor and rings stay in viewport px.
 		await p.evaluate(() => {
+			document.querySelectorAll<HTMLElement>('.tg-ent, a[href^="mailto:"]').forEach((e) => (e.style.display = 'none'));
 			for (const el of document.body.children) if (!/__tg-/.test(el.className.toString()) && el.tagName !== 'SCRIPT') (el as HTMLElement).style.zoom = '1.4';
 		});
 		await p.waitForTimeout(300);
 		await p.evaluate(() => {
-			const e = document.querySelector('.tg-ent')!;
-			window.scrollTo(0, window.scrollY + e.getBoundingClientRect().top - 120);
+			const e = document.querySelector('.tg-close')!;
+			window.scrollTo(0, window.scrollY + e.getBoundingClientRect().top - 140);
 		});
 		await p.waitForTimeout(500);
+		const quick = p.locator('.tg-close__actions a').first();
 		await s.start();
-		await s.moveTo(p.locator('.tg-ent h2'), 900, 0.4);
-		await s.on('single sign-on');
-		await s.ring(p.locator('.tg-ent__list'), 4200);
-		await s.on('Write to');
-		await s.moveTo(p.locator('.tg-ent a[href^="mailto:"]'), 700);
-		await s.ring(p.locator('.tg-ent a[href^="mailto:"]'), 2600, null, 5);
-		await s.on('head to the docs site', 0.5);
-		await s.scrollTo(p.locator('.tg-close'), 1400, 140);
-		await s.moveTo(p.locator('.tg-close a').first(), 700);
-		await s.ring(p.locator('.tg-close__actions'), 3000, null, 8);
+		await s.moveTo(p.locator('.tg-close h2'), 900, 0.5);
+		await s.on('the quickstart', 0.3);
+		await s.moveTo(quick, 700);
+		await s.ring(quick, 2400, null, 5);
+		await s.on('Tayga:', 0.3);
+		await s.ring(p.locator('.tg-close__actions'), 3200, null, 8);
 		await s.finish();
 	},
 };
@@ -743,8 +745,8 @@ async function cards(browser: Browser): Promise<void> {
 	const ctx = await browser.newContext({ viewport: VIEW, deviceScaleFactor: 1 });
 	await ctx.route('http://cards.local/**', async (route) => {
 		const path = new URL(route.request().url()).pathname;
-		const file = path.startsWith('/fonts/') || path === '/logo.svg' ? `${UI_PUBLIC}${path.slice(1)}` : `${VIDEO_DIR}cards${path}`;
-		const type = path.endsWith('.css') ? 'text/css' : path.endsWith('.svg') ? 'image/svg+xml' : path.endsWith('.woff2') ? 'font/woff2' : 'text/html';
+		const file = path.startsWith('/fonts/') || path === '/logo.jpg' ? `${UI_PUBLIC}${path.slice(1)}` : `${VIDEO_DIR}cards${path}`;
+		const type = path.endsWith('.css') ? 'text/css' : path.endsWith('.jpg') ? 'image/jpeg' : path.endsWith('.woff2') ? 'font/woff2' : 'text/html';
 		await route.fulfill({ body: readFileSync(file), contentType: type });
 	});
 	const page = await ctx.newPage();

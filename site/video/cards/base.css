@@ -1,5 +1,5 @@
 /* Shared styles for the video cards (1920x1080). Served by record.ts from http://cards.local/,
-   with /fonts and /logo.svg mapped to ui/public. Colours are the app's dark tokens. */
+   with /fonts and /logo.jpg mapped to ui/public. Colours are the app's dark tokens. */
 @font-face { font-family: 'Sora'; font-weight: 400; src: url('/fonts/sora-latin-400-normal.woff2') format('woff2'); }
 @font-face { font-family: 'Sora'; font-weight: 500; src: url('/fonts/sora-latin-500-normal.woff2') format('woff2'); }
 @font-face { font-family: 'Sora'; font-weight: 600; src: url('/fonts/sora-latin-600-normal.woff2') format('woff2'); }
@@ -47,3 +47,6 @@ body {
 	-webkit-background-clip: text; background-clip: text; color: transparent;
 }
 .eyebrow { text-transform: uppercase; letter-spacing: 0.16em; font-size: 20px; font-weight: 600; color: var(--accent); }
+/* The Tayga logo: the dog portrait (ui/public/logo.jpg, 1024 px), cropped to the same head-and-
+   shoulders square as the app's rail logo (logo-mark.png is this crop at 136 px). */
+img[src="/logo.jpg"] { object-fit: cover; object-view-box: inset(3.71% 8.4% 17.58% 12.89%); }

@@ -1,12 +1,12 @@
 # Tayga tour: narration script
 
-The narrated product video on the landing page (`site/public/media/tayga-tour.mp4`). About four
-minutes in ten segments, plus a title card and an end card.
+The narrated product video on the landing page (`site/public/media/tayga-tour.mp4`). About three
+and a half minutes in ten segments, plus a title card and an end card.
 
 This file is the source of truth for the narration: `tts.ts` reads the `>` lines under each
 numbered heading and speaks them exactly as written. They are spelled the way they should be
-said ("p ninety-nine", "hello at softberries dot dev"); the captions show the written form
-(`p99`, `hello@softberries.dev`) through the substitutions in `assemble.ts`. The **On screen**
+said ("p ninety-nine", "two point eight microseconds"); the captions show the written form
+(`p99`, `2.8 µs`) through the substitutions in `assemble.ts`. The **On screen**
 lists are what `record.ts` films for each segment.
 
 Every statement is about a feature that exists in the open-source code, and every number comes
@@ -26,7 +26,7 @@ from the [Verified claims](../src/content/docs/verified.md) page:
 | New, spike and opt-in silence alerts to Slack and webhooks, with retries | "New, spike and opt-in silence alerts, to webhook and Slack with retries" |
 | Pipeline page from a recorder inside the API | "Pipeline health recorded by the API itself" |
 | Installer, Helm chart, OTel demo | `scripts/install.sh`, `deploy/helm/tayga`, the Getting started pages; "Tayga: Docker Compose and Helm" |
-| Enterprise: SSO, role-based access, multi-tenancy, HA, SLA support, on request | "Enterprise: …" and "Enterprise available on request": **commercial offering (owner)** |
+| Quickstart on the docs site | `site/src/content/docs/getting-started/quickstart.mdx` (linked from the landing page's closing section) |
 
 ## 1. The problem
 
@@ -113,11 +113,11 @@ from the [Verified claims](../src/content/docs/verified.md) page:
 - A terminal card: the `curl … install.sh | sh` one-liner and the installer's real closing output ("Tayga is running." with the URLs and the Collector exporter).
 - Then `helm install tayga oci://ghcr.io/softberries/charts/tayga …`, then `make up` and `make flag NAME=paymentFailure VARIANT=100%`.
 
-## 10. Enterprise and the docs
+## 10. The docs
 
-> For larger teams, an enterprise edition is available on request: single sign-on, role-based access, multi-tenancy, high availability, and support with an SLA. Write to hello at softberries dot dev. And for everything else, head to the docs site. Tayga: from a failing request to its root cause, in one story.
+> To try it yourself, start with the quickstart on the docs site. Tayga: from a failing request to its root cause, in one story.
 
 **On screen**
 
-- The docs site's landing page: the enterprise section (ring on the contact), then the top of the page.
-- The end card follows: the docs URL, the GitHub repository and the contact.
+- The docs site's landing page, at its closing section: rings on the Quickstart button, then on the Quickstart, Docs and GitHub links.
+- The end card follows: the docs URL and the GitHub repository.

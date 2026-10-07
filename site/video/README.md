@@ -8,9 +8,10 @@ The tour on the landing page is built from this directory:
 | `segments.ts` | Parses `script.md`; shared paths; finds when a phrase is spoken (cues). |
 | `tts.ts` | ElevenLabs text to speech, one MP3 per segment, with the character alignment. |
 | `record.ts` | Playwright at 1920×1080 with `recordVideo`, one clip per segment, paced by the narration. |
+| `retime.ts` | Re-fits recorded clips to a regenerated narration of the same text, without filming again. |
 | `assemble.ts` | ffmpeg: fits each clip to its narration, crossfades, mixes and normalizes the audio, encodes, writes the captions. |
 | `poster.ts` | Renders `cards/poster.html` to the landing page's poster and to `docs/assets/tour-poster.jpg`, the README's poster with a play button drawn in. Runs without the app: `cd site && node video/poster.ts`. |
-| `cards/` | The title, end, architecture and deployment cards, and the poster (HTML in the Tayga fonts and colours). |
+| `cards/` | The title, end, architecture and deployment cards, and the poster (HTML in the Tayga fonts and colours). The logo is `ui/public/logo.jpg`, the dog portrait (1024 px), cropped in `base.css` to the square of the app's rail logo (`logo-mark.png` is that crop at 136 px). |
 | `make-video.sh` | Runs the three steps. |
 
 Output: `site/public/media/tayga-tour.mp4`, `tayga-tour-poster.jpg` and `tayga-tour.vtt`, which
@@ -23,10 +24,14 @@ Output: `site/public/media/tayga-tour.mp4`, `tayga-tour-poster.jpg` and `tayga-t
 |---|---|
 | Voice | Matilda (`XrExE9yKIg1WjnnlVkGX`), an ElevenLabs premade voice: American English, "Knowledgable, Professional", labelled for informative and educational use |
 | Model | `eleven_v4`, the model ElevenLabs recommends for content creation and narration (checked in the ElevenLabs docs on 2026-10-07) |
-| Endpoint | `POST /v1/text-to-speech/{voice_id}/with-timestamps`, `output_format=mp3_44100_128`, `voice_settings.speed` 1.05, with `previous_text` and `next_text` for continuity between segments |
+| Endpoint | `POST /v1/text-to-speech/{voice_id}/with-timestamps`, `output_format=mp3_44100_128`, `voice_settings.speed` 1.2 (the maximum; the documented range is 0.7 to 1.2), with `previous_text` and `next_text` for continuity between segments |
+| Tempo | ffmpeg `atempo=1.1` on each generated MP3 (pitch unchanged), alignment scaled to match. `eleven_v4` barely reacts to `speed`: on 2026-10-07 the same sentence came out at 9.28 s with 0.7 and 9.52 s with 1.2, and the whole narration at 1.2 was only 1 % shorter than at 1.05. |
+| Result | Narration 194.6 s (segments 1 to 9: 185.7 s, against 205.8 s at speed 1.05 and no tempo, 10 % shorter); video 3:41 (221.2 s), 27.9 MB |
 
-Override with `TAYGA_VOICE_ID`, `TAYGA_TTS_MODEL` and `TAYGA_TTS_SPEED`. `tts.ts` only calls the
-API for segments whose text, voice, model or speed changed (or those named in `ONLY`).
+Override with `TAYGA_VOICE_ID`, `TAYGA_TTS_MODEL`, `TAYGA_TTS_SPEED` and `TAYGA_TTS_TEMPO`. `tts.ts`
+only calls the API for segments whose text, voice, model or speed changed (or those named in
+`ONLY`); it keeps ElevenLabs' original as `NN.src.mp3`, so a tempo change alone re-applies
+`atempo` without a new generation.
 
 ## Prerequisites
 
@@ -51,14 +56,23 @@ SKIP_RECORD=1 site/video/make-video.sh   # re-assemble only
 ONLY=05,06 site/video/make-video.sh      # re-record two segments, then assemble
 ```
 
+After a new narration of the same text (another speed or tempo), the clips need not be filmed
+again: `cd site && ONLY=01,03,04 node video/retime.ts && node video/assemble.ts`. `retime.ts`
+scales each clip's narration span by one rate to the new duration (a word-by-word map follows
+the alignment's jitter and makes the picture lurch); the lead-in, the tail and segment 3's
+time-lapse are kept. With the 2026-10-07 narration every cue stayed within 0.4 s of its words.
+A clip whose card or text changed has to be filmed again.
+
 Segment 3 turns on `paymentFailure`, films the Stories page until Tayga writes the story (the
 `make e2e` runs saw 45 to 95 seconds) and runs `make flags-reset` in a `finally` block; the
 shell script also resets the flags on exit. Segment 4 opens the story segment 3 produced, so
 record them together. The wait is shown as a time-lapse, with a badge counting the real seconds
 since the flip.
 
-Segment 10 films the docs site's landing page: the script builds the site and serves it with
-`astro preview` unless `DOCS_URL` already answers.
+Segment 10 films the closing section of the docs site's landing page: the script builds the site
+and serves it with `astro preview` unless `DOCS_URL` already answers. The video has no
+Enterprise segment: the landing page's Enterprise section and the header's email link are hidden
+while filming (the site keeps them), and the end card shows only the docs and code links.
 
 ## How the timing works
 

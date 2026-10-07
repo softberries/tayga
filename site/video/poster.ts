@@ -23,8 +23,8 @@ try {
 	const ctx = await browser.newContext({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 });
 	await ctx.route('http://cards.local/**', async (route) => {
 		const path = new URL(route.request().url()).pathname;
-		const file = path.startsWith('/fonts/') || path === '/logo.svg' ? `${UI_PUBLIC}${path.slice(1)}` : `${VIDEO_DIR}cards${path}`;
-		const type = path.endsWith('.css') ? 'text/css' : path.endsWith('.svg') ? 'image/svg+xml' : path.endsWith('.woff2') ? 'font/woff2' : 'text/html';
+		const file = path.startsWith('/fonts/') || path === '/logo.jpg' ? `${UI_PUBLIC}${path.slice(1)}` : `${VIDEO_DIR}cards${path}`;
+		const type = path.endsWith('.css') ? 'text/css' : path.endsWith('.jpg') ? 'image/jpeg' : path.endsWith('.woff2') ? 'font/woff2' : 'text/html';
 		await route.fulfill({ body: readFileSync(file), contentType: type });
 	});
 	const page = await ctx.newPage();
