@@ -1,879 +1,222 @@
+<a href="https://softberries.github.io/tayga/">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/hero-light.png">
+    <img src="docs/assets/hero-light.png" width="1280" alt="Tayga: every failing request, explained. A Tayga error story for a failing payment, with its root cause in the payment service's charge span and the request path from the load generator through checkout to payment.">
+  </picture>
+</a>
+
 <p align="center">
-  <img src="ui/public/logo.jpg" alt="Tayga logo: a brown and white ticked German spaniel in profile" width="180">
+  <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-1c69c7"></a>
+  <a href="https://github.com/softberries/tayga/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/softberries/tayga/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://softberries.github.io/tayga/"><img alt="Docs" src="https://img.shields.io/badge/docs-softberries.github.io%2Ftayga-2b6cb0"></a>
+  <a href="https://github.com/softberries/tayga/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/softberries/tayga?color=2b6cb0&label=release"></a>
 </p>
 
-# Tayga
+<p align="center">
+  <a href="https://softberries.github.io/tayga/getting-started/quickstart/"><b>Quickstart</b></a> ·
+  <a href="https://softberries.github.io/tayga/"><b>Documentation</b></a> ·
+  <a href="https://softberries.github.io/tayga/#tour"><b>Watch the narrated tour</b></a> ·
+  <a href="https://softberries.github.io/tayga/comparison/"><b>Comparison</b></a> ·
+  <a href="https://softberries.github.io/tayga/enterprise/"><b>Enterprise</b></a>
+</p>
 
-Tayga turns OpenTelemetry traces and logs into "error stories". For each failing or slow request it shows the root-cause span, the request path across services, the critical path, a diff against the endpoint's normal baseline, and the related logs. Stories are grouped by fingerprint, so one underlying problem shows up as one group rather than as hundreds of traces.
+**Tayga turns OpenTelemetry traces and logs into error stories.** For each failing or slow request it shows the root-cause span, the request path across services, the critical path, a diff against the endpoint's normal baseline, and the logs that matter. It analyses traces as they stream in, so by the time you open it the failing requests are already explained, and repeats of one problem fold into one story group instead of hundreds of traces. It mines your logs into templates and alerts on new, spiking and silent ones. Tayga is written in Rust, reads standard OTLP, stores in ClickHouse, streams through Redpanda, and is self-hosted under the AGPLv3.
 
-It runs next to the [OpenTelemetry demo](https://github.com/open-telemetry/opentelemetry-demo) (vendored as a git submodule, pinned to 3.1.0). The demo's collector forwards OTLP to Tayga; Tayga stores raw spans and logs in ClickHouse, assembles traces, and serves a web app and a JSON API.
+## Why Tayga?
 
-## Architecture
+> Tayga, properly spelled *Tajga*, is my hunting dog. Tajga can trace anything, anywhere, in the harshest conditions. I love that dog as much as I love writing software, so the name was obvious. The "y" is for English speakers, who wouldn't read *Tajga* the way it's meant ;)
+>
+> — Krzysztof Grajek, author of Tayga
 
-```
-OTel demo services ──► demo otel-collector ──OTLP gRPC──► tayga-ingest
-                                                              │ one record per trace_id;
-                                                              │ logs also to `tayga.logs`, one record per (request, service)
-                                                              ▼
-                                       Redpanda topic `tayga.signals` (key = trace_id)
-                                     ┌────────────────────────┴───────────────────────┐
-                                     ▼                                                ▼
-                              tayga-writer                                    tayga-assembler
-                       (raw spans/logs → ClickHouse)            (session windows → analysis → stories,
-                                     │                            trace summaries, service edges)
-                                     ▼                                                │
-                                 ClickHouse ◄─────────────────────────────────────────┤
-                                     │                                                ▼
-                         tayga-api (JSON API + web app)                  Redpanda topic `tayga.stories`
-                         tayga-grafana, tayga-prometheus (optional: `make up-extras`)
+## Features
 
-Redpanda topic `tayga.logs` (key = service) ──► tayga-logminer (consumer group `tayga-logminer`, `LOGMINER_REPLICAS`, default 1)
-                                     │  Drain template mining per service, detection every 60 s
-                                     ├─► ClickHouse `log_templates`, `log_template_hits`, `log_alerts`
-                                     └─► Redpanda topic `tayga.alerts` ──► tayga-notifier ──► webhook and Slack targets
-```
+- **[Error and slow stories](https://softberries.github.io/tayga/concepts/error-stories/).** Every assembled trace is checked. A failing request, or one slower than max(p99 × 1.5, p99 + 100 ms) of its endpoint's baseline, becomes a story.
+- **[Deterministic root cause and critical path](https://softberries.github.io/tayga/concepts/root-cause-critical-path/).** Fixed rules over the span tree, no LLM: the same input gives the same answer, in a sentence such as "`checkout` could not reach `payment`".
+- **[Comparison with normal](https://softberries.github.io/tayga/concepts/baselines/).** Operations that are new, missing or slower than in the endpoint's baseline from the last hour.
+- **[Story groups](https://softberries.github.io/tayga/concepts/story-groups/).** A fingerprint of the kind, endpoint, root-cause span and masked message folds repeats into one group with a trend.
+- **[Log templates](https://softberries.github.io/tayga/concepts/log-templates/) and [log alerts](https://softberries.github.io/tayga/concepts/log-alerts/).** Drain mines each service's logs at ingest. New templates, rate spikes and, when you ask for it, silence raise alerts, delivered to [webhooks and Slack](https://softberries.github.io/tayga/alerting/notifier/).
+- **[Service map](https://softberries.github.io/tayga/guide/service-map/) and [trace explorer](https://softberries.github.io/tayga/guide/traces/).** Rate, error ratio and p99 per service against its 24-hour baseline; a duration scatter, waterfall and span drawer for any trace.
+- **[Pipeline health](https://softberries.github.io/tayga/guide/pipeline/) built in.** The API records every service's metrics itself, so you see throughput and consumer lag without Prometheus.
+- **Easy to run.** A [one-line installer](https://softberries.github.io/tayga/getting-started/quickstart/) for Docker Compose, a [Helm chart](https://softberries.github.io/tayga/install/helm/) for Kubernetes, and [optional login](https://softberries.github.io/tayga/operations/authentication/). Any OpenTelemetry Collector [connects](https://softberries.github.io/tayga/install/collector/) with one exporter.
 
-Workspace crates (`crates/`): `tayga-ingest`, `tayga-writer`, `tayga-assembler`, `tayga-logminer`, `tayga-notifier`, `tayga-api` (services); `tayga-analysis`, `tayga-drain` (Drain mining and alert rules, no I/O), `tayga-model`, `tayga-kafka`, `tayga-store`, `tayga-common` (libraries); `tayga-devtools` (flag, capture, verify-raw, emit-log, hash-password, remine CLI); `tayga-e2e` (end-to-end tests).
+## Quickstart
 
-## Quick start
-
-Requires Docker with Compose, `make`, and a Rust toolchain (for the dev commands).
+**Docker Compose.** Tayga, ClickHouse and Redpanda on one host; the installer checks the ports, waits for health, and prints the URLs:
 
 ```sh
-git clone --recurse-submodules git@github.com:softberries/tayga.git tayga
-cd tayga
-make up
+curl -fsSL https://raw.githubusercontent.com/softberries/tayga/master/scripts/install.sh | sh
 ```
 
-`make up` initializes the submodule, builds the `tayga:dev` image (the web app is built inside the image; no Node needed on the host), and starts the demo plus Tayga. It does not start Grafana or Prometheus. The image's services run as the unprivileged user `tayga` (uid 10001); its three base images (`node:24-bookworm-slim`, `lukemathwalker/cargo-chef:latest-rust-1.98-trixie`, `debian:trixie-slim`) are pinned by digest in `docker/Dockerfile`. `tayga-api` has a compose healthcheck (`GET /healthz` every 10 s), so `docker inspect -f '{{.State.Health.Status}}' tayga-api` reads `healthy` once it serves.
+Open http://localhost:8090 and send OTLP to `localhost:4317` (gRPC) or `localhost:4318` (HTTP). [Quickstart →](https://softberries.github.io/tayga/getting-started/quickstart/)
 
-- Web app: http://localhost:8090
-- Demo shop: http://localhost:8080
-- Optional, after `make up-extras` (see [Grafana and Prometheus](#grafana-and-prometheus-optional)):
-  - Grafana: http://localhost:3001 (anonymous Viewer access is enabled; admin password is `admin`)
-  - Prometheus: http://localhost:19090
-
-Trigger a failure with a demo feature flag, then watch a story appear:
+**Kubernetes.** Bundled single-node ClickHouse and Redpanda for evaluation, or your own for production:
 
 ```sh
-make flag NAME=paymentFailure VARIANT=100%
-make flags-reset        # restore the demo's default flags
+helm install tayga oci://ghcr.io/softberries/charts/tayga --version 0.1.0 \
+  --namespace tayga --create-namespace --wait
 ```
 
-Other targets: `make ps`, `make logs SERVICE=<name>`, `make down` (also removes Grafana and Prometheus if they are running).
+[Helm and Kubernetes →](https://softberries.github.io/tayga/install/helm/)
 
-## Web app
+**See it break on purpose.** Run Tayga next to the [OpenTelemetry demo](https://github.com/open-telemetry/opentelemetry-demo) shop, make every payment fail, and watch the story appear:
 
-The app is a single-page React app in `ui/`, built into `ui/dist` and embedded in the `tayga-api` binary, so port 8090 serves the app and the JSON API. It replaced the earlier server-rendered pages. Every filter and the time range live in the URL, so a page can be shared as a link.
+```sh
+git clone --recurse-submodules https://github.com/softberries/tayga.git && cd tayga
+make up                                      # the shop and Tayga: http://localhost:8090
+make flag NAME=paymentFailure VARIANT=100%   # every payment now fails
+make flags-reset                             # put the flags back
+```
 
-| Page | Path | What it shows |
+[Demo with the OTel demo →](https://softberries.github.io/tayga/getting-started/otel-demo/)
+
+## Screenshots
+
+<p align="center">
+<a href="https://softberries.github.io/tayga/guide/stories/"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="site/src/assets/screens/stories-home-dark.webp">
+  <img src="site/src/assets/screens/stories-home-light.webp" width="100%" alt="The Stories page: KPI tiles, the story groups with their trends, and the inspector for the selected group with its request path and waterfall.">
+</picture></a>
+</p>
+
+<table>
+  <tr>
+    <td width="50%">
+<a href="https://softberries.github.io/tayga/guide/service-map/"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="site/src/assets/screens/map-overview-dark.webp">
+  <img src="site/src/assets/screens/map-overview-light.webp" width="100%" alt="The service map: services coloured by health; checkout and payment are degraded and the failing call between them is dashed.">
+</picture></a>
+    </td>
+    <td width="50%">
+<a href="https://softberries.github.io/tayga/guide/logs/"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="site/src/assets/screens/logs-templates-dark.webp">
+  <img src="site/src/assets/screens/logs-templates-light.webp" width="100%" alt="Log templates: every template mined from the logs, with service, hits, trend, first seen and alert status.">
+</picture></a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><b>Service map</b>: health against each service's baseline</td>
+    <td align="center"><b>Log templates</b>: mined at ingest, with alerts</td>
+  </tr>
+</table>
+
+Top: <b>Stories</b>, one group per problem with its trend and inspector. All three were captured from a running stack with the OpenTelemetry demo, 2026-10-07. Every page is explained in the [user guide](https://softberries.github.io/tayga/guide/tour/).
+
+## How it works
+
+```mermaid
+flowchart LR
+  SRC["Your services<br/>or OTel Collector"] -- "OTLP gRPC / HTTP" --> ING["tayga-ingest"]
+  ING -- "tayga.signals<br/>(key: trace id)" --> RP[("Redpanda")]
+  ING -- "tayga.logs<br/>(key: service)" --> RP
+  RP --> WR["tayga-writer<br/>raw spans and logs"]
+  RP --> AS["tayga-assembler<br/>traces → stories"]
+  RP --> LM["tayga-logminer<br/>templates → alerts"]
+  WR --> CH[("ClickHouse")]
+  AS --> CH
+  LM --> CH
+  LM -- "tayga.alerts" --> NT["tayga-notifier<br/>webhook, Slack"]
+  CH --> API["tayga-api<br/>web app + JSON API"]
+```
+
+1. **Ingest.** `tayga-ingest` receives OTLP and publishes one record per trace id per export request to Redpanda, keyed by trace id, so every span of a trace lands on the same partition. Logs also go to a second topic, keyed by service.
+2. **Assemble and analyse.** The assembler closes a trace after 10 s without new spans (60 s at most), builds the span tree, and turns failing and slow requests into stories with a root cause, a critical path and a baseline diff.
+3. **Explain and alert.** The logminer mines templates per service and raises new, spike and silence alerts; the notifier delivers them. `tayga-api` serves the web app and the JSON API from ClickHouse.
+
+[Architecture →](https://softberries.github.io/tayga/concepts/architecture/)
+
+## Benchmarks
+
+Measured on an Apple M3 Max (14 cores, 96 GiB; Docker Desktop VM with 14 CPUs and 31.5 GiB), Rust 1.98.1, ClickHouse 26.8, on 2026-10-06 and 2026-10-07. Micro-benchmarks are criterion runs of a release build; live numbers come from the OpenTelemetry demo stack on the same machine. One machine and one workload, not a guarantee.
+
+| Measure | Result | How |
 |---|---|---|
-| Stories | `/` | KPI tiles, the story-groups table (kind, service, endpoint filters, search), an inspector for the selected group (request path, compact waterfall, comparison with normal), a mini service map and the log alerts |
-| Story | `/stories/{id}` | One story: root cause, group trend, full waterfall, comparison with normal, logs with their templates, related alerts |
-| Traces | `/traces`, `/traces/{id}` | Trace explorer (filters, duration scatter with brush selection, results table); the trace page has the waterfall and a span drawer |
-| Service map | `/map` | Services and their calls with health, rate, error ratio and p99; a node opens a drawer with RED charts and related stories. Infrastructure services are hidden unless "Show infrastructure" is on (see below) |
-| Login | `/login` | Only when authentication is on (see [Authentication](#authentication)) |
-| Logs | `/logs/alerts`, `/logs/templates`, `/logs/templates/{id}` | Log alerts, templates and a template's detail (`/logs` redirects to the alerts tab) |
-| Pipeline | `/pipeline` | Component status, metric history charts and consumer lag, from the recorder below; needs no Prometheus |
+| Drain, per log line | **2.818 µs** | criterion `stages/drain_add`, 50,000-line corpus, one thread |
+| Fingerprint cache vs Drain alone | **6.98×** faster (144.29 ms → 20.678 ms per 50,000 lines) | criterion `cached` benches; identical templates by a differential test |
+| Cache hits on the live stack | **99.70 %** (69,359 of 69,569 lines) | first 30 minutes after deploy, 2026-10-07 |
+| Logminer CPU at live load | **1.07 %** of one core at about 40 lines/s | `docker stats`, 2026-10-06 |
+| Service map, ClickHouse CPU per refresh | **291.5 → 40.0 ms** (7.3×) | live `system.query_log`, 2026-10-07 |
+| Baseline queries, bytes read per run | **27.7×** and **17.0×** less | live `system.query_log`, 2026-10-07 |
+| GPU fingerprinting | **slower than CPU `parallel` at every size**, so not shipped | criterion, 2026-10-07 |
 
-Header and shortcuts:
+Method, raw tables and the corpus: [Performance →](https://softberries.github.io/tayga/performance/) (source: [`docs/perf/sp4-performance.md`](docs/perf/sp4-performance.md)).
 
-- Service map: infrastructure services (`flagd` by default) are hidden unless the "Show infrastructure" switch beside the search box is on; the switch is stored in the URL as `infra=true`. A service that called a hidden one keeps a "+N infra" badge on its card, amber, or red when any of those calls is failing; its tooltip lists each hidden callee with calls per minute and error percentage. The summary line adds "· N infra hidden". A service whose calls all went to hidden services stays on the map with its badge (unless it is infrastructure itself), and `/map?service=flagd` still opens flagd's drawer while it is hidden. The mini map on the Stories page always hides them. The header's degraded-services badge still counts infrastructure services. The list is `[map] infra_services` in the config file (default `["flagd"]`); set it in the file, not with an environment variable: Tayga's settings loader does not turn on the config crate's list parsing for `TAYGA__*` variables, so a list cannot be given that way (same as `metric_targets`). With an empty list the switch is not shown.
-- Time range: 15m, 1h, 24h or 7d (default 1h), each ending now, or "Custom…": a past window picked with "from" and "to" fields in local time, up to 7 days long and starting within the last 7 days. The custom range is kept in the URL as `since` and `until` (UTC) and shows in the header as, for example, "Oct 4 12:00 – 14:00"; links between pages keep it, and choosing a preset clears it.
-- Live: refreshes every 10 s and pauses while the browser tab is hidden. It is off, and cannot be turned on, while a custom range is set. The degraded-services badge (always the last 15 minutes) and the Pipeline page's job status and consumer lag show the current state and keep refreshing in any range.
-- A custom range in an old link may have aged past the 7 days of data: the pages then show the API's error with a "Show last 1h" button, and the URL is left alone until it is clicked.
-- Theme: a switch that cycles light, dark and system (the default). The choice is stored in the browser.
-- `Cmd+K` or `Ctrl+K` opens the command palette: jump to a page, a service, a trace id (32 hex characters), a story group or a template, or switch the theme and the time range (including "Custom range…", which opens the custom range fields).
-- `g` then `s`, `t`, `m`, `l` or `p` goes to Stories, Traces, Service map, Log alerts or Pipeline. `?` lists the shortcuts. They are ignored while you type in a field or a dialog is open.
-- "Open in Jaeger" (span drawer, trace page) links to the demo's Jaeger (`TAYGA__JAEGER_URL`, set in `deploy/compose.tayga.yaml`). "Open in Grafana" on the map appears only when `TAYGA__GRAFANA_URL` is set, which `make up-extras` does. Both are empty when unset.
+## How Tayga compares
 
-Pipeline history comes from a recorder inside `tayga-api`: every 15 s (`record_secs`) it scrapes the `/metrics` of ingest, writer, assembler, logminer and notifier plus its own registry, and stores the samples in ClickHouse `metric_samples` (7-day TTL). The scrape targets are in `deploy/tayga-api.toml` (`TAYGA_CONFIG`); a list of targets cannot be set through `TAYGA__` environment variables. Consumer lag is read from Kafka on request, so `tayga-api` has Kafka settings. Each target's host is resolved on every tick; when it resolves to several addresses (logminer replicas), each address is scraped and its samples carry an `instance` label (`<ip>:<port>`). Counter rates and quantiles on the Pipeline page sum the replicas. Gauges whose names end in `_data_lag_seconds` or `_templates`, and `up`, take the largest replica (data lag is the slowest replica, the template count is not doubled, `up` is 1 while any replica answers); every other gauge, `tayga_logminer_silence_alerts` included, is summed over the replicas. See [Metrics with several replicas](#logminer-replicas-plan-8) for the scale-up and scale-down edges. Set `record_secs = 0` (`TAYGA__RECORD_SECS=0`) to turn the recorder off; values from 1 to 4 log a startup warning (`record_secs is small: small parts; use >= 5 or 0 to turn off`), because every tick inserts a small part into ClickHouse.
+Tayga is a focused tool, and for many teams a broader product is the better choice. Every competitor fact below comes from the vendor's own docs, pricing page or repository, **accessed on 2026-10-07**; the [full comparison](https://softberries.github.io/tayga/comparison/) links a source for every cell and lists what could not be verified.
 
-### Grafana and Prometheus (optional)
-
-They are the compose profile `extras`. `make up-extras` starts them and sets the Grafana link in the app; `make up` leaves them out. `make up` does not stop them if they are already running (compose leaves profiled services alone), so after upgrading an existing stack run `make down` once, or stop `tayga-grafana` and `tayga-prometheus` by hand. The Grafana dashboards (`tayga-stories`, `tayga-service-map`, `tayga-pipeline`, `tayga-logs`) are unchanged and still available there.
-
-- **Read-only ClickHouse user.** Grafana's ClickHouse datasource connects as `grafana`, defined in `deploy/clickhouse/users.d/grafana-readonly.xml` (mounted as a directory at `/etc/clickhouse-server/users.d`). Its profile has `readonly = 1`: writes, DDL, temporary tables and setting changes are refused with `Code: 164 ... (READONLY)`, except `max_execution_time`, which the Grafana plugin sets per query. It guards against stray writes from dashboards; it is **not a security boundary**: the user has no password, `default` is still passwordless on the compose network, and only the 127.0.0.1 binding of port 18123 keeps others out. `tayga-api` keeps the `default` user because it writes (the recorder inserts `metric_samples`, and `PUT /log-templates/{id}/silence` inserts into `log_template_silence`).
-- **Anonymous Viewer.** Grafana keeps anonymous Viewer access: it runs only after the opt-in `make up-extras` and binds 127.0.0.1:3001.
-- **Logminer replicas.** Prometheus finds the logminer through `dns_sd_configs` (type A, port 9100), so it scrapes every replica; the logminer panels aggregate them (`sum` for rates and increases, `max` for the template count and the data lag).
-- **Pipeline health panels.** The rate panels carry units (records/s, rows/s, per second, items/s, logs/s; "Logs mined/s" on the Logs dashboard too). "Error counters (5m)" has 11 queries, adding the writer's commit failures and undecodable records, ingest's rejected requests, the assembler's serialization failures and the logminer's commit failures. "Consumer lag per group" reads each group on its own topic: writer and assembler on `tayga.signals`, logminer on `tayga.logs`, notifier on `tayga.alerts` (per partition, high watermark minus committed offset, summed by group).
-
-### Developing the UI
-
-Node 24 or newer is needed only for UI development (`engines` in `ui/package.json`; Docker builds the app with `node:24`). Building the Rust crates needs no Node: without `ui/dist`, `tayga-api` compiles and serves a "UI not built" placeholder page.
-
-```sh
-npm --prefix ui ci
-make ui-dev                  # Vite dev server; proxies /api and /metrics to http://127.0.0.1:8090 (TAYGA_API overrides)
-npm --prefix ui test         # unit and component tests (vitest)
-npm --prefix ui run lint
-npm --prefix ui run typecheck
-make ui-e2e                  # Playwright against the live app (see ui/playwright.config.ts)
-```
-
-Component tests wait up to 5 s for async queries (`asyncUtilTimeout` in `ui/src/test/setup.ts`; the per-test timeout is 15 s in `ui/vite.config.ts`). `make ui-e2e` first waits up to 5 minutes for the stack's data (story groups, log templates, service-map edges and a non-zero `spans_per_sec`; `ui/e2e/global-setup.ts`) and prints `[global-setup] <url> has data after <n> s`; with authentication on, a 401 on every check skips the wait.
-
-To run the API on the host without polluting the Pipeline history (a host run cannot reach the container scrape targets, so its recorder would store `up = 0` for them), turn its recorder off:
-
-```sh
-cargo build -q -p tayga-api
-TAYGA__CLICKHOUSE__URL=http://localhost:18123 TAYGA__KAFKA__BROKERS=localhost:19092 \
-  TAYGA__HTTP_ADDR=127.0.0.1:18090 TAYGA__RECORD_SECS=0 target/debug/tayga-api
-```
-
-It logs `metric recorder disabled (record_secs = 0)`.
-
-## Authentication
-
-Off by default: with no `[auth]` section the API and the app are open, as before. Turning it on adds a login page and protects every `/api/*` route except the ones listed below. The settings live in the `[auth]` section of the config file (`TAYGA_CONFIG`, for example `deploy/tayga-api.toml`) or in `TAYGA__AUTH__*` environment variables:
-
-| Key (env var) | Meaning | Default |
+| Product | Pick it over Tayga when | Tayga differs by |
 |---|---|---|
-| `enabled` (`TAYGA__AUTH__ENABLED`) | Turns authentication on. When it is on, the keys below are checked at startup and a bad value stops the API | `false` |
-| `username` (`TAYGA__AUTH__USERNAME`) | The one account. It may not contain `\|` or `:` | none (required when enabled) |
-| `password_hash` (`TAYGA__AUTH__PASSWORD_HASH`) | An Argon2id hash in PHC format (see below). Plain passwords are not accepted | none (required when enabled) |
-| `session_ttl` (`TAYGA__AUTH__SESSION_TTL`) | Session length: `<n>s`, `<n>m`, `<n>h` or `<n>d`, at most `365d` | `12h` |
-| `session_key` (`TAYGA__AUTH__SESSION_KEY`) | Base64 of at least 32 bytes, used to sign session cookies. When unset, a random key is generated per process, so every restart signs everyone out | unset |
-| `secure_cookie` (`TAYGA__AUTH__SECURE_COOKIE`) | Adds `Secure` to the cookie; set it when the app is served over HTTPS | `false` |
+| **Jaeger** (Apache-2.0) | You want a CNCF graduated tracing platform with proven scale, taking OTel, Jaeger and Zipkin data | Per-request error stories and log templates; Jaeger is traces only and documents no RCA beyond a critical-path view |
+| **Grafana LGTM** (AGPL-3.0) | You need metrics and dashboards, or a hosted service (Grafana Cloud, with Sift and the LLM-based Assistant) | Stories and log-template alerts in the self-hosted core; Loki's pattern ingester is off by default |
+| **SigNoz** (MIT + `ee/`) | You want traces, metrics and logs in one product, self-hosted or in SigNoz Cloud | A deterministic root cause with no LLM (SigNoz's Noz is an AI teammate); log templates, which the current SigNoz docs do not offer |
+| **Coroot** (Apache-2.0) | You cannot add SDKs (eBPF agent), or your root causes are in the infrastructure | Per-request stories built at ingest in the open-source core, with no LLM; Coroot's AI RCA (Enterprise, or through Coroot Cloud) ends in an LLM summary |
+| **OpenObserve** (AGPL-3.0) | You want traces, metrics and logs in one product, or a hosted service | Log patterns and root causes in the open-source core; OpenObserve's Log Patterns and SRE Agent are Enterprise |
+| **ClickStack / HyperDX** (MIT, Apache-2.0) | You want traces, metrics and logs on ClickHouse in one product, or a managed service | Templates mined at ingest from every line, with alerts; ClickStack mines patterns at query time over a sample |
+| **Datadog, Dynatrace, New Relic** (proprietary) | You want a hosted platform with its own agents (Dynatrace OneAgent), RCA across infrastructure, and everything else besides | Self-hosted and open source, priced per cluster or node for Enterprise rather than per GB; rules instead of AI agents (Bits AI, Autopilot) |
 
-Make the hash with the devtools command. On a terminal it asks for the password twice without echo; when its input is piped it reads the first line:
+**Where another product is the better choice, in general:** you need metrics and dashboards (Tayga has neither), you cannot add OpenTelemetry instrumentation, your root causes are in the infrastructure (Tayga's root cause is always a span), or you want a hosted service or proven scale (Tayga is young and has been tested against the OpenTelemetry demo).
 
-```sh
-cargo run -q -p tayga-devtools -- hash-password
-printf '%s' 'my password' | cargo run -q -p tayga-devtools -- hash-password
-```
+Tayga can also sit next to any of them: it takes OTLP from the same Collector, and its trace view links out to Jaeger.
 
-Put the output in the config file, in quotes. With the compose stack that file is `deploy/tayga-api.toml`, which `deploy/compose.tayga.yaml` mounts read-only at `/etc/tayga/api.toml` and points `TAYGA_CONFIG` at; add the section there and restart tayga-api:
+## Enterprise
 
-```toml
-[auth]
-enabled = true
-username = "admin"
-password_hash = "$argon2id$v=19$..."
-```
+**Tayga Enterprise is available on request**, under a commercial license, priced per cluster or node rather than per GB. It adds:
 
-`deploy/tayga-api.toml` is tracked by git, so keep your edit out of commits. Avoid putting the hash in a compose `environment:` entry as written: compose interpolates `$` in its files, so `$argon2id$v=19$...` arrives mangled and the API refuses to start. If you do set `TAYGA__AUTH__PASSWORD_HASH` in a compose file, write every `$` in the hash as `$$`. A plain shell export (`TAYGA__AUTH__PASSWORD_HASH='$argon2id$...'`, single quotes) needs no escaping.
+- **Identity and access:** SSO / SAML, SCIM provisioning, fine-grained RBAC, audit logs.
+- **Multi-tenancy** and **multi-cluster federation**.
+- **High availability**, scale-out deployment and upgrade tooling.
+- **Privacy and compliance:** PII redaction policies and data-residency controls.
+- **Long-term baselines:** compare a release with the last 30 deploys.
+- **Integrations:** ServiceNow, Jira and advanced PagerDuty.
+- **LLM incident summaries** with bring-your-own model.
+- **Support** with an SLA, onboarding and training.
 
-How it works:
+Contact **[hello@softberries.dev](mailto:hello@softberries.dev)** or visit **[softberries.dev](https://softberries.dev)**. [Enterprise →](https://softberries.github.io/tayga/enterprise/)
 
-- Signing in (`POST /api/v1/auth/login` with a JSON body `{"username", "password"}`, content type `application/json`) returns 204 and an `HttpOnly`, `SameSite=Strict` cookie `tayga_session`, signed with HMAC-SHA256. The session is not sliding: it ends `session_ttl` after sign-in, whatever the activity. The cookie is a signed token and the API keeps no session state: signing out clears the browser's cookie but does not revoke a copy of it, and a restart without `session_key`, or a new `session_key`, signs everyone out.
-- Scripts can skip the cookie and send HTTP Basic credentials with each request, for example `curl -u admin:password http://localhost:8090/api/v1/story-groups`. Each Basic request costs one password check.
-- Password checks are limited to 5 attempts per client IP in 5 minutes (IPv6 clients are keyed by their /64 prefix). Every attempt counts, and it is counted before the password is checked, so more than 5 parallel checks from one client can briefly get 429; a successful check clears the client's count, so in practice the limit is reached by failures. After that, both the login page and Basic requests return 429 with `Retry-After`, even for the correct password. The two share one count per IP: a script sending wrong Basic credentials more than 5 times in 5 minutes also locks out browser sign-ins from that IP until the window passes. The limiter uses the connection's address and ignores `X-Forwarded-For`, so behind a reverse proxy all users share the proxy's one limit.
-- Signing out (`POST /api/v1/auth/logout`) clears the cookie. It needs no session, but it does need a JSON content type (`application/json`), so a cross-site form post cannot trigger it.
-- Open without a session: `GET /healthz`, `GET /metrics`, `GET /api/v1/config`, `GET /api/v1/auth/me`, `POST /api/v1/auth/login`, `POST /api/v1/auth/logout`, and the app's own files (`/`, `/assets/*` and every client route). Everything else under `/api/` returns 401 `{"error":"unauthorized"}`, including unknown `/api/` paths. `/metrics` stays open, so scrapers need no credentials. `HEAD` is treated as `GET` for these open routes.
-- `GET /api/v1/auth/me` answers from the session cookie only: it returns 401 for a Basic `Authorization` header without a cookie, even with the right credentials. Scripts using Basic can call the data routes directly and need not ask `auth/me`.
-- `GET /api/v1/config` carries `auth_enabled`; the app reads it, and when it is `true` it asks `GET /api/v1/auth/me` and shows the login page on a 401 (`/login?next=…`, where `next` is a path inside the app). A later 401 from any request (an expired session) sends the user to the login page once, and back after signing in. The header shows a user menu with "Sign out". When authentication is off, `/api/v1/auth/*` returns 404 and `/login` redirects to `/`; a 401 then (from an authenticating reverse proxy, say) only shows the page's error state, with no redirect.
-- HTTPS: tayga-api serves plain HTTP. For HTTPS, put a reverse proxy in front of it and set `secure_cookie = true`; the cookie is then only sent over HTTPS.
-- It is one account, with no roles and no per-user data.
+## Documentation
 
-## Load generator and the missing agent service
-
-The demo's load generator has a task, `ask_agent`, that posts to an `agent` service. That service is defined only in the demo's `compose.agent.yaml`, which Tayga's Makefile does not include, so every call failed and showed up as noise. `deploy/compose.tayga.yaml` therefore mounts `deploy/locust/tayga_locustfile.py` into the `load-generator` container and points `LOCUST_LOCUSTFILE` at it. That file imports the demo's locustfile unchanged (the vendored submodule is not edited) and removes the `ask_agent` task from `WebsiteUser`. Tayga itself keeps no ignore list.
-
-`deploy/compose.tayga.yaml` also raises the memory limits of demo services that ran at their caps during long sessions: `checkout` and `product-catalog` 20M to 64M, `ad` and `fraud-detection` 300M to 512M, `accounting` 160M to 320M, `kafka` 620M to 1G, `opensearch` 1G to 1.5G, the demo's `grafana` 175M to 256M, and `load-generator` to 2G. On 2026-10-05 `checkout` sat at 95% of 20M and `kafka` near 620M while `publish orders` took about 90 s and every checkout failed for six hours.
-
-## Log templates and alerts
-
-`tayga-logminer` reads the logs from `tayga.logs` (consumer group `tayga-logminer`; see [Logminer replicas](#logminer-replicas-plan-8)) and groups them into templates with the Drain algorithm, one tree per service. A body is first masked (UUIDs, hex runs of 8 or more characters and numbers become `<*>`), so `Found 3 products from database` and `Found 12 products from database` are one template, `Found <*> products from database`. A template keeps its id when it generalizes. Other numbers are masked, but an HTTP status code in an access-log position is kept (see [Detection correctness](#detection-correctness-plan-7a)), so a burst of 500s in Envoy logs can be its own template.
-
-Per log, one row in `log_template_hits` (3-day TTL); per template, one row in `log_templates` (30-day TTL); alerts in `log_alerts` (7-day TTL) and as JSON on the topic `tayga.alerts`. Counting uses `uniqExact(log_id)`, so replayed records are not counted twice. `tayga-notifier` delivers the alerts to webhook and Slack targets (see [Alert delivery](#alert-delivery-tayga-notifier)).
-
-Every 60 seconds the logminer runs two rules over `log_template_hits`, plus the opt-in silence rule (see [Silence alerts](#silence-alerts)):
-
-| Rule | Fires when | Default |
-|---|---|---|
-| New template | the template's first log falls since the previous detection tick, in log time; its service had a template at least `new_template_warmup_min` before that first log (so a fresh install or new service does not flood); the first log is at least `new_template_warmup_min` after the masking epoch start (see below); it is not a kept status code split out of a template that existed before the epoch (see below); and it is not `<overflow>`. One alert per template, ever | warmup 15 min |
-| Rate spike | the count in the last `spike_window_min` is at least `spike_min_count` and at least `spike_factor` times the mean per-window count over the preceding `baseline_window_min` (floored at 1), and the template has enough baseline coverage (see below). Templates older than `new_template_recent_min` (10 min) can spike; the mean counts only minutes with data | window 5 min, baseline 60 min, factor 5, min count 10 |
-
-"In log time" means the logminer keeps a data clock, the newest mined log `ts`, and checks templates first seen after the previous tick's data clock minus 60 s. A template that appeared while the logminer was down or behind is therefore still reported when it catches up. On a fresh install (no hits yet) the clock starts at the wall clock minus 10 minutes, so a replayed backlog does not report its history. Spike windows are wall-clock based: a spike during such a gap is not reported. `tayga_logminer_data_lag_seconds` (wall clock minus the replica's data clock, see [Consumer lag on the Pipeline page](#logminer-replicas-plan-8); charted on the app's Pipeline page, and on the Grafana Pipeline health dashboard with `make up-extras`) shows the lag, and the logminer logs a warning when it exceeds 10 minutes.
-
-A spike alert stays active while it was last confirmed within `alert_active_min` (10) of now; a tick that still fires updates it, otherwise a new alert starts. Each alert carries up to 5 example trace ids (newest first) that link to the error story when one exists, else to Jaeger. The other values are `TAYGA__LOGMINER__*` environment variables (keys in `LogminerSettings` in `crates/tayga-logminer/src/main.rs`). Other defaults: similarity threshold 0.5, at most 5,000 clusters per service (beyond that, unmatched logs go to the `<overflow>` template), flush at 5,000 logs or 1 s.
-
-The API decides whether an alert is "active" (the `active` field, the `alerting` flag and the story-page badges) with its own constant, `ALERT_ACTIVE_MIN = 10` in `crates/tayga-api/src/repo.rs`, not with the logminer setting. If you change `TAYGA__LOGMINER__ALERT_ACTIVE_MIN`, change that constant to match, or the UI and the logminer disagree on which alerts are active.
-
-Where to look:
-
-- `/logs/alerts`: alerts with kind badge, count against baseline and example traces.
-- `/logs/templates` and `/logs/templates/{id}`: templates by count, search, sparkline, sample and recent hits.
-- Story pages: the log table has a Template column, with a `new` or `spike` badge when the template was alerting at the story's time.
-- With `make up-extras`: Grafana "Tayga · Logs" dashboard (`tayga-logs`) and logminer panels in "Tayga · Pipeline health". The app's Pipeline page charts the logminer metrics too.
-
-Metrics added in plan 9: `tayga_logminer_commit_failures_total` counts offset commits Kafka refused (the records are read again, nothing is lost), and `tayga_logminer_alerts_republished_total` counts stored alerts published again (see "Alert publication" under [Logminer replicas](#logminer-replicas-plan-8)). The logminer, writer, assembler and notifier bind their metrics port at startup, and a taken port stops them (`bind metrics server on <addr>`); the logminer serves its metrics before it loads its templates. Counters now count accepted and committed work only: ingest's `tayga_ingest_service_routed_items_total` and `tayga_ingest_oversized_dropped_total` are counted after Kafka accepted the request, or when nothing was left to publish because every item was oversized (a collector retry after a 503 is counted once), and the writer's `tayga_writer_rows_inserted_total` after the offsets are committed (a refused commit counts `tayga_writer_commit_failures_total`; its rows are counted when they are read again).
-
-**Fingerprint cache (sub-project 4).** Before Drain, the logminer fingerprints every log body of a Kafka record in one batch: a 64-bit key and a 64-bit check, hashed from the body's masked token sequence in one pass over its bytes, without the masking regexes or any allocation. Each service tree keeps a cache from key to check and template. A hit (key and check equal) skips tokenising, masking and the tree walk: it only updates the template's count, first and last seen and highest severity, as Drain does. Results are identical to Drain alone. A masked token sequence that went to a template goes to it again as long as no template of that service has generalised since (spec §3.4 of `docs/superpowers/specs/2026-10-06-tayga-sp4-performance-design.md`), so a generalisation clears that service's cache. So does a restore, and a cache that reaches 10,000 entries. A key match with another check counts as a collision and takes the Drain path, as do bodies with a non-ASCII or NUL byte (they are never fingerprinted). A rebalance builds a new miner, so it starts with an empty cache. `tests/differential.rs` in `tayga-drain` feeds a corpus through both paths and requires the same template, `created` and `overflow` for every line and the same templates at the end.
-
-The backend is `logminer.fingerprinter` (`TAYGA__LOGMINER__FINGERPRINTER`):
-
-| Value | What it does |
+| Topic | Pages |
 |---|---|
-| `scalar` (default) | Fingerprints on the calling thread |
-| `parallel` | Rayon over the batch from 512 bodies; smaller batches run like `scalar` |
-| `gpu` | wgpu compute from 2,048 bodies, `scalar` below that and on any GPU error. Needs a build with the `gpu` feature: without it the logminer refuses to start (`logminer.fingerprinter = "gpu" needs a build with the gpu feature`); without a usable adapter it logs a warning and runs `scalar`. The Docker images are built without the feature |
-| `off` | No cache: every line through Drain, as before sub-project 4. The kill switch |
+| Getting started | [What is Tayga](https://softberries.github.io/tayga/getting-started/what-is-tayga/) · [Quickstart](https://softberries.github.io/tayga/getting-started/quickstart/) · [Demo with the OTel demo](https://softberries.github.io/tayga/getting-started/otel-demo/) |
+| Install | [Docker Compose](https://softberries.github.io/tayga/install/docker-compose/) · [Helm and Kubernetes](https://softberries.github.io/tayga/install/helm/) · [From source](https://softberries.github.io/tayga/install/from-source/) · [Connect your Collector](https://softberries.github.io/tayga/install/collector/) · [Upgrading](https://softberries.github.io/tayga/install/upgrading/) · [Uninstalling](https://softberries.github.io/tayga/install/uninstalling/) |
+| Concepts | [Architecture](https://softberries.github.io/tayga/concepts/architecture/) · [Error stories](https://softberries.github.io/tayga/concepts/error-stories/) · [Root cause and critical path](https://softberries.github.io/tayga/concepts/root-cause-critical-path/) · [Baselines](https://softberries.github.io/tayga/concepts/baselines/) · [Story groups](https://softberries.github.io/tayga/concepts/story-groups/) · [Service map](https://softberries.github.io/tayga/concepts/service-map/) · [Log templates](https://softberries.github.io/tayga/concepts/log-templates/) · [Log alerts](https://softberries.github.io/tayga/concepts/log-alerts/) · [Replicas](https://softberries.github.io/tayga/concepts/replicas/) · [The data clock](https://softberries.github.io/tayga/concepts/data-clock/) |
+| User guide | [Tour of the app](https://softberries.github.io/tayga/guide/tour/) · [Stories](https://softberries.github.io/tayga/guide/stories/) · [Story detail](https://softberries.github.io/tayga/guide/story-detail/) · [Traces](https://softberries.github.io/tayga/guide/traces/) · [Service map](https://softberries.github.io/tayga/guide/service-map/) · [Logs](https://softberries.github.io/tayga/guide/logs/) · [Alerts](https://softberries.github.io/tayga/guide/alerts/) · [Pipeline](https://softberries.github.io/tayga/guide/pipeline/) · [Command palette](https://softberries.github.io/tayga/guide/command-palette/) |
+| Alerting | [The notifier](https://softberries.github.io/tayga/alerting/notifier/) · [Webhook and Slack formats](https://softberries.github.io/tayga/alerting/formats/) · [Delivery semantics](https://softberries.github.io/tayga/alerting/delivery/) |
+| Operations | [Configuration](https://softberries.github.io/tayga/operations/configuration/) · [Authentication](https://softberries.github.io/tayga/operations/authentication/) · [Scaling the logminer](https://softberries.github.io/tayga/operations/scaling-logminer/) · [Retention and disk](https://softberries.github.io/tayga/operations/retention/) · [Re-mining templates](https://softberries.github.io/tayga/operations/remine/) · [Metrics and Grafana](https://softberries.github.io/tayga/operations/metrics-grafana/) · [Performance tuning](https://softberries.github.io/tayga/operations/performance-tuning/) · [Upgrades and migrations](https://softberries.github.io/tayga/operations/upgrades/) · [Troubleshooting](https://softberries.github.io/tayga/operations/troubleshooting/) |
+| Reference | [HTTP API](https://softberries.github.io/tayga/reference/api/) · [Performance](https://softberries.github.io/tayga/performance/) · [Comparison](https://softberries.github.io/tayga/comparison/) · [FAQ](https://softberries.github.io/tayga/faq/) · [Changelog](https://softberries.github.io/tayga/changelog/) · [Verified claims](https://softberries.github.io/tayga/verified/) |
 
-The default is `scalar` because the logminer's batch is one Kafka record, about 5 logs: at 5 bodies `parallel` and `gpu` both run on the calling thread and measure the same as `scalar` (2.44, 2.44 and 2.43 µs per batch). The fingerprinting runs inside the consume loop, so `parallel` and `gpu` block it while a batch is processed. `LOGMINER_FINGERPRINTER=off make up` switches the cache off without editing files (compose passes it on as `TAYGA__LOGMINER__FINGERPRINTER`); `make up` restores `scalar`. An unknown value stops the logminer at startup. The startup log line `tayga-logminer consuming` carries the backend in use (`"fingerprinter":"scalar"`). Numbers and the GPU result are in `docs/perf/sp4-performance.md`.
+## Contributing
 
-| Metric | Meaning |
-|---|---|
-| `tayga_logminer_fingerprint_cache_hits_total` | Lines assigned from the cache |
-| `tayga_logminer_fingerprint_cache_misses_total` | Lines through the Drain tree: misses, collisions and lines without a fingerprint |
-| `tayga_logminer_fingerprint_collisions_total` | Key equal, check different |
-| `tayga_logminer_fingerprint_cache_resets_total{reason}` | Service caches emptied: `generalised` or `full` (both exported at 0) |
-| `tayga_logminer_mine_batch_seconds` | Histogram of the time to mine one Kafka record that has logs (buckets 1 µs × 4ⁿ, n = 0 to 9) |
-| `tayga_logminer_fingerprinter{backend}` | 1 per replica for the backend in use, after any fallback (`off`, `scalar`, `parallel` or `gpu`). Gauges are summed across replicas by `GET /api/v1/pipeline/series` (the Pipeline page's source), so this one reads as the number of replicas on each backend; it is not charted |
+Issues and pull requests are welcome on [GitHub](https://github.com/softberries/tayga). Before a larger change, open an issue to discuss it.
 
-The app's Pipeline page charts them as "Logminer fingerprint cache" (hits/s and misses/s) and "Logminer batch time" (p50 and p99), so it has 12 charts.
+- Build and test with the commands in [From source](https://softberries.github.io/tayga/install/from-source/#developer-commands): `cargo test --workspace` for the unit tests, `make it` for the integration tests, and `make up` plus `make e2e` for the end-to-end scenarios against the OpenTelemetry demo.
+- CI runs `cargo fmt --check`, `cargo clippy -D warnings`, the tests, and the web app's lint, typecheck and unit tests on every pull request.
+- **Contributor License Agreement.** Because Tayga is offered under the AGPLv3 and under a commercial license, contributions may require you to sign a CLA. See [LICENSING.md](LICENSING.md).
 
-Limits: seasonal baselines are opt-in; a template that disappears raises an alert only when silence alerts are switched on for it; history is re-mined only by hand (see [Re-mining templates](#re-mining-templates-tayga-devtools-remine)). Open questions are in `docs/superpowers/followups.md`.
+## License
 
-### Logminer replicas (plan 8)
+The core is licensed under the [GNU Affero General Public License v3.0](LICENSE) (`AGPL-3.0-only`). Tayga Enterprise is available under a commercial license, which also removes the AGPL obligations; see [LICENSING.md](LICENSING.md) and the [License page](https://softberries.github.io/tayga/license/). This summary is not legal advice.
 
-**The `tayga.logs` topic.** Drain keeps one tree per service, so all of a service's logs must reach the same miner. `tayga.signals` is keyed by trace id, which spreads a service over every partition. Ingest therefore also publishes each log batch to `tayga.logs` (`kafka.logs_topic`, which must differ from `kafka.topic`), keyed by service name: one record per (request, service), split further only to stay inside the same byte budget. `ensure_topics` creates it with the same 12 partitions and `max.message.bytes` as `tayga.signals`. Writer and assembler still read logs from `tayga.signals`; only the logminer reads `tayga.logs`. Ingest counts both copies in `tayga_ingest_log_records_published_total{topic}`; `tayga_ingest_records_published_total{kind="logs"}` counts the `tayga.signals` copy only, so older charts are unchanged.
+## Verified claims
 
-**Cost.** Every log is written to Kafka twice, once per topic (spans are not duplicated). On the demo stack `tayga.logs` grew to 70.6 MB in its first 80 minutes, about 53 MB an hour, next to 25.4 GB in `tayga.signals` under the broker's default 7-day retention (plan 8 measurement).
+Every number and behaviour in this README was checked; the rule is that a claim that cannot be checked is left out. Live timings are single observations on the machine above, not guarantees. The full table, with every claim in the docs, is on [Verified claims](https://softberries.github.io/tayga/verified/).
 
-**Retention and disk.** Topics that Tayga creates from plan 9 on (`tayga.signals`, `tayga.logs`, `tayga.stories`, `tayga.alerts`) get `retention.ms` = 86400000 (24 h). Set `TAYGA__KAFKA__RETENTION_MS` to change it; `-1` means unlimited, and 0 or a value below -1 stops ingest, the assembler and the logminer at startup (the services that validate it; the writer, notifier and api do not). It applies only when a topic is created: Tayga never alters an existing topic, so a topic created earlier keeps its retention (7 days, the broker default, before plan 9). A writer or assembler outage longer than the retention loses the records they have not consumed yet; the same holds for the logminer on `tayga.logs` and the notifier on `tayga.alerts`.
-
-Why: on 2026-10-06 the Docker disk reached 99%, with Redpanda's volume at 28 GB, and the stack's Redpanda stopped at 13:54 UTC on a broker assertion (`vassert`, exit code 133); nothing was ingested until it was restarted. On this stack the existing topics were set to 24 h by hand on 2026-10-06 at 16:14 UTC (the owner's decision); Redpanda's volume went from 28.8 GB to 9.1 GB and the Docker disk from 92% to 70% (see Verified). To do the same on an older stack (it deletes every segment older than 24 h at once):
-
-```sh
-docker exec opentelemetry-demo-redpanda-1 rpk topic alter-config \
-  tayga.signals tayga.logs tayga.stories tayga.alerts --set retention.ms=86400000 --no-confirm
-docker exec opentelemetry-demo-redpanda-1 rpk topic describe -c tayga.signals | grep retention.ms
-```
-
-**Replicas.** `LOGMINER_REPLICAS=2 make up` (or `make up LOGMINER_REPLICAS=2`) sets `deploy.replicas` of the `tayga-logminer` compose service; the default is 1. The replicas share the consumer group `tayga-logminer`, so Kafka splits the 12 partitions between them (6 and 6 with two). A replica beyond 12 gets no partition and idles. Containers are named `opentelemetry-demo-tayga-logminer-<n>`; the service has no `container_name`, so address it as the compose service (see the commands below).
-
-**Ownership.** A replica owns the services it mined a log of within the last `ownership_window_min` (`TAYGA__LOGMINER__OWNERSHIP_WINDOW_MIN`, default 60). Since records are keyed by service, these are the services of its partitions. Every query that creates alerts (new-template candidates, spike windows, silence inputs) is filtered to the owned services, so outside a hand-over two replicas never judge the same service. A service that has not logged for 60 minutes drops out of the set until it logs again; with nothing owned a replica raises no alerts. An ongoing silence alert is therefore only kept active while its service still logs: once the whole service goes quiet for 60 minutes, or after a restart or hand-over, its `last_at` stops advancing and the UI shows it inactive.
-
-**Rebalance.** On a partition assignment change the replica, before it reads on:
-1. flushes pending hits and templates and commits their offsets;
-2. after a revoke, runs one new-template pass for the services it owned, bounded at 30 s, so a template mined just before the revoke is still announced;
-3. on an assignment, reloads every template from ClickHouse into a fresh miner and clears its owned services, per-partition clocks and restored spike state.
-
-Offsets are committed only for records whose hits and templates are stored. A commit sent after the revoke may be refused, or may land after the new owner's and move its offset back. Either way records can be read again, never lost. A re-read is harmless: hits are deduplicated by `log_id`, minute counts use `uniqExact(log_id)`, and template ids are hashes of service and template. Only `log_templates.count` can grow by the re-read logs.
-
-**Duplicate alerts.** Alert ids are deterministic: a hash of the kind and the template id, plus the start minute for a spike and the last hit for a silence. `log_alerts` is a `ReplacingMergeTree` by `alert_id`. If two replicas both fire the same alert during a hand-over, they store one row, and the notifier sends it once. A replica that takes over a service first restores that service's active spike alerts from `log_alerts`, so an ongoing spike keeps its id.
-
-**Watermark and heartbeat.** The new-template watermark is stored per partition, as `new_template_watermark_ns:p<N>` in `logminer_state`. On assignment a replica starts from the minimum over its partitions, so after scaling from 2 to 1 the survivor resumes from the slower of the two. A partition without a key (the first start after the upgrade, or a new partition) is seeded from the old global key `new_template_watermark_ns`, which only `remine` still writes. While nothing is owned and a backlog may remain, the watermark is held. Each replica writes its own heartbeat, `logminer_heartbeat_ns:<replica id>`, where the replica id is the container's hostname (its short container id). At startup each replica deletes the heartbeat keys older than one day (a lightweight `DELETE` on keys starting with `logminer_heartbeat_ns`, best effort: a failure is logged), which removes the keys of replicas gone for more than a day and, once a day old, the old global heartbeat key. Watermark and masking keys never match that prefix. Keys younger than a day stay; they are harmless, because `remine` only refuses on a fresh one.
-
-**Clean shutdown and the crash window.** On a clean stop the logminer flushes, bounded at 15 s (past it the records stay uncommitted and are read again, like after a crash; the bound does not cover the synchronous offset commit), and runs one new-template pass for its owned services, bounded at 20 s; `stop_grace_period` is 40 s. A crash, or a revoke or shutdown pass that fails or times out, skips that pass. A template first seen after the last detection pass is then announced only if its service logs again within about one detection tick (60 s): the partition watermark keeps advancing, and a template first seen more than 60 s before it is no longer a candidate. Its hits and template are stored either way; only the `new` alert can be missed.
-
-**Alert publication.** Each alert's publication to `tayga.alerts` is recorded in `log_alert_publications` (migration 0012, one row per `alert_id`, 7-day TTL). After every detection pass a replica republishes the alerts of its owned services that were stored in the last 24 hours and have no mark, oldest first (at most 1,000 per pass, stopping at the first failed send), marks the sent ones, and counts them in `tayga_logminer_alerts_republished_total`. The notifier delivers once per alert and target (`notifier_deliveries`), so a repeat publish is harmless; two replicas that briefly own one service may both republish. An alert left unpublished for more than 24 hours is not sent. Delivery is bounded further by the notifier's `max_age_secs` (default 1 h): a republished alert whose `last_at` is older than that is stored and counted in `tayga_logminer_alerts_republished_total`, but the notifier skips it as `stale`. In practice recovery reaches the targets only after an outage of about an hour. The republish window stays at 24 h because other consumers of `tayga.alerts` can still use those alerts; the logminer logs each republished alert older than 1 h at debug level. Marks are per `alert_id`: a spike update whose send fails after the spike was already marked is not republished, but the spike's next update sends it again. The migration marks every alert stored before it, so the upgrade republishes nothing.
-
-**Switching over (upgrade).** On the first start the logminer reads `tayga.logs` from the beginning, and the topic only holds logs from the upgraded ingest on. Logs that were still unmined on `tayga.signals` when the old logminer stopped are not mined. To avoid that gap, stop ingest until the old logminer has caught up, or accept it. On the 2026-10-06 upgrade the gap was 0 logs (see Verified).
-
-**Metrics with several replicas.** The recorder's target `http://tayga-logminer:9100/metrics` is a compose DNS name that returns every replica's address. On every tick the recorder resolves it (bounded at 2 s; preferring IPv4 addresses when there are any) and scrapes each address by IP, labelling its samples, `up` included, with `instance="<ip>:<port>"`. One address and a process that has never seen more records exactly as before, with no label. Labelling is sticky for the life of the `tayga-api` process: once it has seen several addresses, a single replica is still scraped by IP and labelled, so a scale-down does not switch its series back; a `tayga-api` restart (every `make up` recreates it) starts unlabelled again. On the Pipeline page counter rates and quantiles sum the replicas, the data lag, template count and `up` gauges take the largest replica, and other gauges are summed (see [Web app](#web-app)). Prometheus with `make up-extras` scrapes every replica through `dns_sd_configs`. Known edges at a scale change:
-- right after a scale-up, the unlabelled data-lag sample from before it still counts in the overview's data lag for up to 300 s (its freshness bound), so the overview can show the single replica's last lag that long;
-- an unlabelled series that also exists with an `instance` label in the window pairs only adjacent buckets, so one replica's counter is never subtracted from another's; a spell inside one 60 s bucket (or an API restart after a scale-down) can still put one spike into one bucket;
-- a summed gauge overshoots in the bucket of the first scale-up, where the unlabelled and the labelled series overlap.
-
-To read one replica, exec into it: `docker compose … exec --index 2 tayga-logminer bash -c 'exec 3<>/dev/tcp/127.0.0.1/9100; printf "GET /metrics HTTP/1.0\r\n\r\n" >&3; cat <&3'` (the image has no `curl`).
-
-**Consumer lag on the Pipeline page.** The lag row for `tayga-logminer` is read on `tayga.logs`. The group's old `tayga.signals` offsets still show in `rpk group describe tayga-logminer` until `rpk group offset-delete` removes them. `tayga_logminer_data_lag_seconds` and the "behind the logs" warning are per replica: with an assigned partition still behind, the wall clock minus that replica's detection clock (its slowest partition still behind); with every partition caught up, the later of its own clock and the store's newest hit, so a quiet, caught-up replica follows the store clock and does not show a growing lag; with nothing consumed yet, the store's newest hit. It never runs ahead of the wall clock. The overview's data lag (`GET /api/v1/overview`, the Stories page) takes each replica's newest sample from the last 300 s and shows the largest, so it is the slowest replica.
-
-**Commands.** With replicas, use the compose service, never a container name. `COMPOSE` stands for the Makefile's compose command (shown in [Re-mining templates](#re-mining-templates-tayga-devtools-remine)):
-- logs of every replica: `make logs SERVICE=tayga-logminer`, or `$COMPOSE logs tayga-logminer`;
-- one replica: `$COMPOSE logs --index 2 tayga-logminer`, `$COMPOSE exec --index 2 tayga-logminer …`;
-- stop, start or restart all replicas: `$COMPOSE stop tayga-logminer` (likewise `start`, `restart`);
-- partitions per replica: `docker exec opentelemetry-demo-redpanda-1 rpk group describe tayga-logminer`.
-
-To probe the new-template rule by hand (the stack's ingest listens on 14318):
-
-```sh
-cargo run -p tayga-devtools -- emit-log --service tayga-e2e-probe --body "hello probe marker"
-```
-
-The command prints the trace id it used. An alert fires only if the service already had a template 15 minutes before. The e2e `new_template_from_probe` logs under its own service, `tayga-e2e-probe`, never a demo service. Every run emits a constant seed log, `tayga e2e probe seed`, and then a probe `{word} probe … probe marker` with a random 12-letter word and 4 to 58 tokens. The first run on a stack waits up to 16 minutes for the seed template to age past the warmup. Drain routes on the token count, then on the first word, so the probes spread over about 55 nodes of 100 children: about 4,000 runs (simulated: the first node fills at 4,000–4,650 runs) fit in the 30-day template TTL before probes start merging and the test fails.
-
-## Detection correctness (plan 7a)
-
-**Settings** (`LogminerSettings`; env vars as for the other logminer keys):
-
-| Key (env var) | Meaning | Default |
+| Claim in this README | Evidence | Checked |
 |---|---|---|
-| `baseline_mode` (`TAYGA__LOGMINER__BASELINE_MODE`) | `flat` or `seasonal`. Any other value stops the logminer at startup | `flat` |
-| `keep_http_status` (`TAYGA__LOGMINER__KEEP_HTTP_STATUS`) | Keep HTTP status codes in access-log templates | `true` |
-
-**Spike baseline coverage (flat mode).** Per detection pass the logminer fetches the minutes of the baseline window that have at least one log row from any template (at most 61 minute buckets). A template counts only the covered minutes since its first log. The baseline per spike window is the baseline total divided by `max(effective minutes / spike_window_min, 1)`, floored at 1 as before. When the covered minutes are fewer than `baseline_window_min` (a mature template whose window had an outage gap, as well as a young one), the baseline is scaled proportionally instead: `baseline_total × spike_window_min / effective minutes`. A template whose covered minutes are under half of the minutes it could have been seen in gets no spike judgement; each such candidate is counted in `tayga_logminer_spike_skipped_total{reason="coverage"}`. A logminer or ingest outage therefore no longer shrinks the baseline into a spike storm.
-
-**Young templates.** A template older than 10 minutes and younger than 65 can spike. Its baseline uses only the minutes it has existed before the spike window (it needs at least `spike_window_min` of them); a shortened baseline is scaled proportionally.
-
-**Seasonal mode** (`baseline_mode = "seasonal"`, opt-in). A template that passes the flat rule must also reach `spike_factor` times the count of the same spike window 1 day earlier and 1 week earlier (each floored at 1). A comparator is used only if that past window has at least one row for any template; with neither available, seasonal behaves like flat. Counts come from `log_template_minutes` (migration 0007), a per-minute aggregate filled by a materialized view from `log_template_hits`, with `uniqExact` so replays do not double count and an 8-day TTL. Migration 0009 backfills it once from `log_template_hits` (3 days), so the 1-day comparator works right after the upgrade; the 1-week comparator needs a week of history. If the comparator lookup fails, the pass falls back to the flat rule and counts `tayga_logminer_seasonal_failures_total`. Alerts carry optional `baseline_day` and `baseline_week` (migration 0008); the API passes them through and the app does not show them yet.
-
-**HTTP status codes in templates.** A token of exactly 3 digits in 100 to 599, directly after an `HTTP/1.1`, `HTTP/1.0` or `HTTP/2` style token, stays literal (`"GET /api/cart HTTP/1.1" 503 UF` keeps `503`); other numbers are masked as before. Span fingerprints use a separate mask and are unchanged. A kept code matches only itself in Drain: a template's `<*>` does not match it, a merge never turns it into `<*>`, and a template and a line that differ at a kept code (or have a kept code on one side only) are not similar, so a `200` line and a `503` line never share a template. A routing token that is a kept code always gets its own branch, never the `<*>` overflow branch; these branches come on top of the 100-children limit (at most 500 more per node, one per code). The rule is positional only, so a non-access-log line with `HTTP/x NNN` (`upstream replied HTTP/1.1 503`) keeps its code too. Because masking turns every other digit run into `<*>`, a bare 3-digit token in 100 to 599 can only be a kept code; that is how a stored template string is recognised after a restart (no marker in the stored text). Existing templates with `<*>` in the status position stay as they are and keep matching other lines, but no longer absorb lines with a kept code: those start new templates.
-
-**Persisted state and the masking epoch.** The table `logminer_state` (migration 0006, a `ReplacingMergeTree`) holds `new_template_watermark_ns` (saved after each detection pass that stored its alerts; a restart resumes from it, clamped to the wall clock), `masking_version` (3 with `keep_http_status`, 1 without; 2 was a retired variant whose kept codes could still be generalised) and `masking_epoch_start_ns`. When the stored version differs from the running one, the logminer starts a new epoch at "now"; an install that has templates but no stored version counts as version 1, so the upgrade starts an epoch. During `new_template_warmup_min` (15) after the epoch start no new-template alert fires for templates first seen in that time. After the warmup, a rarer status/shape combination still starts a new template the first time it appears; it raises no alert when, with its kept codes read as `<*>`, it would have matched a template of the same service first seen before the epoch (same length and first two tokens, similarity at least the threshold with that template's `<*>` matching anything). Each such case is counted in `tayga_logminer_new_suppressed_total{reason="pre_epoch_match"}`. Templates without a kept code are judged as before. Spike detection is unaffected. A save failure is logged and counted in `tayga_logminer_state_save_failures_total`; it does not fail the pass. The new-template data clock is per partition: a partition that is behind (unconsumed records ahead and its newest record older than 60 s) holds the clock at its own newest time, so templates in a lagging partition are not missed. While the consumer has no partitions assigned (a rebalance or rejoin) or the assignment cannot be read, the clock holds at the stored watermark.
-
-**Slow-request baselines (assembler).** Each baseline refresh excludes traces longer than the endpoint's previous limit, `max(p99 x slow_trace_factor, p99 + slow_trace_margin_ms)` (1.5 and 100 ms by default), as well as traces that already have a slow story. An endpoint with no trusted previous baseline (startup, new endpoint, fewer than `min_baseline_traces` traces) is capped at 10 x its window p50. One slow outlier therefore does not stretch the baseline. An endpoint whose traces are nearly all slow-storied or capped (fewer than `min_baseline_traces`, 50, kept) keeps its previous baseline for at most 2 baseline windows (120 minutes with the default 60); after that the new level is adopted, so a slowdown longer than 2 baseline windows stops being flagged. Carry state is in memory only: an assembler restart during a slowdown re-learns through the 10 x p50 bootstrap.
-
-**Baseline queries read the newest version per trace with `argMax` (sub-project 4).** The baseline queries (`endpoint_stats` and `op_stats` in `crates/tayga-store/src/store.rs`) take each trace's newest version with `argMax(…, span_count) GROUP BY trace_id` over the rows of the window, instead of `trace_summaries FINAL`. `trace_summaries` is ordered by `trace_id`, so under `FINAL` the time filter pruned nothing and every run read the whole table. Two edges differ from `FINAL`:
-- on a `span_count` tie `argMax` takes any of the tied rows, where `FINAL` took the last inserted; tied rows are replays of the same trace, so they are equal;
-- the time filter now runs before the deduplication, so a trace whose newer version lies outside the window is counted by its version inside it (`FINAL` dropped it).
-
-The integration test `argmax_baselines_equal_final_over_duplicates` (`crates/tayga-store/tests/store_it.rs`) compares both with the old `FINAL` query over deliberate duplicates and pins the second edge.
-
-**New metrics.**
-
-| Metric | Service | Meaning |
-|---|---|---|
-| `tayga_assembler_baseline_excluded_traces` | assembler | Traces dropped by caps at the last successful refresh (gauge) |
-| `tayga_assembler_baseline_carried_endpoints` | assembler | Endpoints whose previous baseline was carried at the last successful refresh (gauge) |
-| `tayga_logminer_spike_skipped_total{reason="coverage"}` | logminer | Spike candidates not judged for low coverage |
-| `tayga_logminer_seasonal_failures_total` | logminer | Failed seasonal lookups (flat fallback used) |
-| `tayga_logminer_state_save_failures_total` | logminer | Failed saves to `logminer_state` |
-| `tayga_logminer_new_suppressed_total{reason="pre_epoch_match"}` | logminer | New-template candidates not alerted because a pre-epoch template would have matched them |
-
-Known gaps: seasonal mode has not been run against a live stack (it needs a day of history); the per-partition clock's Kafka position and committed-offset paths are tested with fakes, not a real broker; partitions lagging under 60 s count as caught up.
-
-## Silence alerts
-
-Silence alerts are opt-in per template. Tayga raises a `silence` alert when a template has had no log for N minutes while its service still sends other logs.
-
-**In the app.** The template page (`/logs/templates/{id}`) has a "Silence alert" card. It holds an "Alert when silent" switch and a minutes field, which defaults to 10, takes 1 to 1440, and is disabled while the switch is off.
-- Save sends the PUT below. A 401 follows the session-lost flow, and other errors show inline.
-- The templates table shows a bell on rows with silence on.
-- In `/logs/alerts` and the other alert lists, a silence alert has its own `silence` badge, the kind filter has a "Silence" option, and the count column reads "silent N min".
-- The `/logs/alerts` timeline draws a silence alert at its latest detection (`last_at`), not at the template's last hit, so a silence that began before the range but is still detected inside it is counted. New and spike alerts are drawn at their start.
-
-**API.** `PUT /api/v1/log-templates/{id}/silence` with `Content-Type: application/json`:
-
-```sh
-curl -X PUT localhost:8090/api/v1/log-templates/<template_id>/silence \
-  -H 'content-type: application/json' -d '{"enabled": true, "minutes": 10}'
-```
-
-- The answer is the stored setting.
-- Errors:
-  - 415 without the JSON content type;
-  - 400 on a bad body, an id that is not a decimal u64, or `minutes` outside 1 to 1440;
-  - 404 for an unknown template.
-- With authentication on, it needs a session or Basic credentials, like the other API routes.
-- Settings are stored in `log_template_silence` (migration 0010), where the newest row per template wins.
-- `GET /api/v1/log-templates/{id}` returns the setting as `silence`, and list rows carry `silence_enabled`.
-
-**The rule, in log time.** On every detection pass (60 s), for each template with silence on:
-- `t_last` is the template's newest hit inside the 3-day hits TTL. Past that TTL it falls back to the template's `last_seen`, and without one to its `first_seen`.
-- `s_last` is the newest hit of any template of the same service.
-- The template is silent when `s_last − t_last ≥ minutes`.
-
-Both values are log timestamps, not the wall clock. So a pipeline outage, where no logs arrive at all, does not make a template silent. A service with no hits in the last 3 days is not judged.
-
-**Partition-clock guard.** `s_last` counts only up to the logminer's per-partition data clock, the same clock the new-template rule uses. That clock holds back while an assigned partition is behind, so logs still waiting in a lagging partition cannot make a template look silent.
-
-**The alert:**
-- `started_at` is the template's last hit, so `last_at − started_at` is how long it has been quiet.
-- That quiet time ("silent N min" in the app, Slack and the webhook `summary`) mixes clocks: `last_at` is the logminer's wall clock, while `started_at` is a log timestamp. Pipeline lag or clock skew is counted in, so a logminer 10 minutes behind the logs reports a silence 10 minutes longer than it is in log time. Whether the template is silent at all is still judged in log time only.
-- `last_at` is refreshed on every pass while the template stays silent.
-- `alert_id` is a hash of the template id and that last hit, so one quiet period is one alert, also across a logminer restart.
-- `window_count` is 0 and there are no example traces. `baseline_per_window` is 0: the spec marks it informational, and no query computes it yet.
-- Silence alerts do not set a template's `alerting` flag, and they are not shown as badges on story logs.
-- `tayga_logminer_silence_alerts` is a gauge of the templates that are currently silent.
-
-**How a silence ends.** When the template gets a hit again, or silence is switched off for it, the alert is no longer refreshed. It turns inactive 10 minutes (`alert_active_min`) after its last `last_at`, like a spike. A later quiet period gets a new alert id.
-
-## Alert delivery (tayga-notifier)
-
-`tayga-notifier` consumes `tayga.alerts` as consumer group `tayga-notifier` and delivers `new`, `spike` and `silence` alerts to webhook and Slack targets. It always runs in compose. With no targets, which is the default, it logs `delivery disabled: no targets` once and keeps committing offsets.
-
-**Config.** The settings live in `deploy/tayga-notifier.toml`, which is mounted as `TAYGA_CONFIG`.
-- Scalar keys can be overridden with `TAYGA__NOTIFIER__*` environment variables.
-- `targets` is a list of tables, so it can only be set in a file.
-- Settings are read at startup, so run `docker restart tayga-notifier` after an edit.
-
-| Key | Meaning | Default |
-|---|---|---|
-| `targets` | `{name, kind, url}` per target. `kind` is `"webhook"` or `"slack"`. `name` is 1 to 64 of `[A-Za-z0-9._-]` and unique. `url` is http(s) | none |
-| `public_url` | Base of the links back into the app. Slack readers must be able to open it, so `localhost` only works on the machine running the stack | `http://localhost:8090` |
-| `kinds` | The alert kinds to deliver | `["new", "spike", "silence"]` |
-| `max_attempts` | Attempts per alert and target | 8 |
-| `timeout_secs` | Timeout per request, 1 to 15 | 10 |
-| `max_age_secs` | Alerts whose `last_at` is older are skipped and committed (`result="stale"`), so a first start with targets does not deliver the backlog retained on the topic | 3600 |
-| `breaker_cooldown_secs` | How long a target's circuit breaker stays open after it gave up on a retryable error (see Retries). Must be positive | 300 |
-
-```toml
-[[notifier.targets]]
-name = "ops-slack"
-kind = "slack"
-url = "https://hooks.slack.com/services/…"
-```
-
-**URL secrecy.** A webhook URL, and a Slack one in particular, is a credential.
-- The notifier never logs a URL, never uses it as a metric label, and never stores it.
-- Logs, metrics and `notifier_deliveries` name the target by its `name`.
-- Debug output prints `<redacted>`, and every `http(s)://…` in an error text is replaced with `<redacted>` before it is logged or stored.
-- `deploy/tayga-notifier.toml` is tracked by git, so do not commit a real URL. Either keep it as a local, uncommitted edit, or mount an untracked file through a compose override, the way `deploy/compose.notifier-e2e.yaml` does.
-
-**Webhook payload.** The notifier sends a `POST` with `Content-Type: application/json`. This is the body from the live `make e2e-notifier` run, with the template shortened:
-
-```json
-{"alert_id":"fe0492738da0b683","kind":"silence","service":"tayga-e2e-probe",
- "template_id":"2340958801421686365","template":"xzwoppcincbw probe … probe marker",
- "started_at":"2026-10-06T05:40:40.946Z","last_at":"2026-10-06T05:43:20.029Z",
- "count":0,"baseline":0.0,
- "summary":"xzwoppcincbw probe … probe marker has been silent for 2 min in tayga-e2e-probe",
- "example_trace_ids":[],
- "links":{"template":"http://localhost:8090/logs/templates/2340958801421686365","traces":[]}}
-```
-
-- `template_id` is a decimal string.
-- Times are RFC 3339 UTC with milliseconds. `last_at` is the alert's latest update.
-- `count` is the alert's `window_count` (0 for a silence), and `baseline` is its `baseline_per_window`.
-- `summary` is one unescaped line, the same text as Slack's fallback:
-  - `New log template in <service>: <template>`;
-  - `<template> spiked to <count> per window in <service> (baseline <b>)`;
-  - `<template> has been silent for <N> min in <service>`.
-- `example_trace_ids` holds every example trace id; `links.traces` links at most 3 of them.
-- Redirects are not followed.
-
-Each alert is delivered once, when the notifier first sees it. Later updates, such as a spike growing or a silence getting longer, are not sent.
-
-**Slack.**
-1. Create a Slack app with Incoming Webhooks turned on.
-2. Add a webhook for the channel.
-3. Put its URL in a `kind = "slack"` target.
-
-The message is built from `blocks`:
-- a header such as "Log spike in checkout", "Log silence in cart" or "New log template in ad";
-- the template in a code block;
-- fields for the count, the baseline and the start (for a silence, how long it has been silent and the last hit);
-- buttons to the template and up to 3 traces.
-
-Template text is escaped for Slack, so `<*>` is not read as a link. Tayga only posts; nothing is read back from Slack.
-
-**Retries:**
-- A 2xx is delivered.
-- 429, 5xx, a network error or a timeout is retried.
-- Any other status, including every other 4xx and a 3xx, fails at once. The status is recorded as `last_error`.
-- The wait after the n-th failed attempt is the larger of 1 s × 2^(n−1) and the response's `Retry-After` (delta-seconds or an HTTP date), capped at 300 s.
-- After `max_attempts` attempts the delivery is marked failed.
-
-Records are handled one at a time, and each waits for all its targets. With the defaults and no `Retry-After`, a target that keeps failing takes about 2 minutes of backoff (1 + 2 + … + 64 s) plus up to 8 request timeouts before it gives up. The consumer's `max.poll.interval.ms` is raised to 40 minutes, so even waits at the `Retry-After` cap do not trigger a rebalance.
-
-**Circuit breaker per target.** Paying that ladder on every alert would let the backlog grow past `max_age_secs` after roughly 17 to 28 alerts (3600 s at 127 to 207 s each); the live stack has seen over 100 alerts in an hour. From then on every record would be skipped as `stale` for every target, healthy ones included. A breaker per target prevents this:
-- When a target gives up on a retryable error (429, 5xx, a network error or a timeout), its breaker opens for `breaker_cooldown_secs` (300 s).
-- While it is open, each new alert gets exactly one attempt to that target, without backoff. A 2xx closes the breaker. A retryable failure marks that alert `failed` for the target, with its attempt recorded, and keeps the breaker open for another cooldown.
-- A permanent error (a 4xx) does not open or close it.
-- When the cooldown passes with no new alert, the breaker closes, and the next alert runs the full ladder again.
-- The state is kept in memory, so a restart starts every target closed.
-
-So, after its first ladder, a dead target costs each record one attempt: almost nothing for a fast 5xx, and at most `timeout_secs` (10 s) for a host that does not answer. Healthy targets keep pace and are not skipped as stale. The price is that alerts sent while a target's breaker is open are not retried to it: they are marked `failed` after one attempt and are not delivered there later. `max_age_secs` still applies per record, judged when the record is read, so a backlog that is old for another reason, such as a notifier that was down for over an hour, is skipped as before.
-
-**Dedup and offsets.** Delivery state is kept per `(alert_id, target)` in `notifier_deliveries`:
-- migration 0011, `ReplacingMergeTree(updated)`, 30-day TTL;
-- columns `status` (`pending`, `delivered` or `failed`), `attempts` and `last_error`.
-
-The logminer re-publishes an alert every time it updates it. Once the target has a `delivered` or `failed` row, a re-published or re-read alert sends nothing and is counted as `result="duplicate"`. A `pending` row keeps its attempt count across a restart. The Kafka offset is committed only once every target is delivered or failed.
-
-**Stopping.** A stop (SIGTERM) does not cancel an attempt that is in flight. The attempt finishes within `timeout_secs`, and its row is written: each write times out after 5 s and is retried for up to 10 s more. Compose gives the container `stop_grace_period: 40s` for this.
-
-**Accepted limits.** Receivers should deduplicate on `alert_id`, because an alert can be sent a second time in these cases:
-- The process is hard-killed (SIGKILL, OOM, or a stop that outlasts the grace period) between a 2xx and the row write. The alert is sent again once after the restart.
-- ClickHouse is down for the whole grace period, so the final row is lost. The offset is still committed, and the next re-publish of that alert is sent again.
-- A `notifier_deliveries` row expires after its 30-day TTL. A re-publish of the same alert id after that, for example a silence lasting more than 30 days, is delivered again.
-
-**Metrics** are served on `:9100` inside the network; the port is not published. The API's recorder scrapes them (`deploy/tayga-api.toml`).
-
-| Metric | Meaning |
-|---|---|
-| `tayga_notifier_deliveries_total{target,result}` | `result` is `delivered`, `failed`, `retry`, `duplicate` (a re-publish of an alert already resolved, not a send), `stale` (older than `max_age_secs`) or `breaker` (an attempt made while the target's breaker was open; its outcome is also counted as `delivered` or `failed`) |
-| `tayga_notifier_delivery_seconds` | Histogram of each HTTP attempt |
-| `tayga_notifier_pending` | Deliveries started and not yet resolved |
-| `tayga_notifier_breaker_open{target}` | 1 while the target's breaker is open, else 0. Updated when an alert is delivered to the target, so after an idle cooldown it can read 1 until the next alert |
-
-The Pipeline page shows `tayga-notifier` as a job, and its consumer lag on `tayga.alerts` next to the other groups. Each lag row names its topic, and bars are scaled per topic: the signal groups against their largest lag (at least 1,000 messages), the notifier against its own (at least 10 alerts), so a notifier stuck behind tens of alerts still shows a full bar next to a signal lag in the thousands.
-
-### Pointing the notifier at a mock
-
-`make e2e-notifier` checks delivery against a live stack without any outside service:
-1. It recreates `tayga-notifier` with `deploy/compose.notifier-e2e.yaml`. That override mounts `deploy/tayga-notifier.e2e.toml`, which has one webhook target, `e2e-mock`, at `http://host.docker.internal:18099/hook`.
-2. It runs the `silence_alert_and_delivery` scenario with `TAYGA_E2E_NOTIFIER=1`. The scenario starts the e2e crate's mock webhook on the host's `0.0.0.0:18099` and waits for its silence alert. It then checks that the mock got exactly one delivery for that `alert_id`, runs `docker restart tayga-notifier`, watches for 150 s while the logminer keeps re-publishing the alert, and checks that there is still exactly one.
-3. It always recreates the notifier with the default, target-less `deploy/tayga-notifier.toml` afterwards, whether the scenario passed or not.
-
-Docker Desktop resolves `host.docker.internal` by itself. The override also maps it to `host-gateway` for Linux engines, where it resolves to the bridge gateway (`172.17.0.1` on the default bridge). That is why the mock binds `0.0.0.0` and not `127.0.0.1`: in Docker Desktop's Linux VM, which has Linux engine semantics, a listener on `127.0.0.1` in the VM's host network namespace refused connections from a bridge container to the gateway, and the same listener on `0.0.0.0` answered `HTTP/1.0 200 OK` (checked 2026-10-06). On Docker Desktop for Mac a host listener on `127.0.0.1` was reachable through `host.docker.internal`, with or without the `host-gateway` mapping. `make e2e-notifier` itself has not been run on a Linux host. The mock listens on all interfaces only while the scenario runs.
-
-## Re-mining templates (`tayga-devtools remine`)
-
-Use it after changing masking or a Drain setting (`sim_threshold`, `max_clusters_per_service`, `keep_http_status`). Without it, the templates reflect the new configuration only for logs mined since the change.
-
-`remine` does the following:
-1. It truncates `log_templates`, `log_template_hits` and `log_template_minutes`.
-2. It reads `logs` from the last 3 days in `(ts, log_id)` order, 10,000 rows per page, and mines them with the logminer's own code and its current `[logminer]` settings, taken from the `TAYGA_CONFIG` file and the `TAYGA__LOGMINER__*` environment variables. The compose logminer is configured by environment variables only, so give the CLI the same ones.
-3. After each page it writes the hits and the changed templates; `log_template_minutes` is filled through its materialized view. Template rows of page n carry version `now + n` ns, so a template written on several pages keeps the row of its last page (final `count` and `last_seen`) without depending on how ClickHouse breaks an equal-version tie.
-4. It stores `new_template_watermark_ns` (the newest mined `ts`; also written to every existing per-partition key `new_template_watermark_ns:p<N>`), `masking_epoch_start_ns = now` and the current `masking_version` in `logminer_state`.
-
-The watermark means the restarted logminer does not report the rebuilt templates as new. The new masking epoch adds the 15-minute warmup: no `new` alert fires for templates first seen in the 15 minutes after the re-mine. Only `new` alerts are gated this way. Spikes are not: spike alerts are matched by template id, so a template that is spiking when the re-mine changes its id gets a new spike alert id, and the notifier may deliver it a second time. `log_alerts` and `log_template_silence` are kept. ClickHouse defaults to `http://localhost:18123`, database `tayga`; `--clickhouse` and `--database` override them.
-
-```sh
-# 1. Preview. Read-only, and allowed while the logminer runs.
-cargo run --release -q -p tayga-devtools -- remine --dry-run
-# 2. Stop the logminer, every replica. These are the Makefile's compose files, run from the repository root.
-TAYGA_ROOT=$PWD docker compose --project-directory vendor/opentelemetry-demo \
-  -f vendor/opentelemetry-demo/compose.yaml -f vendor/opentelemetry-demo/compose.full.yaml \
-  -f vendor/opentelemetry-demo/compose.observability.yaml \
-  -f deploy/compose.infra.yaml -f deploy/compose.tayga.yaml stop tayga-logminer
-# 3. Wait until the heartbeat is 3 minutes old, then re-mine.
-cargo run --release -q -p tayga-devtools -- remine
-# 4. Start the logminer: the same compose command with `start tayga-logminer`.
-```
-
-- **Duration.** Build with `--release`: on 8.6 million logs a debug-build dry run took 501 s, and a release-build real run took 211 s. The logminer is down for that time plus the 3-minute heartbeat wait.
-- **Dry run.** The dry run prints the same summary as a real run without writing anything:
-  - templates per service, before and after;
-  - template ids added, removed and unchanged;
-  - silence settings that would be orphaned.
-- **Heartbeat guard.** Each logminer replica writes `logminer_heartbeat_ns:<replica id>` to `logminer_state` on every detection pass. A real run reads every key starting with `logminer_heartbeat_ns` and refuses while the newest is under 3 minutes old, and the message says to stop the logminer first. This means you wait about 3 minutes after stopping it. `--force` skips the check; use it only when you know the logminer is down. `--dry-run` never checks.
-- **Not atomic.** The tables are truncated before mining. If a run fails partway, run it again before you start the logminer.
-- **3-day window.** Only the stored logs (3-day TTL) are mined. Templates whose logs are all older are dropped, even though `log_templates` itself keeps rows for 30 days.
-- **Id churn and orphans.** A template id hashes the service and the cluster's first-seen template. Ids are stable only for the same logs, order and configuration, so a rebuild after a config change can change many of them.
-  - Alerts keep their own template text, but their template links can point at ids that no longer exist.
-  - Silence settings on vanished ids are reported as orphaned and left in place. Switch silence on again for the new ids.
-- **Empty window.** With no logs in the last 3 days, the template tables end up empty and the watermark is left unchanged.
-
-## Deploy order
-
-Migrations must run before `tayga-api`, `tayga-logminer` or `tayga-notifier` restart on a new version:
-- migration 0010 adds `log_template_silence` and the `silence` alert kind, which the API reads and the logminer writes;
-- migration 0011 adds `notifier_deliveries`;
-- migration 0012 adds `log_alert_publications`, which the logminer reads and writes, and marks every existing alert as published.
-
-The upgrade that moves the logminer to `tayga.logs` (plan 8) does not mine logs still waiting on `tayga.signals`; see "Switching over" in [Logminer replicas](#logminer-replicas-plan-8).
-
-`make up` takes care of this. It rebuilds the image and recreates the stack, and every Tayga service except ingest waits for the one-shot `tayga-migrate` service (`tayga-writer migrate`) to finish successfully (`depends_on: condition: service_completed_successfully`). If you restart one service by hand after an upgrade, run the migration first.
-
-Reload browser tabs opened before the upgrade. Their old bundle validates alert kinds against a strict enum that does not know `silence`, so its alert views show an error until the page is reloaded. The same holds for the Pipeline page's consumer lag, whose rows now carry a `topic` field that the old strict schema rejects.
-
-## Developer commands
-
-| Command | What it does |
-|---|---|
-| `cargo test --workspace` | Unit tests (integration and e2e tests are `#[ignore]`d) |
-| `LOGMINER_REPLICAS=<n> make up` | Starts or rescales the stack with `n` logminer replicas (default 1); see [Logminer replicas](#logminer-replicas-plan-8) |
-| `make up-extras` | Also starts Grafana and Prometheus (compose profile `extras`) and enables the app's Grafana link |
-| `make ui-dev` | Starts the Vite dev server for the web app (Node 24 or newer; proxies to the API on 8090) |
-| `make ui-e2e` | Runs the Playwright suite (`npm --prefix ui run e2e`) against the running app; needs `make up` first, and waits up to 5 minutes for the stack's data before the tests start |
-| `npm --prefix ui test` | UI unit and component tests (vitest) |
-| `cargo bench -p tayga-drain --bench mining` | Criterion benches over the 50,000-line log corpus `fixtures/log_corpus.jsonl.gz`: Drain stages (`stages`), the fingerprint backends at 5 to 50,000 bodies (`fingerprint`), and the cache against `Drain::add` (`cached`). Add `--features gpu` for the GPU rows. Results and method in `docs/perf/sp4-performance.md` |
-| `cargo bench -p tayga-ingest --bench convert`, `cargo bench -p tayga-store --bench flatten`, `cargo bench -p tayga-assembler --bench close` | The pipeline benches over `fixtures/healthy.pb.gz`: ingest's OTLP-to-Kafka conversion, the writer's and logminer's row building, and the assembler's window, close and pipeline |
-| `TAYGA_CORPUS=<file> cargo test -p tayga-drain --release --test differential --test fingerprint` | The cache-versus-Drain differential and the fingerprint oracle on another JSON-lines corpus (plain or `.gz`; fields `service`, `ts_ns`, `sev`, `body`, in time order), for example a fresh export from the stack (the export command is in `docs/perf/sp4-performance.md`) |
-| `cargo test -p tayga-drain -p tayga-logminer --features gpu` | Also builds and tests the wgpu backend. Run only on the Mac (Metal); wgpu also compiles its Vulkan, DX12 and GL backends, but no other platform was tested. Without an adapter the GPU tests print a skip and pass; `TAYGA_REQUIRE_GPU=1` makes them fail instead. The feature is never in the Docker images |
-| `make it` | Starts Redpanda + ClickHouse standalone (compose project `tayga-it`) and runs the ignored integration tests (all crates except `tayga-e2e`; the ClickHouse tests each seed a uniquely named database). Run it with the full stack down: both use the same host ports 19092 and 18123 |
-| `make infra-down` | Stops the standalone infra and removes its volumes |
-| `make e2e` | Resets flags, then runs the end-to-end tests against the live stack (`make up` first). Ten tests: the seven from before (flag-driven story scenarios for payment, payment unreachable, shipping, product catalog and ad, the service map, and raw span counts versus Jaeger) plus `log_spike_on_payment_failure`, `new_template_from_probe` and `silence_alert_and_delivery` (without its notifier part). The spike scenario fails up front if a payment spike alert is still active from an earlier run (wait about 10 minutes). The first run on a fresh stack waits up to 16 more minutes for the probe service warmup. The tests run one at a time: they share the demo's flag file, and a scenario that tries to take the flags while another holds them fails at once (`another e2e scenario holds the demo flags: run the e2e tests one at a time ...`). The shipping scenario places its own international orders through the demo shop (`http://localhost:8080`, one every 20 s, each a trace whose root span is `load-generator user_checkout_single`) and waits up to 300 s for one of those traces to become a slow story blaming shipping; before it flips the flag it checks that `user_checkout_single` can flag a 5 s trace (at least 50 clean traces and a low enough p99 in the last 60 minutes), and fails at once otherwise. The ad scenario waits up to 300 s for 3 new stories summed over the `GetAds failed` groups (one group per calling endpoint); the other story scenarios wait 180 s |
-| `make e2e-notifier` | Runs `silence_alert_and_delivery` with the notifier check: points `tayga-notifier` at a mock webhook on the host, then puts the target-less config back (see [Pointing the notifier at a mock](#pointing-the-notifier-at-a-mock)) |
-| `make verify-raw` | Compares per-trace span counts in ClickHouse with the demo's Jaeger |
-| `make capture NAME=<n> ARGS="<args>"` | Captures a fixture to `fixtures/<n>.pb.gz` (see `cargo run -p tayga-devtools -- capture --help`) |
-
-## Ports
-
-Tayga's own published ports (8090, 3001, 19090, 19092, 18123, 14318) are bound to 127.0.0.1. 3001 and 19090 are published only after `make up-extras`. The upstream OpenTelemetry demo is not: it publishes 8080 (frontend proxy), 9090 (the demo's Prometheus), 10000 (Envoy admin) and 26 other container ports (on ephemeral host ports, counted on demo 3.1.0) on all interfaces, so they are reachable from your network. Run the stack only on a trusted network, or firewall those ports.
-
-| Port | Service | Defined in |
-|---|---|---|
-| 8080 | OTel demo frontend proxy (shop, Jaeger UI under `/jaeger/ui`) | demo compose (not published by Tayga's compose files) |
-| 8090 | tayga-api: web app, JSON API, `/healthz`, `/metrics` | `deploy/compose.tayga.yaml` |
-| 3001 | Grafana (container port 3000), `extras` profile only | `deploy/compose.tayga.yaml` |
-| 19090 | Prometheus (container port 9090), `extras` profile only | `deploy/compose.tayga.yaml` |
-| 19092 | Redpanda Kafka API (external listener) | `deploy/compose.infra.yaml` |
-| 18123 | ClickHouse HTTP (container port 8123) | `deploy/compose.infra.yaml` |
-| 14318 | tayga-ingest OTLP/HTTP (container port 4318), used by `tayga-devtools emit-log` | `deploy/compose.tayga.yaml` |
-
-## HTTP routes (tayga-api, port 8090)
-
-`since` takes `<n>[smhd]`, from `1s` to `7d` on the API routes; the app's time range offers 15m, 1h, 24h and 7d, plus a custom range. Every route that takes `since` also takes an optional `until`: RFC 3339 (`2026-10-04T12:00:00Z`, any offset) or unix seconds, default now. The window is then `[until - since, until)`; without `until` it ends now, and the row lists (trace search, log alerts, a template's recent hits) also show rows stamped up to 60 s past now, so a producer clock running slightly ahead hides nothing. Counts, rates and bucketed series stop at the window's end, so a total always equals the sum of its buckets. `until` may be at most 60 s in the future, and the window must start within the last 7 days, the longest TTL of the tables these routes read (`error_stories`, `service_edges`, `log_alerts` and `metric_samples`; `spans`, `logs` and `log_template_hits` keep 3 days and `trace_summaries` 2 days, so older windows there are simply empty). Bucketed series use buckets on the epoch grid (multiples of `bucket_secs`), so a moving live window keeps its bucket edges; the first and last bucket may be partial. Alert `active` flags, template `alerting` and the overview's active alerts and data lag are as of the window's end. `pipeline/lag` is live only and ignores `until`. Invalid values return 400. Fingerprints are decimal u64 strings; story and trace ids are 32 hex characters.
-
-JSON API:
-
-| Route | Query | Returns |
-|---|---|---|
-| `GET /api/v1/story-groups` | `since` (default `1h`), `until`, `kind` (`error` or `slow`), `service` | Top 100 story groups, each with `buckets` (`[bucket_start_unix_s, stories]`, about 120 per window) and `bucket_secs` |
-| `GET /api/v1/story-groups/{fingerprint}` | `since` (default `24h`), `until` | One group with example stories; 404 if absent |
-| `GET /api/v1/stories/{story_id}` | none | Full story; 404 if absent |
-| `GET /api/v1/traces/{trace_id}` | none | Spans and logs from the raw tables; 404 if neither exists |
-| `GET /api/v1/service-map` | `since` (default `1h`), `until` | `{edges, nodes}`: `edges` are service-to-service calls (`parent`, `child`, `calls`, `errors`, `error_rate`, `avg_duration_ns`); `nodes` are per-service RED summaries (`service`, `calls`, `rate`, `error_ratio`, `p99_ns`, `baseline_p99_ns`, `health`: `ok`, `slow` or `error`). Before plan 5 the body was a plain array of edges. `baseline_p99_ns` is the service's p99 over the 24 h before the earlier of the window end and now, floored to the minute, so it ends up to 59 s before the window. It is its own query, computed once a minute: the API keeps one entry behind a single-flight cell, so concurrent requests whose window end falls in the same minute share one query and its result, which is up to 60 s stale. A request for a past window computes its own and does not replace a newer cached one (sub-project 4) |
-| `GET /api/v1/log-alerts` | `since` (default `24h`), `until`, `kind` (`new`, `spike` or `silence`), `service` | Up to 200 alerts that overlap the window (seen after its start, started by its end), newest `last_at` first; each has `active` and `example_traces` (`[{trace_id, story_id \| null}]`) |
-| `GET /api/v1/log-templates` | `since` (default `1h`), `until`, `service`, `q` (substring, at most 200 chars) | Top 200 templates with hits in the window, by count; each has `alerting` (spike and new alerts only) and `silence_enabled`, plus `bucket_secs` (the window / 120, rounded up to whole minutes) and `buckets` (`[bucket_start_unix_s, hits]`, oldest first; buckets without hits are left out) |
-| `GET /api/v1/log-templates/{id}` | `since` (default `24h`), `until` | One template with `buckets`, the 20 most recent hits up to the window's end, its alerts of the 7 days before that end, and `silence` (`{enabled, minutes}`, or null when never set) |
-| `PUT /api/v1/log-templates/{id}/silence` | JSON body `{enabled, minutes}` (`minutes` 1 to 1440) | The stored setting. 415 without a JSON content type, 400 on a bad body or id, 404 when the template does not exist. The only route that changes stored data |
-| `GET /api/v1/traces/{trace_id}/log-templates` | none | `[{log_id, template_id, template, alert}]` for the trace's logs |
-| `GET /api/v1/overview` | `since`, `until` | KPI values and bucket series for the Stories page |
-| `GET /api/v1/stories/series` | `since`, `until`, `kind`, `service` | Stories per bucket, for charts |
-| `GET /api/v1/traces/search` | `since`, `until`, `service`, `touched` (0 or 1), `endpoint`, `min_ms`, `max_ms`, `errors` (0 or 1), `limit` (1 to 500, default 100) | Trace rows for the explorer, newest first, each with `story_id` and `story_kind` when a story exists |
-| `GET /api/v1/services` | none | Service names |
-| `GET /api/v1/services/{name}` | `since`, `until` | RED series (rate, error ratio, p50/p95/p99) for one service |
-| `GET /api/v1/search` | `q` | Command palette: matching services, templates and story groups; a trace id when `q` is 32 hex characters |
-| `GET /api/v1/pipeline/series` | `metric`, `kind` (required), `job`, `labels` (`k=v`), `since`, `until` | A rate, gauge or quantile series from the recorded metrics |
-| `GET /api/v1/pipeline/lag` | none | Consumer lag per group (`group`, `topic`, `committed`, `end` offset, `lag`) |
-| `GET /api/v1/config` | none | `{jaeger_url, grafana_url, auth_enabled, infra_services}` (the two links are null when unset; `infra_services` is the `[map]` list, default `["flagd"]`) |
-| `POST /api/v1/auth/login` | JSON body `{username, password}` | 204 and the session cookie; 401 on a wrong login, 429 when limited, 415 without a JSON content type. Only exists when authentication is on (404 otherwise) |
-| `POST /api/v1/auth/logout` | JSON content type | 204 and a cookie that clears the session. Only when authentication is on |
-| `GET /api/v1/auth/me` | none | `{username}` with a valid session, else 401. Only when authentication is on |
-| `GET /healthz` | none | `ok` |
-| `GET /metrics` | none | Prometheus metrics |
-
-With authentication on, every `/api/*` route in this table except `config` and the three `auth` routes needs a session cookie or Basic credentials (see [Authentication](#authentication)). Errors on these routes are JSON `{"error": "..."}`. A ClickHouse failure returns 503 `{"error":"storage unavailable"}`. ClickHouse reads stop after `query_timeout_secs` (`TAYGA__QUERY_TIMEOUT_SECS`, default 15; ClickHouse's `max_execution_time` on every read); a read stopped that way (ClickHouse code 159), and an `/api/` request still running 5 s after that limit (a ClickHouse that accepts the connection and never answers), are answered 504 `{"error":"storage timeout"}`. `0` turns both off. The app's files, `/healthz` and `/metrics` are not bounded. Unknown `/api/...` paths answer 404 `{"error":"not found"}`. `GET /api/v1/traces/{trace_id}` also carries the extra fields the app uses (span attributes, resource, events, self time). `GET /api/v1/service-map` changed shape: it returns an object, not an array, so a client that read the old array must read `edges`.
-
-App routes (client-side; every path below serves `index.html`, and the app renders the page):
-
-| Route | Query | Page |
-|---|---|---|
-| `/` | `since`, `until`, `kind`, `service`, `group` | Stories |
-| `/stories/{story_id}` | `since`, `until` | Story |
-| `/traces`, `/traces/{trace_id}` | `since`, `until`, filters | Trace explorer, trace |
-| `/map` | `since`, `until`, `service` (open drawer), `q` (search), `infra=true` (show infrastructure services) | Service map |
-| `/login` | `next` (path to return to) | Login, only when authentication is on |
-| `/logs/alerts`, `/logs/templates`, `/logs/templates/{id}` | `since`, `until`, filters | Logs |
-| `/pipeline` | `since`, `until` | Pipeline health |
-
-Old server-rendered URLs (`/service-map`, `/alerts`, `/templates`, `/groups/…`) are not redirected; they show the app's not-found page.
-
-Static files: `/assets/*` is served with `Cache-Control: public, max-age=31536000, immutable`; `index.html` with `no-cache`. A GET to a path the app does not know serves `index.html` with status 200 (the app shows its own not-found page). A missing `/api/*` route or `/assets/*` file returns a JSON 404.
-
-## Verified
-
-Rows above the `Plan 4` row were checked 2026-10-03 on branch `feat/plan-3-api-ui-e2e`; rows from the `Plan 4` row on were checked 2026-10-04 on branch `feat/plan-4-log-templates`; rows from the `Plan 5` row on were checked 2026-10-05 on branch `feat/plan-5-ui`; rows from the `Plan 6` row on were checked 2026-10-05 on branch `feat/plan-6-owner-decisions`. The plan 7a, 7b and 8 rows carry their own dates; the plan 8 rows were checked 2026-10-06 (UTC times) on branch `feat/plan-8-logminer-scale`. The plan 9 rows were checked 2026-10-06 (UTC times) on branch `feat/plan-9-hardening`. The sub-project 4 rows were checked 2026-10-07 (UTC times) on branch `feat/sp4-performance`. The stack was running for all of them. Rows about the removed server-rendered pages are kept as history and marked **superseded**.
-
-| Claim | How verified | Result |
-|---|---|---|
-| Port 8090 = tayga-api | `ports` in `deploy/compose.tayga.yaml`; default `http_addr` in `crates/tayga-api/src/main.rs`; live `curl localhost:8090/healthz` returned `ok` | verified |
-| Port 3001 = Grafana | `ports` in `deploy/compose.tayga.yaml`; live `curl localhost:3001/login` returned HTTP 200 | verified |
-| Port 19090 = Prometheus | `ports` in `deploy/compose.tayga.yaml`; live `curl localhost:19090/-/ready` returned "Prometheus Server is Ready." | verified |
-| Port 18123 = ClickHouse HTTP | `ports` in `deploy/compose.infra.yaml`; live `curl localhost:18123/ping` returned `Ok.` | verified |
-| Port 19092 = Redpanda Kafka API | `ports` in `deploy/compose.infra.yaml`; `docker ps` shows `127.0.0.1:19092->19092/tcp` | verified (port mapping only; no Kafka client connection made) |
-| Tayga's ports bind 127.0.0.1; the demo publishes 8080, 9090, 10000 and ephemeral service ports on all interfaces | `lsof -nP -iTCP -sTCP:LISTEN` showed `127.0.0.1:8090`, `:3001`, `:19090`, `:19092`, `:18123` and `*:8080`, `*:9090`, `*:10000`, `*:574xx`, `*:627xx`, `*:648xx`; `docker ps` mapped the `*` listeners to containers of compose project `opentelemetry-demo` (frontend-proxy, prometheus, otel-collector, flagd and the demo services) | verified live 2026-10-03 |
-| Port 8080 = demo frontend proxy | `docker ps` shows `frontend-proxy` on 8080; `curl localhost:8080/` returned HTTP 200; the compose definition is in the submodule, not read | verified live, definition not read |
-| Jaeger UI at `/jaeger/ui` on 8080 | default `jaeger_url` in `crates/tayga-api/src/main.rs` and `TAYGA__JAEGER_URL` in compose | verified in config only, URL not fetched |
-| Grafana anonymous Viewer, admin password `admin` | `GF_AUTH_ANONYMOUS_*`, `GF_SECURITY_ADMIN_PASSWORD` in `deploy/compose.tayga.yaml` | verified in config; login not tried; since plan 5 Grafana runs only after `make up-extras`; plan 9 read the dashboards through Grafana's HTTP API without credentials |
-| API and UI routes and their query parameters | `crates/tayga-api/src/routes.rs`, `ui.rs`, `params.rs` | verified in code; **superseded** for the HTML routes (`ui.rs` is removed, see the Plan 5 rows) |
-| `since` range 1s-7d, defaults 1h / 24h / 1h | `parse_since`, `group_filter`, `group`, `service_map` | verified in code; live `since=8d` returned 400, `since=1h&kind=error` returned 200 |
-| `kind` accepts only `error` or `slow` | `group_filter` in `params.rs` | verified in code |
-| `/metrics` on tayga-api | `tayga_common::metrics::router` merged in `main.rs`; live `curl localhost:8090/metrics` returned Prometheus text | verified |
-| Unknown route returns plain 404 | live `curl localhost:8090/nope` returned 404 (body not inspected); no fallback in the routers | verified status; "plain" inferred from code; **superseded**: unknown paths now serve the app (see the Plan 5 rows) |
-| `/` UI returns 200 | live `curl localhost:8090/` | verified (still 200, now the web app) |
-| `make up/down/ps/logs/flag/flags-reset/it/e2e/verify-raw/capture/infra-down` | `Makefile` | verified in Makefile; only `up`-state commands were observed, `make it`, `make e2e`, `make down`, `make infra-up` and flag changes were not run |
-| `make it` conflicts with the full stack | both compose files publish 19092 and 18123 on the host (`compose.infra.yaml`) | inferred from port definitions, not run |
-| Demo pinned to 3.1.0 | `.gitmodules`, `git submodule status` shows `(3.1.0)`; `DEMO_VERSION` in Makefile | verified |
-| Architecture diagram | copied from spec section 3; services in `deploy/compose.tayga.yaml`; topic `tayga.signals` seen in the code and spec | topology matches compose services; topic names not checked against running Redpanda |
-| Crate list | `crates/*/Cargo.toml` | verified |
-| **Plan 8 (logminer replicas)** | | |
-| `tayga.logs` exists with 12 partitions and the same `max.message.bytes` as `tayga.signals` | `rpk topic describe tayga.logs -p` lists partitions 0 to 11; `rpk topic describe -c`: `max.message.bytes` 1048576 on both, retention.ms 604800000 (default) on both | verified live; **superseded** for retention: both are 24 h since 2026-10-06 16:14 UTC (see the plan 9 rows) |
-| Ingest publishes logs to both topics | ingest start log: `"topic":"tayga.signals","logs_topic":"tayga.logs"`; ingest `/metrics`: `tayga_ingest_log_records_published_total{topic="tayga.signals"} 49480`, `{topic="tayga.logs"} 10484`, and `records_published_total{kind="logs"} 49480` (the signals copy only) | verified live |
-| `tayga.logs` is keyed by service: each service is in exactly one partition | `rpk topic consume tayga.logs -o :end -f '%p %k\n' \| sort \| uniq -c` at about 09:20: 17 services over 9 partitions (0 shipping; 3 currency, fraud-detection; 4 quote; 5 accounting, frontend-proxy; 6 checkout, product-catalog, recommendation; 7 cart, load-generator; 8 ad, email, frontend, otelcol-contrib; 9 payment; 11 kafka), none in two; partitions 1, 2 and 10 empty | verified live (one snapshot) |
-| Switch-over gap on this upgrade | `uniqExact(log_id)` from `logs` and from `log_template_hits` for 08:30 to 09:00 (the upgrade was 08:56): 69,315 and 69,315 | verified live: 0 logs unmined this time; the gap depends on the old logminer's lag at the stop |
-| One replica: consumes all 12 partitions and keeps mining | `make up` at 08:55; `rpk group describe tayga-logminer` at 09:00: 1 member, all 12 `tayga.logs` partitions, lag 0 to 4; `log_templates FINAL`: `max(last_seen)` 09:00:23 at 09:00:23, 69 templates seen in the last 2 min; again 09:11:36 at 09:11:37 | verified live |
-| Per-partition watermark keys and a per-replica heartbeat; the first assignment is seeded from the global key | `logminer_state FINAL` at 09:00: `new_template_watermark_ns:p0` to `:p11` (all 08:59:25.26), `logminer_heartbeat_ns:b38d0e45749b` (08:59:28); first assignment logged `watermark 1791276937068679792`, the value of the old global key `new_template_watermark_ns` | verified live |
-| Two replicas split the partitions 6 and 6 | `LOGMINER_REPLICAS=2 make up` at 09:11; `rpk group describe` at about 09:13: 2 members, partitions 0 to 5 on one, 6 to 11 on the other; logs: replica `01f7f4be63ab` `Assign([0..11])`, `Revoke`, `Assign([0, 1, 2, 3, 4, 5])`, replica `3a32f1355256` `Assign([6..11])` | verified live |
-| The two replicas mine disjoint services | shutdown log of each replica at 09:50:08: `final new-template pass` with `services: 11` (partitions 6 to 11) and `services: 7` (partitions 0 to 5, including `tayga-e2e-probe`); the partition map above has no service in both halves; alerts logged 09:32 to 09:44: replica `3a32…` only `frontend`, `payment`; replica `01f7…` only `frontend-proxy`, `tayga-e2e-probe` | verified live |
-| Both heartbeats are fresh with two replicas | `logminer_state FINAL` at 09:51:27: `logminer_heartbeat_ns:01f7f4be63ab` 09:51:12, `:3a32f1355256` 09:51:13 | verified live |
-| Log e2e scenarios pass with two replicas, one alert each, no duplicate | `cargo test -p tayga-e2e --test scenarios -- --ignored --test-threads=1 --exact new_template_from_probe log_spike_on_payment_failure silence_alert_and_delivery` (after `make flags-reset`): 3 passed in 526.2 s (spike alert after 291 s, new after 60 s, silence 170 s after enabling). `log_alerts FINAL` from 09:32: one `spike` for the payment template (`e1e262d539fee41e`), one `new` for the probe (`cdc3405223acf55e`), one `silence` (`a769fdfe56f6c48a`). No `alert_id` with more than one row after `FINAL`, no (template, kind) with two alert ids, and every alert id appears in one replica's log only | verified live (one run) |
-| Full `make e2e` with one replica after the scale back | `make e2e` 10:14:39 to 10:30:36, then `make flags-reset`: 10 passed, 0 failed, 948.4 s. Story scenarios: adFailure 50 s, paymentFailure 70 s, paymentUnreachable 100 s, productCatalogFailure 35 s, intlShippingSlowdown 155 s (the shipping pre-check did not stop early); log scenarios: spike after 296 s, new after 60 s, silence 175 s after enabling. `log_alerts FINAL` from 10:14:39: one `spike` for payment, one `new` for the probe (`dd7a44ca613f5a96`), one `silence` (`11be0fb369458544`); no (template, kind) with two alert ids | verified live (one run) |
-| `docker compose … stop tayga-logminer` stops every replica, and `start` starts them | at 09:50:08 both containers `Exited (0)` within 1 s, each logged `final new-template pass` (`when: shutdown`) and `tayga-logminer stopped`; `start` brought both back | verified live |
-| Scale back to 1: the remaining replica takes all 12 partitions, from the minimum watermark | without a rebuild: `LOGMINER_REPLICAS=1 docker compose … up -d --no-deps tayga-logminer` at 10:13:59 removed replica 2 and kept replica 1 (`Up 21 minutes`, same member id); it logged `final new-template pass` (`when: revoke`, 11 services) and `Assign([0..11])` with watermark 1791281607904267760 (10:13:27.90), the minimum of the stored keys (`:p6`–`:p11` 10:13:27.90, `:p0`–`:p5` 10:13:52.89). With `LOGMINER_REPLICAS=1 make up` at 09:51 (all recreated): watermark 1791280329344745000 = min(`:p0`–`:p5` 09:52:09.34, `:p6`–`:p11` 09:52:10.24) | verified live |
-| The single replica keeps mining every service after the takeover | `log_templates FINAL` at 10:14:32: `max(last_seen)` of every demo service between 10:14:09 and 10:14:32, including services of both former halves | verified live |
-| Docker DNS returns every replica | `docker exec tayga-api getent hosts tayga-logminer` six times: both addresses each time, in varying order | verified live |
-| The recorder stayed on one replica | `metric_samples` for `tayga_logminer_logs_mined_total`, 09:13 to 09:47: 138 samples, no decrease; the last (92,421) matches replica `3a32…` (93,022 a few seconds later), not `01f7…` (48,631); reqwest 0.13.5 `pool_idle_timeout` default 90 s (`async_impl/client.rs`) | verified live; the 90 s default read in the crate source; **superseded**: plan 9 scrapes every replica (see the plan 9 rows) |
-| The Pipeline lag row reads the logminer on `tayga.logs` | before the fix: `tayga-logminer` on `tayga.signals` lag 21,456 (09:02) and 469,682 (10:16), stale since the switch-over; after the fix (`LOG_GROUPS` in `crates/tayga-api/src/lag.rs`) and `make up`, `GET /api/v1/pipeline/lag` at 10:35 UTC: writer and assembler on `tayga.signals` 0, `tayga-logminer` on `tayga.logs` 0, `tayga-notifier` on `tayga.alerts` 0; live `lag_it` 2/2 | verified live |
-| `tayga.logs` size | `rpk cluster logdirs describe --topics tayga.logs,tayga.signals --aggregate-into topic` at 10:16: 70,614,087 bytes (first record about 08:56) and 25,382,696,990 bytes | verified live; the 9 GB figure is an extrapolation |
-| Stale heartbeat keys stay | `logminer_state FINAL` at 10:14: the global key (08:55:38) and keys of 4 replaced containers (`b38d0e45749b`, `01f7f4be63ab`, `3a32f1355256`, `0d2a9ee810c7`) next to the live `c0257fa435cf` | verified live; **superseded**: since plan 9 keys older than a day are deleted at startup |
-| Container commands by compose service | `docker compose … logs tayga-logminer` printed the logminer's logs (run with one replica; with two, `stop` and `start` were checked, see above); `docker compose … exec --index 1 tayga-logminer bash -c '…/dev/tcp/127.0.0.1/9100…'` returned `tayga_logminer_logs_mined_total 80233`; `logs --index 1 --tail 1` worked; `--index` is in `docker compose logs --help` and `exec --help` (Compose v5.5.1). No `docker exec/logs/restart tayga-logminer` remains in the Makefile, README instructions, `crates/tayga-e2e` or `deploy/` (grep); older Verified rows that name the container are history | verified live |
-| `LOGMINER_REPLICAS` reaches compose | `export LOGMINER_REPLICAS ?= 1` in the Makefile: a test target printed 1 by default, 2 from the environment, 3 from `make … LOGMINER_REPLICAS=3`; `docker compose … config tayga-logminer` with `LOGMINER_REPLICAS=2` shows `deploy: replicas: 2` and no `container_name` | verified |
-| Ownership window 60 min; revoke pass bounded at 30 s, shutdown pass at 20 s; alert ids | `ownership_window_min: 60` in `LogminerSettings::default`; `REVOKE_PASS_TIMEOUT`, `SHUTDOWN_PASS_TIMEOUT` in `crates/tayga-logminer/src/main.rs`; `id_hex(&["new", template])`, `["silence", template, since]`, `["spike", template, started_minute]` in `crates/tayga-drain/src/detect.rs` | verified in code |
-| Rebalance flush, commit semantics and the crash window | `on_rebalance`, `flush`, `shut_down` docs in `crates/tayga-logminer/src/main.rs`; unit tests `a_rebalance_during_pending_work_commits_only_flushed_offsets`, `a_clean_shutdown_flushes_then_runs_a_bounded_new_template_pass`; ignored live tests `a_template_first_seen_after_the_last_pass_is_announced_at_revoke` / `_at_shutdown` (plan 8 Task 3) | verified in code and tests; a refused or late commit and a crash were not produced live |
-| Performance, scale, or latency claims | none made | n/a |
-| **Plan 4** | | |
-| Port 14318 = tayga-ingest OTLP/HTTP | `"127.0.0.1:14318:4318"` in `deploy/compose.tayga.yaml`; `emit-log` default endpoint in `crates/tayga-devtools/src/main.rs`; the e2e probe sends through it | verified in config; the e2e probe's 45 s alert (see below) is evidence it works |
-| `tayga-logminer` runs as one replica, metrics on 9100, scraped by Prometheus | service in `deploy/compose.tayga.yaml`; default `metrics_addr` in `crates/tayga-logminer/src/main.rs`; `deploy/prometheus/prometheus.yml`; live `docker ps` shows `tayga-logminer` Up; `/api/v1/targets` showed 6 jobs, all `up` (writer, ingest, logminer, assembler, api, redpanda) | verified; **superseded** for "one replica" and the container name by plan 8 (see the plan 8 rows) |
-| Rule defaults (5 min window, 60 min baseline, factor 5, min count 10, warmup 15 min measured back from the template's first log, active 10 min, new = first seen after the previous tick's data clock minus 60 s, start watermark 10 min before the data clock, 65 min = baseline + window) | `DetectConfig::default`, `min_age`, `is_new`, `initial_watermark` and `NEW_TEMPLATE_MARGIN_NS` in `crates/tayga-drain/src/detect.rs`, with exact-boundary unit tests; logminer settings take the same values (`LogminerSettings::default` and its test) | verified in code; the e2e scenarios exercise one new-template and one spike case, not every threshold |
-| Drain defaults (similarity 0.5, depth 4, 100 children, 5,000 clusters per service, 64 tokens) | `DrainConfig::default` in `drain.rs`, `MAX_TOKENS` in `preprocess.rs` | verified in code |
-| Flush at 5,000 logs or 1 s, detect every 60 s, topic `tayga.alerts` | `LogminerSettings::default` | verified in code |
-| TTLs 3 d (hits) / 30 d (templates) / 7 d (alerts) | `TTL` lines in `crates/tayga-store/migrations/0004*` | verified in code |
-| New routes and their defaults (`since` 24h / 1h / 24h, 200 alert and template limit, `q` at most 200 chars) | `routes.rs`, `ui.rs`, `params.rs`, `repo.rs` (limit 200 at `log_alerts` and `TEMPLATES_IN_WINDOW`) | verified in code |
-| `/alerts` and `/templates` return 200; `/api/v1/log-alerts?since=24h` | live `curl`: 200, 200; 8 alerts in the last 24 h | verified live 2026-10-04; **superseded**: `/alerts` and `/templates` are no longer redirected and show the app's not-found page |
-| About 60-120 templates | live `log_templates FINAL`: 293 rows in total (all ever mined, 30-day TTL), 72 with `last_seen` in the last hour; `/api/v1/log-templates?since=1h` returned 72 | verified live; the 60-120 range is the plan's estimate, the live hourly count (72) is inside it |
-| Golden Drain test: 64 templates on the 5,000-line sample, `frontend-proxy` 5, bound is 120 and 10 | `cargo test -p tayga-drain --test '*' -- --nocapture` printed `templates: 64 {... "frontend-proxy": 5 ...}`, 3 passed | verified |
-| Restoring the first half of the golden sample and mining the rest gives every line the same template id as one pass | `restore_mid_corpus_matches_a_single_pass` in `crates/tayga-drain/tests/golden.rs`. It fails (116 of 5,000 lines differ) when the restore is skipped. It still passes when clusters are restored in reverse order, so the sample does not exercise leaf-order ties | verified 2026-10-04 |
-| Grafana `tayga-logs` ("Tayga · Logs") has 5 panels: Log alerts by kind, Recent alerts, New templates per service, Top templates, Logs mined/s | `/api/dashboards/uid/tayga-logs`, 2026-10-04 | verified live (rendering in a browser not checked) |
-| `tayga-pipeline` has 13 panels, 5 of them logminer panels (logs mined/s, templates, cluster cap hits, detect p99, data lag) | `/api/dashboards/uid/tayga-pipeline` returned 13 panels, the last "Logminer data lag", 2026-10-04 | verified live (rendering in a browser not checked) |
-| `tayga_logminer_data_lag_seconds` is exported and small while the logminer keeps up | Prometheus query after `make up` returned 0.38 s, and 0.44 s about 40 minutes later (plan 4 report) | verified live 2026-10-04 |
-| A template that first appears while the logminer is stopped is reported after it restarts | `docker stop tayga-logminer` at 14:09:06; probe 1 emitted at 14:09:06; probe 2 emitted at 14:21:19, after 12 min; `docker start` at 14:21:19. Both `new` alerts were written on the first detection tick, at 14:22:19, 60 s after the start. Probe 1 was 13 min old by then, so the old wall-clock 10-minute rule would have dropped it | single run, verified live 2026-10-04 |
-| Settings come from `TAYGA__SECTION__KEY` environment variables | `load_settings` in `crates/tayga-common/src/lib.rs:20-30` | verified in code |
-| `new_template_recent_min` (10 min: the start watermark offset, the lag-warning threshold and the minimum example window) is not configurable | `LogminerSettings` has no such key; the value comes from `DetectConfig::default` | verified in code |
-| e2e: 9 tests, 2 of them new; timeouts 180 s default, 600 s shipping, 600 s spike, 180 s new template | `cargo test -p tayga-e2e -- --ignored --list` listed 9; `crates/tayga-e2e/src/lib.rs` | verified; **superseded** for shipping (300 s since plan 9, with its own orders) and ad (300 s) |
-| Latest `make e2e` run, 2026-10-04, on commit `7c0d35a`: 8 of 9 passed. `shipping_slowdown_produces_slow_story_blaming_shipping` found no shipping slow story within 600 s. Run alone right after, on the same commit, it passed in 40 s. Alert times: log spike 200 s; new-template probe 45 s, after a 556 s first-run warmup wait for the `tayga-e2e-probe` service | one `make e2e` run plus one single-test re-run | single run, not a latency guarantee; the shipping failure fits the rarity of international orders (see the `make e2e` row and followups) |
-| Story scenario times in that run: ad 85 s, payment 95 s, unreachable 65 s, catalog 25 s, shipping failed (40 s in the re-run) | same run | single run; earlier runs differed (see followups) |
-| Performance, scale, or latency claims | none made beyond the single-run timings above | n/a |
-| **Plan 5 (web app)** | | |
-| Rows below checked 2026-10-05 on branch `feat/plan-5-ui` at `870bfaa`, against the stack from `make up` (5 tayga containers running; Grafana and Prometheus not running) | | |
-| App served on 8090: `/`, `/map`, `/logs`, `/logs/alerts`, `/pipeline`, `/traces` return 200 `text/html`; an unknown path (`/nope`) also returns 200 `text/html` | live `curl -D -` | verified |
-| `/api/v1/nope` and `/assets/nope.js` return 404 `application/json`; `/metrics` returns 200 | live `curl` | verified |
-| Old-URL redirects (`/groups/…`, `/service-map`, `/alerts`, `/templates`) | removed in plan 6 (`3dffb27`); `old_urls_are_plain_client_routes` in `crates/tayga-api/src/spa.rs` | **superseded**: no redirects; old URLs are client routes and show the not-found page |
-| `GET /api/v1/config` returns `{"jaeger_url":"http://localhost:8080/jaeger/ui","grafana_url":null}` on a plain `make up` | live `curl` | verified |
-| New API routes `overview`, `stories/series`, `traces/search`, `search?q=`, `pipeline/series` return 200; `services` returns a list of names; `pipeline/lag` returns three groups (writer, assembler, logminer) | live `curl` (`pipeline/series?metric=up&kind=gauge&job=tayga-api&since=15m`; `services/{name}` not called) | verified live |
-| Route list, parameters and limits (`limit` 1 to 500, default 100; `touched`, `errors` flags; `kind` required for `pipeline/series`) | `crates/tayga-api/src/routes_v2.rs`, `params.rs` | verified in code |
-| Immutable cache on `/assets/*`, `no-cache` on `index.html` | `IMMUTABLE` and `NO_CACHE` in `spa.rs`; Task 13 report shows live response headers (`cache-control: public, max-age=31536000, immutable` on the asset, `no-cache` on `/`) | verified in code and in the Task 13 report; not re-fetched today |
-| Pages, paths, shortcuts (`g` then `s t m l p`, `?`, `Cmd/Ctrl+K`), theme cycle light, dark, system, time ranges 15m/1h/24h/7d, live refresh 10 s paused while hidden, palette contents | `ui/src/router.tsx`, `components/shell/{Shortcuts,CommandPalette,ThemeSwitch,TimeRange,LiveToggle}.tsx`, `app/search.ts`, `theme/theme.ts` | verified in code; not clicked through in a browser today (the Playwright suite in the Task 14 report covers pages, theme switch and palette) |
-| Recorder: every 15 s, 7-day TTL, targets in `deploy/tayga-api.toml` via `TAYGA_CONFIG`, not settable by `TAYGA__` env | `default_record_secs` in `crates/tayga-api/src/main.rs`; `TTL ... INTERVAL 7 DAY` in `0005_metric_samples.sql`; Task 13 report (config 0.15.27 rejected the env form with `invalid type: map, expected a sequence`) | verified in code; the env failure is cited from the Task 13 report, not re-run |
-| Grafana and Prometheus are the compose profile `extras`; `make up-extras` starts them and sets the Grafana link; `make down` removes them | `Makefile`, `deploy/compose.tayga.yaml`, `deploy/compose.extras.yaml`; Task 13 report (live: `up-extras` gave `grafana_url` set, Prometheus ready, 4 dashboards provisioned; a second `make up` left them running) | verified in files; live results cited from the Task 13 report; `make up-extras` not run today |
-| Node 24 or newer only for UI development; Docker builds with `node:24`; `make ui-dev`, `make ui-e2e` | `engines` in `ui/package.json`; first stage of `docker/Dockerfile`; `Makefile`; `node --version` here prints v24.18.0 | verified |
-| Without `ui/dist`, `tayga-api` compiles and serves a placeholder | `spa.rs` module comment, `PLACEHOLDER`, `allow_missing`; Task 4 ledger ruling | verified in code; a build without `ui/dist` not run today |
-| Dev server proxies to 8090 by default, `TAYGA_API` overrides | `ui/vite.config.ts` | verified in code |
-| UI unit tests: 371 pass | `npm --prefix ui test` run today: `Tests 371 passed (371)` | verified |
-| Playwright suite: 139 tests in 11 files across 4 projects (dark, light, reduced motion in each theme) plus the perf project | Full run on 2026-10-05 against the 8090 app rebuilt from the final branch code (`make up`, image built 08:50 UTC): 139 passed, 12 skipped, 0 failed in 1.3 min. The 12 skips are the motion specs, which run only in the reduced-motion projects | one full run |
-| Budgets (spec section 10), final run on 2026-10-05, unthrottled on the development machine against the live stack, medians of 5 cold-cache contexts: initial JS 185.2 KB gzip (limit 350 KB); JS fetched by a cold home load 231.1 KB (350 KB); home first render with data 146 ms (1000 ms); waterfall of the largest live trace (105 spans) 25 ms and of 5,000 synthetic spans 32 ms (200 ms); map layout 143 ms live and 181 ms for 60 synthetic nodes (300 ms); live refresh gaps 10071 and 10048 ms; 0 requests in 13 s while the tab is hidden | Playwright `perf` project output of that run | measured once on one machine, not a guarantee |
-| Last full `make e2e`, 2026-10-05, after the scenario fixes in `3d0d8a5`: 8 of 9 passed. `shipping_slowdown_produces_slow_story_blaming_shipping` stopped at its baseline pre-check: two shipping runs in the previous hour lifted checkout p99 to 1.26 s, and each checkout endpoint had 35 to 37 traces in the window, below the 50 the detector needs. Run alone about 20 minutes earlier, with a clean baseline, it passed in 160 s. The earlier Task 14 timeouts came from the demo checkout service running about 100 times slower after a Docker restart; restarting `checkout` and `load-generator` fixed it (see followups) | one full run plus single-test runs | the shipping scenario needs an hour without slowdown runs and enough checkout traffic |
-| Performance, scale, or latency claims | none beyond the cited budgets and single runs above | n/a |
-| **Plan 6 (login, infrastructure toggle, no redirects, agent noise)** | | |
-| Rows below checked 2026-10-05 on branch `feat/plan-6-owner-decisions` at `a6cf80a` (plus this docs commit). Auth rows were run against a host `tayga-api` debug build on 127.0.0.1:18090 (ClickHouse :18123, Kafka :19092), stopped afterwards; "Task N report" means the report in `.superpowers/sdd/2026-10-05-tayga-plan-6-owner-decisions/` | | |
-| `[auth]` keys `enabled`, `username`, `password_hash`, `session_ttl` (default 12h), `session_key`, `secure_cookie`, and `TAYGA__AUTH__*` env forms | `AuthSettings` and its `Default` in `crates/tayga-api/src/auth.rs`; live: the host API started with only `TAYGA__AUTH__ENABLED`, `TAYGA__AUTH__USERNAME`, `TAYGA__AUTH__PASSWORD_HASH` set accepted logins and returned `Max-Age=43200` (12 h) | verified |
-| `session_ttl` is capped at 365d; `username` may not contain `\|` or `:`; `session_key` must be at least 32 bytes base64 | live startup errors with the env forms: `auth.session_ttl must be <n>s, <n>m, <n>h or <n>d, above 0 and at most 365d` for `366d`; `auth.username must not contain '\|' or ':'` for `a\|b` and `a:b`; `auth.session_key must decode to at least 32 bytes` for 3 bytes. With `365d`, a 32-byte key and `secure_cookie=true` the login returned `Max-Age=31536000` and `Secure`, and the log had no "session_key is unset" warning | verified live |
-| Without `session_key` a random key is used and a restart logs everyone out | startup log of the host API: WARN `auth.session_key is unset: a random key is used, so a restart signs everyone out`; key generation in `Auth::from_settings` | verified live (log line); that old cookies stop working after a restart is by construction (the key changes), not re-tried today |
-| The session is not sliding | the cookie's `Max-Age` is set only at login (`crates/tayga-api/src/auth.rs`); no route re-issues it | verified in code; not tested by waiting out a session |
-| `hash-password` prints an Argon2id hash from piped stdin; asks twice on a TTY | live: `printf 'secret' \| tayga-devtools hash-password` printed a string starting `$argon2id$v=19$m=19456,t=2,p=1`, and the API accepted it; `read_password` and `confirmed` in `crates/tayga-devtools/src/password.rs`; unit test `hash_of_known_password_verifies` | piped form verified live; the two-prompt TTY path verified in code only (no TTY here) |
-| Login returns 204 with a `tayga_session` cookie `HttpOnly; SameSite=Strict; Path=/`; protected routes need it; Basic works for scripts | live on :18090: `GET /api/v1/story-groups` without credentials 401; `POST /api/v1/auth/login` with a JSON body 204 with `Set-Cookie: tayga_session=…; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`; `curl -u admin:secret …/story-groups?since=15m` 200 | verified live |
-| Open routes: `/healthz`, `/metrics`, `GET /api/v1/config`, `GET /api/v1/auth/me` (401 without a session, so reachable), `POST` login and logout, and the app's files | live on :18090 with no credentials: `/healthz` 200, `/metrics` 200, `/api/v1/config` 200 `{"jaeger_url":null,"grafana_url":null,"auth_enabled":true,"infra_services":["flagd"]}`, `/` 200, `/api/v1/auth/me` 401; `OPEN_API` in `auth.rs`; tests `open_routes_match_method_and_exact_path` and `open_routes_stay_open` (cargo test `auth::`: 28 passed) | verified live and in tests |
-| Logout needs a JSON content type and no session | live: `POST /api/v1/auth/logout` without a content type 415; with `application/json` and no cookie 204; `logout_requires_json_content_type` and `logout_needs_no_session` in `auth.rs` | verified live |
-| Limiter: 5 failed attempts per client IP per 5 minutes, the 6th is refused even with the right password | live: 5 wrong logins all 401, then the right password 429 with `retry-after: 299` and `{"error":"too many attempts"}`; `WINDOW` and `MAX_FAILURES` in `auth.rs` | verified live (IPv4); IPv6 /64 keying verified in the unit test `ipv6_is_limited_per_64_prefix` and the Task 2 report, not live |
-| `X-Forwarded-For` is ignored, so behind a proxy all users share one limit | `forwarded_for_does_not_dodge_the_limiter` in `auth.rs`; Task 2 report live run: 5 wrong logins with a different `X-Forwarded-For` each, the 6th was 429 | verified in a test and in the Task 2 report; not re-run today |
-| Parallel attempts are counted before the password check, so more than 5 in flight can get 429 | design note in the Task 2 report (concern 2) and spec section 2.2 | cited, not re-measured |
-| Login page, redirect to `/login?next=…`, wrong-password alert, sign-in, reload stays signed in, sign-out, an unsafe `next` lands on `/` | `ui/e2e/auth.spec.ts` run today against the Vite dev server (5174) proxied to the auth API (18090): `TAYGA_E2E_AUTH_USER=admin TAYGA_E2E_AUTH_PASS=… TAYGA_UI_URL=http://localhost:5174 npx playwright test auth.spec.ts --project=dark --project=light --no-deps` | verified: 8 passed (4 tests in dark and light) |
-| HTTPS goes through a reverse proxy with `secure_cookie` | `secure_cookie` adds `; Secure` (live: login with `TAYGA__AUTH__SECURE_COOKIE=true` returned a cookie ending `Secure`); tayga-api binds plain HTTP (`http_addr`, no TLS code in `main.rs`) | cookie flag verified live; no reverse proxy was set up or tried |
-| `[map] infra_services` defaults to `["flagd"]`, is in `/api/v1/config`, is settable in file config only | live: `/api/v1/config` on the rebuilt stack (`make up`) returned `"infra_services":["flagd"]`; with a TOML file `[map] infra_services=["flagd","otel-collector"]` (`TAYGA_CONFIG`) it returned both; with `TAYGA__MAP__INFRA_SERVICES=flagd,otel-collector` the API failed at startup with `invalid type: string "flagd,otel-collector", expected a sequence for key `map.infra_services`` | verified live |
-| "Show infrastructure" toggle stored in the URL as `infra=true`; flagd hidden by default and drawn with it; `?service=flagd` opens the drawer while hidden | `ui/e2e/map.spec.ts` tests `infrastructure (flagd) is hidden by default and drawn with infra=true` and `/map?service=flagd opens flagd even while infrastructure is hidden`, in the full Playwright run below; `MapSearch.infra` in `ui/src/app/search.ts` | verified |
-| Callers of hidden infrastructure keep a "+N infra" badge; the header's degraded count still includes infrastructure | `hideInfra` in `ui/src/features/map/model.ts`; unit tests in `model.test.ts` and `map.test.tsx` (the header count is 4 against the map's 3 in the fixture); Task 4 report | verified in unit tests; badge appearance reviewed from screenshots in the Task 4 report |
-| Old-URL redirects removed | `old_urls_are_plain_client_routes` in `crates/tayga-api/src/spa.rs`; Task 1 commit `3dffb27` | verified in a test (see also the superseded rows above) |
-| The load generator no longer calls the agent service: no `user_ask_agent` spans after the deploy while other spans flow | `docker exec load-generator env` shows `LOCUST_LOCUSTFILE=/usr/src/app/tayga_locustfile.py`. ClickHouse `tayga.spans`: Task 5 ledger, window 13:17:05-13:23:05 UTC, after the Docker disk was freed: `user_ask_agent` 0, other load-generator spans flowing (GET 184, POST 99, `user_browse_product` 65, checkout 16). Rechecked at 13:31:49 UTC, last 20 minutes: `user_ask_agent` 0, 521 spans named `user_%`, 105,313 spans in all. The last `user_ask_agent` span was 2026-10-05 11:41:59, before the 11:48 deploy | verified live; the 20-minute window is short and the demo's other tasks are random |
-| Demo memory limits raised; all services below 65% after the change | `docker compose … config --format json` shows the new limits; `docker stats` 2026-10-06 after `make up`: checkout 23/64 MiB, product-catalog 29/64, ad 277/512, fraud-detection 253/512, accounting 190/320, kafka 596/1024, opensearch 997/1536, grafana 148/256, load-generator 660/2048; no unhealthy containers. Before: checkout 19/20 (95%), ad 272/300, load-generator 1.27/1.47 GiB | verified live; one snapshot |
-| The agent service is not part of Tayga's stack | the `agent` service exists only in the demo's `compose.agent.yaml`; the Makefile's `COMPOSE` lists `compose.yaml`, `compose.full.yaml`, `compose.observability.yaml` and Tayga's two files | verified in files |
-| `make up` on this branch builds an API with the new config fields | `make up` finished in 24 s; `curl localhost:8090/api/v1/config` returned `auth_enabled:false` and `infra_services:["flagd"]` | verified |
-| Rust unit tests: 306 pass, 29 ignored | `cargo test --workspace` run today (sum of the `test result` lines) | verified |
-| UI unit tests: 463 pass | `npm --prefix ui test` run today: `Tests 463 passed (463)`, 37 files | verified |
-| Playwright on the 8090 app with auth disabled: 131 passed, 28 skipped, 0 failed | `npx playwright test` from `ui/` run today after `make up`: `131 passed (1.6m)`. The skips: 16 for `auth.spec.ts` (needs the auth env) and 12 motion specs (reduced-motion projects only) | one full run |
-| `make e2e` on 2026-10-05 after `make up`: 8 of 9 passed in 497 s. Story times: ad 75 s, payment 55 s, unreachable 70 s, catalog 25 s; log spike 211 s; new-template probe 60 s after 0 s warmup (the probe service was already warm). `shipping_slowdown_produces_slow_story_blaming_shipping` stopped at its baseline pre-check: `checkout baselines cannot flag a 5 s trace as slow` with an empty endpoint table | `make e2e` output; `make flags-reset` run after | single run, not a latency guarantee. The test itself marked ad (75 s) and unreachable (70 s) as over its 60 s target; both passed |
-| **Plan 7a (detection correctness)** | | |
-| Rows below checked 2026-10-05 on branch `feat/plan-7a-detection` at `42d9dbb` (plus this docs commit), against the stack redeployed by `make up` at 16:10:20 UTC (28 s; migrations 0006 to 0008 applied). Docker disk 85% before the deploy | | |
-| Migrations 0006, 0007, 0008 applied; the three `logminer_state` keys exist | live `SELECT key, value FROM logminer_state FINAL`: `masking_epoch_start_ns` 1791216620578814135 (16:10:20.58 UTC, the logminer's start), `masking_version` 2, `new_template_watermark_ns` 1791217400436115384 (16:23:20, advancing per pass); `show tables` lists `logminer_state`, `log_template_minutes`, `log_template_minutes_mv`; `describe log_alerts` shows `baseline_day`, `baseline_week` | verified live; **superseded** for `masking_version` (now 3, see the v3 rows below) |
-| An upgrade over existing templates starts a masking epoch | logminer start log: `restored: 384`, `masking_version: 2`, `epoch_start` = 1791216620578814135; the DB had templates and no stored version | verified live (v2 deploy); **superseded**: the v3 deploy started a new epoch at 18:33:56, see below |
-| No new-template alerts after the deploy during the epoch warmup | live `SELECT count() FROM log_alerts FINAL WHERE kind='new' AND started_at BETWEEN '16:10:20' AND '16:25:20'`: 0 (all services), 0 for `frontend-proxy`. Alerts in that window: one `spike` (`otelcol-contrib`, "Exporting failed. Will retry the request after interval."). The first `new` alert after the deploy came at 17:12 (`load-generator`, a currency-task timeout), outside the window | verified live (one window, the v2 deploy). After the v3 epoch a rarer combination alerted once past the warmup, see the 18:49:39 row below |
-| `log_template_minutes` fills | live `SELECT count(), uniqExact(template_id) FROM log_template_minutes`: 847 rows at 16:24, 6091 rows over 68 templates at 17:54 | verified live |
-| Existing `frontend-proxy` templates do not gain literal status codes on upgrade | live: 0 `frontend-proxy` templates matching a 3-digit 1xx-5xx token and none with `' 200 '`, 6 templates in total, none first seen after the deploy, while the stored log bodies contain `HTTP/1.1" 200`; templates still read `"GET <*> <*> <*> ...` | **superseded** (v2 behaviour). Since `ac8e775` a kept code never matches `<*>`, so access-log lines with a code start new templates even on existing services; no template wipe or re-mining is needed. See the v3 rows below |
-| A new service's access-log template keeps the status code | live: `emit-log --service tayga-status-probe` with an Envoy-style body containing `HTTP/1.1" 503 UF` produced the template `<*> "GET /api/cart <*> 503 UF <*> <*> <*> - "-" "probe"` in `log_templates` | verified live (one body, one service; the probe service stays in the table until its 30-day TTL) |
-| Status rule details (100 to 599, only after an `HTTP/x` token, `600` and non-HTTP numbers masked, per-token equals whole-string masking) | `is_status`, `is_http_version` in `crates/tayga-drain/src/preprocess.rs`; unit tests `keeps_status_after_http_version`, `other_numbers_stay_masked`, `per_token_masking_equals_whole_string_masking` | verified in code and unit tests |
-| New metrics are exported | live: assembler `/metrics` showed `tayga_assembler_baseline_excluded_traces 2`, `tayga_assembler_baseline_carried_endpoints 0`, `tayga_assembler_baseline_endpoints 56`; logminer `/metrics` showed `tayga_logminer_spike_skipped_total{reason="coverage"} 0`, `tayga_logminer_seasonal_failures_total 0`, `tayga_logminer_state_save_failures_total 0` (scraped with `curlimages/curl` on the `opentelemetry-demo` network, because the Tayga images have no `wget` or `curl`) | verified live; the counters are 0, so no skip, failure or carry was observed live |
-| Coverage rule, per-template coverage, young-template baseline, proportional shortening, the 50% gate | `detect.rs` and `spike_baseline`; unit tests and live store ITs (18) per the Task 4 report; spec section 2 | verified in code and tests; no live coverage skip occurred (counter 0) |
-| Seasonal mode: 1-day and 7-day comparators, optional `baseline_day`/`baseline_week`, flat fallback on lookup error, MV dedup under replay | Task 5 report: store ITs against live ClickHouse (20), including `minutes_mv_does_not_double_count_replayed_hits`; `baseline_mode_setting_is_validated` in `crates/tayga-logminer/src/main.rs` | verified in unit and store tests; **not run live** (at the time the stack had under a day of `log_template_minutes`; since migration 0009 it holds minutes back to 2026-10-02 17:37; the deployed mode is `flat`) |
-| Slow baselines exclude above-cap traces; endpoints are carried for at most 2 windows; no baseline from no traces | `crates/tayga-store/src/store.rs`, `crates/tayga-assembler/src/baselines.rs`; Task 3 report (unit tests and store ITs, including `one_outlier_does_not_raise_p99_with_previous_cap` and `bootstrap_cap_is_ten_times_p50`) | verified in code and tests; live: 2 excluded traces and 0 carried endpoints at one scrape, no sustained slowdown observed |
-| Carry state is in memory only; a slowdown longer than 2 windows stops being flagged | spec section 3 and `baselines.rs` (no persistence) | code and spec only, not run live |
-| Rust unit tests: 348 pass, 36 ignored | `cargo test --workspace` run today (sum of the `test result` lines) | **superseded**: 365 pass, 37 ignored after the final-review fixes, see below |
-| `make e2e` on 2026-10-05 after the 7a deploy (about 2 h after `make up`): 7 of 9 passed in 647 s. Passed: log spike 175 s, new-template probe 60 s after 0 s warmup, payment 125 s, unreachable 80 s, catalog 25 s, raw span counts, service map. Failed: `ad_failure_blames_ad` (one story in 180 s; the test needs 3) and `shipping_slowdown_produces_slow_story_blaming_shipping` (stopped at its pre-check with an empty table) | `make e2e` output; `make flags-reset` run after | single run |
-| The ad failure was not a regression; re-run alone it passed in 80 s | `cargo test -p tayga-e2e -- --ignored ad_failure_blames_ad`: `adFailure: first matching story after 80s`, 1 passed | single re-run; the first failure's cause is not established (the flag affects about one request in ten, so a slow draw is plausible) |
-| The shipping pre-check stop is environmental | live `trace_summaries` for the last 60 min: `user_checkout_single` 73 of 73 and `user_checkout_multi` 59 of 59 traces had `is_error = 1`; the 10-minute counts show 100% checkout errors every interval since 13:10 UTC, hours before the deploy; `docker logs checkout` shows `panic: runtime error: invalid memory address or nil pointer dereference`. The pre-check needs non-error checkout traces, so no rows came back | error counts verified live. **Corrected**: the only panic in `docker logs -t checkout` is stamped 2026-10-04 18:00:22 UTC, a day earlier, so it is not the cause; the evidence points to the demo's Kafka (slow `publish orders`, recovery after its restart), see the checkout rows below |
-| **Plan 7a final-review fixes (v3 masking)** | | |
-| Rows below checked 2026-10-05 between 19:12 and 19:26 UTC on `feat/plan-7a-detection` with the fix commits after `ac8e775`, against the stack redeployed by `make up` at 19:16:29 to 19:16:55 UTC | | |
-| `masking_version` 3, masking epoch at 2026-10-05 18:33:56 UTC | live `SELECT key, value FROM logminer_state FINAL`: `masking_epoch_start_ns` 1791225236728986679 (`fromUnixTimestamp64Nano`: 18:33:56.729), `masking_version` 3; the 19:16 restart logged `restored: 399`, `epoch_start: 1791225236728986679`, `masking_version: 3` (unchanged version, so no new epoch) | verified live |
-| 7 new `frontend-proxy` templates carry a literal status, next to the 6 older `<*>` ones | live `log_templates FINAL` for `frontend-proxy`: 13 templates, 7 with a ` [1-5][0-9][0-9] ` token, codes 200 (4), 308, 503 and 504, first seen (log time) from 18:33:53.51 to 18:49:39.43; the other 6 were first seen 2026-10-02 05:37 to 2026-10-03 17:59. The first four are stamped up to 3.2 s before the epoch because lines logged before the logminer's start were mined after it | verified live |
-| The 18:49:39 `new` alert for `<*> "GET <*> <*> 503 UC upstream_reset_before_response_started{connection_termination} ...` was a false positive | `log_alerts`: `kind='new'`, `frontend-proxy`, `started_at` 18:49:39.434. `logs` holds 14 `frontend-proxy` bodies containing ` 503 UC ` before the epoch (2026-10-02 16:16 to 2026-10-05 17:10; 13 of them still have hits, 6 in template 6470045815083748258 and 7 in 11039615203255878215, both with `<*>` at the status); 1 after it. The template is new only because the kept 503 no longer matches `<*>` | verified live. Fixed by the pre-epoch match (final review I1): replaying the rule over the live `log_templates` (status read as `<*>`, same length and first two tokens, similarity ≥ 0.5) matches 11039615203255878215 with similarity 1.0, so the alert would now be suppressed. Unit tests `a_status_split_out_of_a_pre_epoch_wildcard_template_would_have_matched`, `new_alerts_for_status_splits_of_pre_epoch_templates_are_suppressed` |
-| A genuinely new status shape still alerts; templates without a kept code are judged as before | unit tests `a_genuinely_new_shape_with_a_status_would_not_have_matched`, `templates_without_a_protected_token_are_never_suppressed`, `pre_epoch_match_survives_a_restore_and_spares_non_http_templates` | verified in unit tests; not observed live |
-| `tayga_logminer_new_suppressed_total{reason="pre_epoch_match"}` is exported | logminer `/metrics` after the 19:16 deploy (scraped with `curlimages/curl` on the `opentelemetry-demo` network): `tayga_logminer_new_suppressed_total{reason="pre_epoch_match"} 0` | verified live; 0, so no suppression observed live yet |
-| Migration 0009 backfilled `log_template_minutes` without double counting | live: `schema_migrations` version 9 applied 19:16:52. Before the deploy the earliest minute was 2026-10-05 16:10:00 (the view's start, 187 minutes); after it 2026-10-02 17:37:00 (4,302 minutes). Sums of `uniqExactMerge(hits)` per (template, minute) equal sums of `uniqExact(log_id)` from `log_template_hits`: before 16:10, 8,433,847 = 8,433,847; the boundary minute 16:10, 2,243 = 2,243; 16:11 to 19:00, 359,986 = 359,986 | verified live; store IT `backfill_fills_minutes_before_the_view_without_double_counting` |
-| Duration caps come only from trusted previous baselines; after a carry expires with `0 < kept < 50` the next refresh bootstraps and adopts the new level | `caps_from` in `crates/tayga-assembler/src/baselines.rs`; unit tests `caps_skip_untrusted_baselines`, `after_a_carry_expires_with_few_kept_the_next_refresh_adopts_the_new_level` | verified in unit tests (the 10 x p50 bootstrap itself is the store IT `bootstrap_cap_is_ten_times_p50`); not run live |
-| An empty or failed consumer assignment holds the new-template clock at the watermark and keeps per-partition state | `assigned_partitions`, `pass_clock` in `crates/tayga-logminer/src/main.rs`; unit test `an_empty_or_failed_assignment_holds_at_the_watermark_and_keeps_partition_state` | verified in unit tests; no live rebalance tried |
-| Rust unit tests: 365 pass, 37 ignored; store ITs: 21 pass | `cargo test --workspace` (sum of the `test result` lines); `TAYGA_IT_CLICKHOUSE=http://localhost:18123 cargo test -p tayga-store --test store_it -- --ignored` | verified |
-| Demo checkout: every `user_checkout_*` trace errored from about 13:00 UTC until the controller restarted the demo's Kafka and `checkout` | `trace_summaries FINAL`, 15-minute buckets: 13:15 34/34 errors, 13:30 40/40, and every bucket from 17:15 to 18:45 100% (the table keeps 2 days; earlier, 11:00 to 12:00 had 89 of 109 errors and 12:00 to 13:00 only 2 traces). Proxy: 820 of 863 `POST /api/checkout` `frontend-proxy` bodies from 13:15 to 19:05 carry ` 504 ` (template `... "POST /api/checkout <*> 504 UT response_timeout ...`). `checkout`'s `publish orders` span, 13:00 to 19:05: 825 spans, median 91.5 s, max 589.4 s. Restart: `docker inspect` `StartedAt` kafka 19:07:16 UTC, checkout 19:07:57 UTC | verified live. The demo Kafka at 600.8 of its 620 MiB memory limit is the controller's `docker stats` reading before the restart and cannot be re-checked now (548.2 MiB / 620 MiB at 19:19) |
-| Checkout recovered after the restart | `SELECT toStartOfFifteenMinutes(ts), count(), countIf(is_error=1) FROM tayga.trace_summaries FINAL WHERE endpoint_name LIKE 'user_checkout%' AND ts > now()-INTERVAL 2 HOUR GROUP BY 1 ORDER BY 1` at 19:25 UTC: 18:45 40/40 errors, 19:00 40/20, 19:15 25/0; in 5-minute buckets 19:05 9/5, then 19:10 16/0, 19:15 11/0, 19:20 14/0. `publish orders` after 19:08: 31 spans, median under 0.1 s | verified live (about 15 minutes after the restart) |
-| Trap: span `status_code` is lowercase | `spans.status_code` is `Enum8('unset' = 0, 'ok' = 1, 'error' = 2)`; over `checkout` spans 13:15 to 19:00, `countIf(status_code='error')` = 86 while `countIf(status_code='ERROR')` = 0, with no error raised | verified live |
-| **Plan 7b (silence alerts, notifier, remine)** | | |
-| Rows below checked 2026-10-06 from 05:39 to 07:02 UTC on `feat/plan-7b-alerting` (`e8621ff` plus the Task 7 commits), against the stack rebuilt by `make up` at 05:39 UTC | | |
-| A silence alert fires in log time, and `started_at` is the last hit | `make e2e-notifier`: templates A and B existed 5 s after the emit; silence enabled with `minutes = 2`; alert `fe0492738da0b683` 155 s after enabling, with `last_at − started_at` = 159 s. In `make e2e`: alert `f59f6d2b7fec6162` after 176 s, with 176 s. The test asserts `last_at − started_at ≥ minutes` | verified live (2 runs) |
-| Silence UI: switch, minutes (default 10, 1 to 1440, disabled while off), bell, badge, "Silence" filter, "silent N min" | `ui/src/features/logs/SilenceCard.tsx` (`DEFAULT_MINUTES = 10`, `SILENCE_MAX = 1440`, `disabled={!cur.enabled}`), `TemplatesTable.tsx` (`Bell`), `routes/logs/alerts.tsx` (`{ value: 'silence', label: 'Silence' }`), `features/logs/model.ts` (`silent ${min} min`) | verified in code; the UI was not driven in a browser for these rows |
-| PUT silence: 415, 400, 404, auth; `silence` and `silence_enabled` on the GETs | `put_silence` in `crates/tayga-api/src/routes.rs`; Task 3 router tests; `silence_put_needs_a_session_or_basic` in `auth.rs`; live PUTs (200) from both e2e runs | verified in code and tests; 200 path live |
-| Partition-clock guard: `s_last` counts only up to the data clock | `is_silent` in `crates/tayga-drain/src/detect.rs` (`s_last.min(clock_ns)`); unit test `a_held_back_clock_suppresses_silence_alerts` | verified in unit tests; no lagging partition observed live |
-| Silence alerts are not `alerting` and not badges on story logs | `kind != 'silence'` in `ALERTING_AT` and in the per-trace alert query, `crates/tayga-api/src/repo.rs` | verified in code |
-| A silence ends when it is no longer refreshed; inactive 10 min after `last_at` | `active` = `last_at > end − ALERT_ACTIVE_MIN` (10) in `repo.rs`; live: after the scenario switched silence off, `fe0492738da0b683` showed `active: false` at 06:17 UTC with `last_at` 05:45:20 | verified live |
-| `host.docker.internal` resolves inside the notifier on Docker Desktop for Mac | `docker exec tayga-notifier getent hosts host.docker.internal`: `192.168.65.254` | verified live; the `host-gateway` mapping for Linux is not tested |
-| The override replaces the config mount | `docker compose … -f deploy/compose.notifier-e2e.yaml config tayga-notifier`: one bind of `deploy/tayga-notifier.e2e.toml` at `/etc/tayga/notifier.toml` | verified |
-| The notifier delivers a fresh alert exactly once, also after `docker restart tayga-notifier` | `make e2e-notifier` (exit 0, 310.9 s): the mock got 1 delivery of `fe0492738da0b683`, 0 s after the alert showed in the API (4 requests in all, the others for other alerts). After the restart and a 150 s watch, still 1. `tayga.alerts` partition 2 holds the alert at offsets 760, 761 and 762 (`last_at` 05:43:20, 05:44:20, 05:45:20), so two re-publishes came after the restart. `notifier_deliveries`: one row, `e2e-mock`, `delivered`, `attempts` 1 | verified live (one run) |
-| Webhook body fields, including `last_at` and `summary` | the delivered body above: `alert_id`, `kind`, `service`, `template_id`, `template`, `started_at`, `last_at`, `count` 0, `baseline` 0.0, `summary` "… has been silent for 2 min in tayga-e2e-probe", `example_trace_ids` [], `links`; content type `application/json` (asserted by the scenario) | verified live |
-| The default config is target-less again after the check | `docker logs tayga-notifier` after `make e2e-notifier`: `delivery disabled: no targets`, and `tayga-notifier consuming` with `"targets":"[]"` | verified live |
-| Retries, `Retry-After`, permanent 4xx/3xx, backoff, `max_age_secs`, the 40 s stop grace, URL redaction | `classify`, `retry_after_delay`, `backoff`, `retry_wait` in `crates/tayga-notifier/src/deliver.rs`; `route.rs`; `stop_grace_period: 40s` in `deploy/compose.tayga.yaml`; the Task 6 unit tests and the notifier IT | verified in code and tests; not exercised live with a failing target |
-| Notifier metrics, the Pipeline job and the lag | Task 6 report (live): `/metrics` served the three series; `pipeline/series?metric=up&job=tayga-notifier` gave 1.0; `pipeline/lag` listed `tayga-notifier` with lag 0 | verified live on 2026-10-06 (Task 6), not re-checked here |
-| Receivers should dedup on `alert_id`: hard-kill, lost-final-write and 30-day TTL resends | `deliver.rs` module docs; `TTL toDateTime(updated) + INTERVAL 30 DAY` in migration `0011_notifier_deliveries.sql` | verified in code; accepted, not reproduced |
-| `remine --dry-run` on live data | 06:07:47 to 06:16:08 UTC, debug build: 8,655,171 logs read; templates 412 before, 402 after; 31 added, 41 removed, 371 unchanged by id; `otelcol-contrib` 35 → 21, `frontend-proxy` 19 → 20, `tayga-e2e-probe` 12 → 15; orphaned silence settings: none; duration 500.9 s (370 s user CPU) | verified live |
-| The real run refuses while the heartbeat is fresh | after `docker compose … stop tayga-logminer` at 06:40:01: `Error: the logminer looks alive (heartbeat 43s ago, limit 180s). Stop it first with ...`, exit status 1 | verified live |
-| Real re-mine | release build, 06:42:30 to 06:46:01 UTC: 8,647,835 logs read and hits written; templates 415 before, 402 after; 27 added, 40 removed, 375 unchanged; no orphaned silence; 211.1 s (33 s user CPU); it printed "Start the logminer again now." Before: 415 templates, 8,984,121 hits, 301,878 `log_template_minutes` rows. After: 402 templates, 8,647,205 hits, 259,642 minute rows | verified live |
-| `logminer_state` after the re-mine | `masking_epoch_start_ns` 1791268950154855000 (06:42:30.15, was 1791225236728986679), `new_template_watermark_ns` 1791269158886828000 (06:45:58.89), `masking_version` 3; the heartbeat stayed at 06:39:21 until the restart. The logminer restart at 06:46:09 logged `restored: 402`, `epoch_start: 1791268950154855000`, `masking_version: 3` | verified live |
-| No `new` alerts during the warmup after the re-mine | `SELECT toString(kind), count() FROM log_alerts FINAL WHERE started_at >= '2026-10-06 06:46:09' AND started_at < '2026-10-06 07:01:09' GROUP BY kind`: no rows, so no alert of any kind in the 15 minutes after the restart (also none up to 07:08). `log_templates` had 0 templates first seen after the epoch, and the logminer was live: heartbeat 07:08:11, 51,040 hits after 06:46:09 | verified live; weak test, because no new template appeared in the window |
-| `make e2e`: 9 of 10 pass | 06:02:36 to 06:18:24 UTC, 943.9 s, exit 2. Passed: log spike 221 s, new-template probe 60 s (warm after 0 s), payment 111 s, unreachable 50 s, catalog 25 s, raw span counts, service map, shipping 115 s (its pre-check passed), silence 176 s. Failed: `ad_failure_blames_ad` (groups with 2 and 1 stories in 180 s; it needs 3). Run alone afterwards it passed in 85 s. `make flags-reset` run after both | verified live; the ad failure is the same intermittent miss as in plan 7a |
-| Rust unit tests: 428 pass, 49 ignored | `cargo test --workspace` (sum of the `test result` lines); fmt and clippy `-D warnings` clean | verified |
-| Migrations run before the services that need them under `make up` | `depends_on: tayga-migrate: condition: service_completed_successfully` on writer, assembler, logminer, notifier and api in `deploy/compose.tayga.yaml` | verified in config |
-| Performance, scale, or latency claims | none beyond the single runs above | n/a |
-| **Plan 9 (hardening)** | | |
-| Rows below checked 2026-10-06 from 16:10 to 17:34 UTC on `feat/plan-9-hardening` at `9656d3a` (plus this docs commit). "Task N report" means `.superpowers/sdd/2026-10-06-tayga-plan-9-hardening/task-N-report.md` | | |
-| `make up` deploys plan 9: ClickHouse recreated with the `users.d` mount, migration 12 applied | `make up` 16:11:47 to 16:12:25 (log: `opentelemetry-demo-clickhouse-1 Recreate`); `schema_migrations`: version 12 applied 16:12:24; `docker exec opentelemetry-demo-clickhouse-1 ls /etc/clickhouse-server/users.d` lists `grafana-readonly.xml` | verified live |
-| tayga-api has a healthcheck and becomes `healthy` | `docker inspect -f '{{.State.Health.Status}}' tayga-api`: `healthy` at 16:12:50 (first poll, 25 s after the start), and again after each later `make up`; `docker inspect -f '{{json .Config.Healthcheck}}'`: the bash `/dev/tcp` `GET /healthz` test, interval 10 s, timeout 3 s, start period 10 s, retries 3 | verified live |
-| The services run as `tayga`, uid 10001 | `docker exec tayga-api id`: `uid=10001(tayga) gid=999(tayga) groups=999(tayga)`; `docker exec tayga-writer id -u`: `10001`; `Config.User` is `tayga` for api, writer, ingest, assembler, notifier and the logminer | verified live |
-| Base images pinned by digest | `docker/Dockerfile`: `node:24-bookworm-slim@sha256:d6aa754f…7b20`, `lukemathwalker/cargo-chef:latest-rust-1.98-trixie@sha256:94a624f8…3289`, `debian:trixie-slim@sha256:a29215f6…f11f`, each with a pin-date comment; the image built from them in this `make up` | verified in the file and by the build |
-| Unknown `/api/` path answers JSON 404 | `curl -si localhost:8090/api/v1/nope`: `HTTP/1.1 404 Not Found`, body `{"error":"not found"}` | verified live |
-| ClickHouse reads carry `max_execution_time` 15 | `system.query_log` after `SYSTEM FLUSH LOGS`: the API's `error_stories FINAL` read at 16:13:29, user `default`, `Settings['max_execution_time']` = `15` | verified live |
-| `query_timeout_secs` default 15, `0` turns both bounds off; a stopped read (code 159) and a request 5 s past the limit answer 504 `{"error":"storage timeout"}`; non-API paths unbounded | `default_query_timeout_secs`, the layer only when `> 0` and `saturating_add(SLACK_SECS)` in `crates/tayga-api/src/main.rs`; `SLACK_SECS = 5`, `api_timeout`, `is_clickhouse_timeout` in `timeout.rs`; `ApiError::into_response` in `routes.rs`; unit tests `query_timeout_defaults_to_15_s_and_0_turns_it_off`, `a_slow_api_request_is_a_json_504`, `fast_api_requests_and_other_paths_are_not_bounded` | verified in code and unit tests; no live timeout was produced (Task 1 report: the 159 match is unit-tested only) |
-| Group examples stay inside the window | `GET /api/v1/story-groups/2495695361138993645?since=1h` at 16:13:29: 20 examples, all with `ts_ns` inside the last hour (`True`) | verified live |
-| Migration 12 marks every existing alert, so the upgrade republishes nothing | before the deploy (16:11:46): `log_alerts FINAL` 560, `log_alert_publications` absent; after (16:12:57): 560 marks, all `published_at` 16:12:24.2196, 0 alerts without a mark; `SHOW CREATE TABLE`: `ReplacingMergeTree(published_at) ORDER BY alert_id`, TTL 7 days | verified live |
-| No republish storm; new alerts get marks | the logminer's own `/metrics` at 16:22:43 (10 min after the start): `tayga_logminer_alerts_republished_total 0`, `tayga_logminer_commit_failures_total 0`; alerts written after 16:12:25: 2, without a mark 0. After the `make e2e` run (new replica since 16:34:48) at 16:51:32: both counters 0; alerts written after 16:12:25: 13 (3 `new`, 6 `spike`, 1 `silence` from the e2e run), without a mark 0 | verified live |
-| Republish details (owned services, last 24 h, oldest first, at most 1,000, stop at the first failed send, after every pass) | `REPUBLISH_WINDOW_NS`, `republish_unpublished` after the detection pass, `send_until_failure` in `crates/tayga-logminer/src/main.rs`; `Store::unpublished_alerts` (`ORDER BY version LIMIT 1000`) in `crates/tayga-store/src/logs.rs`; tests `republishing_stops_at_the_first_failed_send` and the logminer IT `a_stored_but_unpublished_alert_is_published_on_the_next_pass` (Task 3 report: 4/4 live) | verified in code and tests; no unpublished alert occurred live |
-| Stale heartbeat keys are deleted at startup; watermark keys are not touched | `system.query_log`: at each logminer start (16:12:25, 16:26:11 twice, 16:34:48) `DELETE FROM logminer_state WHERE startsWith(key, 'logminer_heartbeat_ns') AND value < <start − 24 h>` (`1791216745008305840` for 16:12:25), no exception. The oldest key before the deploy was 7.27 h old, so nothing was old enough to delete: 8 heartbeat keys before, 12 after the three restarts (one per new container); `new_template_watermark_ns*` keys 13 before and after; the new replica's key `logminer_heartbeat_ns:861eb5c6be0d` was written at 16:13:27.56 | the DELETE ran live; the removal of an old key is covered by the store IT `stale_heartbeats_are_deleted_and_other_keys_never` (Task 3 report: store_it 30/30 live), not observed live |
-| Final flush bounded at 15 s, inside the 40 s grace with the 20 s pass | `SHUTDOWN_FLUSH_TIMEOUT` 15 s, `SHUTDOWN_PASS_TIMEOUT` 20 s and the sum test in `crates/tayga-logminer/src/main.rs`; `stop_grace_period: 40s` | verified in code and tests |
-| Two replicas: each is scraped, labelled `instance` | `LOGMINER_REPLICAS=2 make up` 16:25:43 to 16:26:13; at 16:28:18 `metric_samples` for job `tayga-logminer`, metric `up`, last minute: `172.26.0.19:9100` 4 samples, `172.26.0.38:9100` 4 samples (`hostname -i` in replica 1 and 2 printed these addresses); `rpk group describe tayga-logminer`: 2 members | verified live |
-| The Pipeline rate sums the replicas | each replica's own `tayga_logminer_logs_mined_total`: 3528 and 3269 at 16:29:00.22, 4734 and 4496 at 16:29:59.85, together +2,433 in 59.6 s = 40.8/s; `GET /api/v1/pipeline/series?metric=tayga_logminer_logs_mined_total&kind=rate&job=tayga-logminer&since=15m` bucket 16:29: 41.63/s (2.0% apart) | verified live (one bucket) |
-| The data-lag gauge is per replica and the overview shows the slowest | replicas' `tayga_logminer_data_lag_seconds` at 16:28:18: 1.61 and 1.80; at 16:31:12 the newest samples were 0.8097 (`.19`) and 0.4131 (`.38`) and `GET /api/v1/overview?since=15m` returned `data_lag_secs` 0.809661583, the larger | verified live |
-| Right after a scale-up the stale unlabelled lag counts for up to 300 s | at 16:30:36 the overview returned 2.104536977, the unlabelled sample of 16:25:54.99 (before the scale-up), while both replicas were below 1 s; at 16:31:12, past 300 s, it returned the replicas' 0.81 | verified live |
-| Gauge merge rule: max for `up`, `*_data_lag_seconds`, `*_templates`, sum for the rest; DNS bounded at 2 s, IPv4 preferred, sticky labels | `max_over_instances` in `crates/tayga-api/src/series.rs`; `resolve_bounded`, `distinct`, `endpoints` in `recorder.rs`; unit tests `only_lag_template_and_up_gauges_take_the_largest_replica`, `a_hanging_lookup_falls_back_to_the_configured_url`, `ipv4_addresses_win_over_ipv6`, `once_several_replicas_are_seen_the_target_stays_labelled` (Task 4 report) | verified in code and tests |
-| Back to one replica after a `tayga-api` restart: samples are unlabelled | `make up` at 16:34:28 to 16:34:50 (it recreated tayga-api); at 16:35:57 the last minute's `up` samples for `tayga-logminer`: 4, all with an empty `instance` | verified live |
-| Grafana's ClickHouse datasource works as `grafana` | `LOGMINER_REPLICAS=2 make up-extras` 16:31:25; `/api/datasources/uid/tayga-clickhouse/health` at 16:32:30: `{"message":"Data source is working","status":"OK"}`; `POST /api/ds/query` with `SELECT count() FROM tayga.error_stories`: one frame, value 30524, no error | verified live |
-| `grafana` is read-only except `max_execution_time` | as `grafana` on :18123: `SELECT count() FROM tayga.error_stories` returned 30524; `CREATE TEMPORARY TABLE t (x UInt8)`: `Code: 164. DB::Exception: grafana: Cannot execute query in readonly mode. (READONLY)`; `max_threads=1`: `Code: 164 ... Cannot modify 'max_threads' setting in readonly mode. (READONLY)`; `max_execution_time=5` with `SELECT 1`: `1` | verified live |
-| Every dashboard works with the read-only user (no `readonly = 2` needed) | every target of the 4 provisioned dashboards (`/api/search`, `/api/dashboards/uid/…`) posted to Grafana's `/api/ds/query` without credentials (anonymous Viewer), last hour, at 16:32:47: 39 targets (10 ClickHouse, 29 Prometheus), all status 200, 0 errors, no `Code: 164`; `system.query_log` for user `grafana` in those 3 minutes: 17 queries, the only exception the deliberate `CREATE TEMPORARY TABLE` | verified live |
-| Pipeline dashboard units, 11 error queries; Prometheus scrapes each replica | `/api/dashboards/uid/tayga-pipeline`: panels 1, 2, 3, 8, 9 units `suffix: rec/s`, `suffix: rows/s`, `suffix: /s`, `suffix: items/s`, `suffix: logs/s`; panel 6 has 11 targets; Prometheus `/api/v1/targets` for job `tayga-logminer`: `172.26.0.19:9100 up`, `172.26.0.38:9100 up` | verified live |
-| The "Consumer lag per group" panel matches Redpanda per topic | its three expressions on Prometheus `/api/v1/query` at 16:34:19: assembler 1379, writer 24, logminer 8, notifier 0; `rpk group describe` summed per topic at 16:34:19: assembler `tayga.signals` 1259, writer `tayga.signals` 173, logminer `tayga.logs` 8, notifier `tayga.alerts` 0 (writer and assembler lag move by hundreds within seconds). `rpk`'s TOTAL-LAG for `tayga-logminer` (2,428,210) also counts its stale `tayga.signals` offsets (2,430,077 at 16:34:19) | verified live (one reading; same order of magnitude) |
-| Extras stopped without `down` | `docker compose … --profile extras stop tayga-grafana tayga-prometheus` at 16:34:28; `docker ps -a`: both `Exited (0)` | verified live |
-| Host run with `TAYGA__RECORD_SECS=0` adds no `up = 0` rows | 16:13:56 to 16:14:56: the host `tayga-api` on 127.0.0.1:18090 answered `/healthz` `ok`; its log has `metric recorder disabled (record_secs = 0)` once; `metric_samples` with `metric = 'up' AND value = 0` in the last 2 minutes: 0 | verified live |
-| `record_secs` 1 to 4 logs a warning | `(1..5).contains(&settings.record_secs)` and the warning text in `crates/tayga-api/src/main.rs` | verified in code; not run |
-| Existing topics are 24 h since the hand change; the disk recovered | the controller ran `rpk topic alter-config` with `retention.ms=86400000` at 16:14:28. `rpk topic describe -c` at 16:15:25: `retention.ms 86400000 DYNAMIC_TOPIC_CONFIG` on `tayga.signals`, `tayga.logs`, `tayga.stories`, `tayga.alerts`; `rpk cluster logdirs describe … --aggregate-into topic`: `tayga.signals` 7,395,359,304 bytes, `tayga.logs` 338,891,199, `tayga.stories` 17,381,468, `tayga.alerts` 683,991. Docker disk (`docker run --rm alpine df /`): 92% at 16:10:48 (86,009,892 of 93,709,644 KiB used + available), 91% at 16:12:25, 70% at 16:15:25, 71% at 16:58. Redpanda's volume (`docker system df -v`): 28.8 GB at 16:11, 9.14 GB at about 16:40 | verified live; the change itself was made by the controller, not in this task |
-| The `rpk` command in the README | `rpk topic alter-config --help` in the stack's Redpanda: `rpk topic alter-config [TOPICS...] --set key=value`, `--no-confirm` disables the prompt | syntax verified from the help; not run in this task (the live change was the controller's) |
-| New topics get 24 h; `-1` unlimited; 0 and below -1 refused; existing topics not altered | `default_retention_ms` 86,400,000, `validate`, `new_topic` in `crates/tayga-kafka/src/lib.rs`; tests `new_topic_sets_retention_and_max_message_bytes`, `validate_checks_retention`; `create_topics` only creates | verified in code and tests; no topic was created live in plan 9 |
-| The 2026-10-06 disk incident | Task 5 report: `opentelemetry-demo-redpanda-1` exited at 13:54:22 with code 133, log ending in a `vassert` backtrace, last span in `tayga.spans` 13:54:21; the 99% disk and the 28 GB volume are the controller's readings in the plan 9 ledger; `docker inspect` `StartedAt` of the Redpanda container: 14:19:16 | cited from the Task 5 report and the ledger; the 99% reading is not re-checkable now |
-| The mock binds `0.0.0.0` because of Linux `host-gateway` | spec section 2, E22 (live 2026-10-06 in Docker Desktop's Linux VM: `127.0.0.1:18198` refused from a bridge container to `172.17.0.1`, `0.0.0.0` answered `HTTP/1.0 200 OK`); doc comment on `MockWebhook::start` | cited from the spec's evidence, not re-run in this task |
-| Counters count accepted and committed work; a taken metrics port fails startup | `record_flush` and the help "Rows stored and committed" in `crates/tayga-writer/src/metrics.rs`; ingest help texts "in requests Kafka accepted" / "in accepted requests"; `spawn_server` with `?` in the writer, assembler, logminer and notifier `main.rs`, the logminer's before `load_miner`; tests `a_taken_metrics_port_is_an_error_and_a_free_one_binds`, `http_conversion_counters_count_only_accepted_requests` | verified in code and tests; metric names seen live in `metric_samples` |
-| Flag lock; shipping places its own orders (300 s); ad 300 s summed over its groups | `FlagLock::acquire` and its message, `SHIPPING_TIMEOUT`, `ORDER_EVERY`, `AD_FAILURE_TIMEOUT` in `crates/tayga-e2e/src/lib.rs`; `wait_for_group_sum(… "kind=error&service=ad" …)` and the shipping test in `tests/scenarios.rs` | verified in code |
-| `make e2e`, run 1 | 16:37:59 to 16:50:53 UTC, then `make flags-reset`: 9 of 10 passed in 772.7 s. adFailure 130 s, log spike 160 s, new-template probe 60 s (warm after 0 s), paymentFailure 156 s, paymentUnreachable 100 s, productCatalogFailure 25 s, raw span counts and service map ok, silence 135 s after enabling. `shipping_slowdown_produces_slow_story_blaming_shipping` stopped at its pre-check: `user_checkout_single n=49 p99=0.211 ok=0` (it needs 50; the demo checkout had recovered only at 16:03, and the payment scenarios just before it made 16:40 to 16:50 almost all errors) | verified live; the pre-check refused correctly |
-| `make e2e`, run 2 | 17:22:30 to 17:32:59 UTC, then `make flags-reset`: 10 of 10 passed in 622.3 s. adFailure 55 s, log spike 145 s, new-template probe 60 s (warm after 0 s), paymentFailure 45 s, paymentUnreachable 105 s, productCatalogFailure 25 s, raw span counts and service map ok, intlShippingSlowdown 45 s (2 own orders placed; the second, `8d39dec87c831246ae64f63a68f48bd4`, became a 5.1 s slow story blaming shipping, group `7169277777437214946`, listed under `kind=slow&service=shipping`), silence 135 s after enabling. Afterwards the logminer's `alerts_republished_total` and `commit_failures_total` were 0, and the 20 alerts written since the deploy all had marks | verified live (one run each; single-run times, not latency guarantees) |
-| `npm --prefix ui run e2e` after the final-review fixes (story-flow walks the first spans, accepting the empty attributes state; Pipeline page has 10 charts with Commit failures) | against the live app on :8090 rebuilt by `make up` with those fixes: first run 135 passed, 4 failed (`pipeline.spec.ts` still expected 9 charts); after correcting the count to 10, 139 passed, 28 skipped, 0 failed in 2.0 min | verified live |
-| Playwright (`npm --prefix ui run e2e`) | run 1, 16:13:37 to 16:15:17 (after the deploy): 137 passed, 28 skipped, 2 failed (`pages.spec.ts` pipeline and `palette.spec.ts` in the light project), both on a 503 from `GET /api/v1/pipeline/lag` during the hand retention change at 16:14:28; run 2, 16:52:00 to 16:53:57: 135 passed, 28 skipped, 4 failed, all `story-flow.spec.ts` (one per project): the home page's first story group was then a demo `accounting order-consumed` slow story (`432123300619415570`) whose root span has 0 attributes, and the test expects attributes on the first span. The pipeline and palette tests passed in run 2 | **not clean**: no run passed in full; the failures depend on live data or on the concurrent broker change (see followups), and neither was traced to a plan 9 change |
-| UI unit tests are stable | `npm --prefix ui test` three times in a row: `Test Files 38 passed (38)`, `Tests 500 passed (500)` each time | verified |
-| Component tests wait 5 s; `make ui-e2e` waits up to 5 minutes for data | `configure({ asyncUtilTimeout: 5_000 })` in `ui/src/test/setup.ts`, `testTimeout: 15_000` in `ui/vite.config.ts`; `READY_TIMEOUT_MS = 5 * 60_000` and the four checks in `ui/e2e/global-setup.ts`; both Playwright runs printed `[global-setup] http://localhost:8090 has data after 0 s` | verified in code and live |
-| Rust gates | `cargo fmt --check` clean; `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo test --workspace`: 497 passed, 0 failed, 62 ignored (sum of the `test result` lines); `npm --prefix ui run lint` and `typecheck` clean | verified |
-| Performance, scale, or latency claims | none beyond the single runs above | n/a |
-| **Sub-project 4 (performance)** | | |
-| Control window before the deploy | logminer `/metrics` at 04:19:09: `logs_mined_total` 1,462,992, `templates_created_total` 0, `templates` 423; at 04:29:47: 1,486,991, 0, 423 (+23,999 lines, +0 templates in 10 min 38 s). `log_alerts FINAL` of the last hour at 04:19:15: no rows | verified live |
-| `make up` deploys the cache with the default `scalar` backend | `make up` 04:29:55 to 04:30:52 (image `tayga:dev` created 04:30:48); `tayga-api` healthy at the first poll (04:31:13); the logminer logged `tayga-logminer consuming` at 04:30:50.695 with `restored: 423`, `"fingerprinter":"scalar"`; `/metrics`: `tayga_logminer_fingerprinter{backend="scalar"} 1` | verified live |
-| Cache hit ratio at least 99 %, no collisions, no resets | `/metrics` at 05:01:14, 30 min after the deploy: `logs_mined_total` 69,569, `fingerprint_cache_hits_total` 69,359, `misses_total` 210 (99.70 % hits), `collisions_total` 0, `cache_resets_total` 0 for `full` and `generalised` | verified live |
-| Template creation no higher than the control | `templates_created_total` 0 at 05:01:14 (control: +0 in 10 min 38 s); `templates` stayed 423 | verified live |
-| No `new` alert for a template that existed before the deploy | `SELECT count() FROM log_alerts FINAL WHERE kind = 'new' AND started_at > toDateTime(T0) AND template_id IN (… first_seen < toDateTime(T0))` with T0 = 04:30:52: 0. The only alert since T0 was a `spike` of `otelcol-contrib` "Exporting failed. Will retry the request after interval." at 04:31:52, the collector retrying while ingest restarted | verified live |
-| Templates hit after the deploy are the same as before it | per-service `groupUniqArray(template_id)` of `log_template_hits`, 30 min before 04:19:15 and from T0 to 05:01: 17 services and 66 ids each. One id only after: `otelcol-contrib` 13677393793404690769 "Could not inspect updated container", `first_seen` 2026-10-03 16:45:53 (an existing template, hit once at 04:32:00 by the deploy's container recreation, as at earlier deploys); one only before: `ad` "Transport failed", last seen 04:23:22 | verified live; no template was created after T0 |
-| Hits track logs mined | Pipeline recorder, every minute 04:31 to 05:01: logs mined per minute = cache hits + misses per minute (2,053 to 2,527). `log_template_hits` 04:31 to 05:01 by log time: 65,210 rows = `uniqExact(log_id)` = `logs` rows in the same window; the recorder's mined count over those minutes was 68,709 (ratio 0.949). The control before the deploy had the same ratio: 22,797 rows against +23,999 mined (0.950) | verified live |
-| The Pipeline page shows the two new charts with data (12 charts) | `/pipeline?since=1h` opened at 05:02:46 in Playwright: 12 captions and 12 canvases; "Logminer fingerprint cache … Latest: hits 39/s, misses 0.1/s."; "Logminer batch time … Latest: p50 0.010 ms, p99 0.061 ms." `GET /api/v1/pipeline/series?metric=tayga_logminer_mine_batch_seconds&kind=q50` over 30 min: 30 points, 8.6 to 9.9 µs | verified live |
-| Real-data differential passes | the last hour of `logs` exported at 04:31:37 (the spec §2.2 command): 130,378 lines, 17 services, 03:31:37 to 04:31:36; `TAYGA_CORPUS=<file> cargo test -p tayga-drain --release --test differential --test fingerprint`: 5 and 2 passed. With `TAYGA_CORPUS=/nonexistent.jsonl` the corpus test fails with `open /nonexistent.jsonl`, so the variable is read | verified |
-| Kill switch `LOGMINER_FINGERPRINTER=off` | `LOGMINER_FINGERPRINTER=off make up` 05:36:59 to 05:37:26; logged `"fingerprinter":"off"` at 05:37:24; `/metrics` at 05:39:33: `fingerprinter{backend="off"} 1`, hits 0, misses 4,911 = `logs_mined_total` 4,911; at 05:40:03: hits 0, mined 6,090 (+1,179 in 30 s). `make up` at 05:40:11 recreated the logminer only; logged `"fingerprinter":"scalar"` at 05:40:14; at 05:41:18 `backend="scalar"` 1, hits 2,331 of 2,431 | verified live |
-| `mine_batch` time live, `scalar` against `off` | `mine_batch_seconds` sum and count: `scalar` 0.10756 s over 13,470 records at 05:01:14 (8.0 µs per record, 5.16 logs per record); `off` 0.043595 s over 1,251 records at about 05:40:05 (34.8 µs) | measured live over two different short windows; not a controlled benchmark |
-| Service map CPU down at least 5× at a comparable refresh rate | `system.query_log` (`OSCPUVirtualTimeMicroseconds`) with a script sending `GET /api/v1/service-map` three at a time every 10 s (no UI tab was open): old code 04:19:42 to 04:29:42, 180 runs, 291.5 CPU ms per refresh (315 CPU s/h at 1,080 runs/h). Before the single-flight (hour to 05:31:03): 177 baseline runs, 71.3 ms per refresh, **4.1×**. With the single-flight (`2e09ac2`, deployed 06:36:34; hour 06:41:25 to 07:41:25): 1,083 window runs (25.1 ms, 27.15 CPU s) and 60 baseline runs, one in each minute (270.1 ms, 16.21 CPU s): 43.4 CPU s/h, 40.0 ms per refresh, **7.3×** against the live old code and 5.9× against the isolated estimate (235 ms per refresh). Staggered requests before the single-flight (05:38 to 05:52): 41.1 ms per refresh, 7.1× | verified live, synchronised and staggered |
-| `endpoint_stats` and `op_stats` read at least 4× less per run | `system.query_log`, 60 runs/h each: `endpoint_stats` 505.7 MiB per run in the hour to 04:19:15 (old code) against 18.3 MiB in the hour to 05:31:03 (new code), 27.7×; `op_stats` 1.32 GiB against 79.3 MiB, 17.0×. CPU: 70.9 → 15.2 and 98.5 → 31.2 CPU s/h | verified live |
-| The fingerprint cache paragraph: hits skip tokenising and the tree; a generalisation, a restore or 10,000 entries clear the service's cache; collisions and non-ASCII or NUL bodies take Drain | `add_fingerprinted`, `record`, `restore` and `CACHE_MAX_PER_SERVICE` in `crates/tayga-drain/src/drain.rs`; `fingerprint_body` in `fingerprint.rs`; tests in `tests/differential.rs` and the `drain.rs` unit tests (mutations in the Task 3 report fail them) | verified in code and tests |
-| `logminer.fingerprinter` values, default, `gpu` without the feature, unknown values; rebalance keeps the backend | `Backend` in `crates/tayga-logminer/src/backend.rs` (and its tests); the default `"scalar"` and `validate` in `main.rs`; `TAYGA__LOGMINER__FINGERPRINTER: ${LOGMINER_FINGERPRINTER:-scalar}` in `deploy/compose.tayga.yaml`; the Dockerfile runs `cargo build --release --workspace --bins` (default features) | verified in code; `gpu` startup not run live (not in the image) |
-| The six metrics and the 12 Pipeline charts | `crates/tayga-logminer/src/metrics.rs` (histogram `exponential_buckets(1e-6, 4.0, 10)`); live `/metrics` above; `ui/src/features/pipeline/model.ts` has 12 charts | verified in code and live |
-| `parallel` and `gpu` block the consume loop | `on_message` (a plain `fn` called from the async consume loop) calls `Miner::mine_batch` synchronously; `ParallelFingerprinter` uses `into_par_iter().collect_into_vec`; the GPU poll waits up to `POLL_TIMEOUT` (5 s) | verified in code |
-| Batch-5 timings 2.44, 2.44 and 2.43 µs | `docs/perf/sp4-performance.md`, Fingerprint backends (Task 5 bench run) | cited from the bench report, not re-run |
-| Map health baseline: minute floor of the earlier of the window end and now, one cached entry, single-flight, a past window does not replace a newer one | `health_baseline_end` and `HEALTH_BASELINE_SECS` in `crates/tayga-api/src/params.rs`; `HealthCache` and `health_baseline` in `repo.rs` (`tokio::sync::OnceCell` per minute, no spawned task); unit tests `concurrent_calls_for_one_end_load_once`, `a_failed_load_caches_nothing_and_keeps_the_error`, `an_aborted_leader_lets_a_waiter_load`, `an_older_end_never_replaces_the_slot_and_a_newer_one_does`, `a_window_ending_ahead_of_now_keys_the_current_minute` and `a_failed_health_baseline_caches_nothing`; IT `the_map_baseline_is_cached_per_minute_and_the_window_is_not`; live: 60 baseline runs in 60 minutes (one per minute) under three synchronised requests every 10 s | verified in code, tests and live |
-| Baseline queries use `argMax` instead of `FINAL`, with two edges | `baseline_with` and its doc in `crates/tayga-store/src/store.rs`; `trace_summaries` engine `ReplacingMergeTree(span_count) ORDER BY trace_id` (`system.tables`, live); IT `argmax_baselines_equal_final_over_duplicates` (Task 6: store ITs 32/32) | verified in code and live schema; ITs not re-run in this task |
-| Bench and test commands in Developer commands | `[[bench]]` names in the four crates' `Cargo.toml`, groups `stages`, `fingerprint`, `cached` in `crates/tayga-drain/benches/mining.rs`; `TAYGA_CORPUS` in `crates/tayga-drain/tests/corpus/mod.rs`; `TAYGA_REQUIRE_GPU` and `no GPU adapter: skipped` in `tests/backends.rs`; wgpu 30.0.1's default features include `metal`, `vulkan`, `dx12` and `gles` | verified in code; benches not re-run in this task; GPU tests run on the Mac only |
-| GPU tests on the Mac | `TAYGA_REQUIRE_GPU=1 cargo test -p tayga-drain -p tayga-logminer --features gpu` at about 04:25: 162 passed, 0 failed, 4 ignored | verified |
-| `make e2e` with the cache | 06:04:26 to 06:18:22, then `make flags-reset`: 10 passed, 0 failed in 817.7 s. adFailure 85 s, log spike 250 s, new-template probe 60 s (warm after 0 s), paymentFailure 141 s, paymentUnreachable 90 s, productCatalogFailure 25 s, intlShippingSlowdown 40 s (own order `f100cf643918fd481b2d0da684b5fc69`, a 5.2 s slow story blaming shipping), silence 120 s after enabling, raw span counts and service map ok. adFailure, paymentFailure and paymentUnreachable printed "OVER the 60s target", a soft target the tests do not assert | verified live |
-| Playwright with 12 Pipeline charts | `npm --prefix ui run e2e` 06:18:40 to 06:20:20 against the app rebuilt by `make up`: 139 passed, 28 skipped, 0 failed in 1.7 min; `pipeline.spec.ts` (expects 12 captions and 12 canvases) passed in all four projects; `[global-setup] … has data after 0 s` | verified live |
-| Rust and UI gates (sub-project 4) | before the deploy, about 04:21 to 04:25: `cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo test --workspace` 537 passed, 0 failed, 65 ignored (sum of the `test result` lines); `cargo clippy -p tayga-drain -p tayga-logminer --features gpu --all-targets -- -D warnings` clean; `npm --prefix ui run lint` and `typecheck` clean; `npm --prefix ui test` 39 files, 503 tests passed | verified; re-run at 06:22 after the doc edits with the same counts |
-| Trace search reads the window with `argMax` instead of `trace_summaries FINAL` (plan 10), with a post-lookup that drops stale versions; the same result rows as `FINAL` except on `span_count` ties | `TRACE_SEARCH`, `TRACE_VERSION_SLACK_SECS` (600 s), `TRACE_SEARCH_EXTRA_ROWS` (50), `newest_versions` and `trace_span_counts` with their docs (the edges) in `crates/tayga-api/src/repo.rs`; IT `argmax_trace_search_equals_final_over_duplicates` (repo ITs 11/11; merges stopped on its table), which fails with `argMin`, a slack of 0, no post-lookup, 0 extra rows, and an older-`ts` tie-break; 2026-10-07 10:16:53 UTC, old and new SQL back to back on the live `tayga` database (`readonly=2`, `use_query_cache=0`, `use_query_condition_cache=0`, 3 runs each, `system.query_log`), default `1h` request: 251.0 MiB against 18.7 (main query) + 84.3 (post-lookup) = 103.0 MiB, **2.4×: the 4× bytes target is missed** (the main query alone reads 13.4× less; the post-lookup reads most of the `trace_id` column), accepted by the controller on 2026-10-07 because correctness comes first; CPU median 477 against 146 ms (3.3×); 8 requests returned the same rows as `FINAL`, 3 of them (default, `service`, `limit=500`) in another order among equal `ts`; `ec70b40f` check (window 09:20 to 09:40, `service=payment`): `FINAL` 0 rows, main query 1 (the 2-span fragment), after the post-lookup 0, and the deployed API returned `[]`; after `make up` both queries carry `max_execution_time` 15 | verified in code, tests and live; numbers in `docs/perf/sp4-performance.md`, Plan 10 |
+| OTLP over gRPC and HTTP; traces and logs only, no metrics | code: `crates/tayga-ingest` (`main.rs`, `http.rs`) | 2026-10-07 |
+| Slow rule max(p99 × 1.5, p99 + 100 ms); baseline from the last hour | code: `Thresholds::default`, `baseline_window_minutes` in `crates/tayga-analysis` | 2026-10-07 |
+| Root cause from fixed rules, no LLM | code: `find_root_cause`, `explain` in `crates/tayga-analysis`; unit tests | 2026-10-07 |
+| Fingerprint of kind, endpoint, root-cause span and masked message | code: `build_story`, `fingerprint` in `crates/tayga-analysis` | 2026-10-07 |
+| One record per trace id per export request, keyed by trace id; logs keyed by service | code: `crates/tayga-ingest/src/records.rs` | 2026-10-07 |
+| A trace closes 10 s after its last span, 60 s at most | code: `AssemblerSettings::default` (`gap_ms`, `max_age_ms`) | 2026-10-07 |
+| New, spike and opt-in silence alerts, delivered to webhook and Slack | code: `crates/tayga-drain/src/detect.rs`, `crates/tayga-notifier`; live `make e2e-notifier` | 2026-10-06 |
+| Service map against a 24-hour baseline | code: `HEALTH_BASELINE_SECS` in `crates/tayga-api/src/params.rs` | 2026-10-07 |
+| The installer and the Compose bundle start a healthy stack that turns telemetry into stories and templates | live: `install.sh --local`, telemetrygen traces (gRPC and HTTP) and logs, then the API | 2026-10-07 |
+| The Helm chart installs and works | `helm lint --strict`, kubeconform, and a kind install with telemetrygen data checked through the API | 2026-10-07 |
+| The `paymentFailure` flag becomes payment stories | live `make e2e`, `payment_failure_blames_payment` | 2026-10-06 |
+| Benchmark rows | [`docs/perf/sp4-performance.md`](docs/perf/sp4-performance.md), criterion and live `system.query_log` | 2026-10-06/07 |
+| Competitor cells | vendor docs, pricing pages and repositories, in [`docs/research/competition.md`](docs/research/competition.md) | accessed 2026-10-07 |
+| AGPLv3 core | `LICENSE`, `license = "AGPL-3.0-only"` in `Cargo.toml` | 2026-10-07 |
+| Enterprise features and pricing model | owner | commercial offering (owner), not in the open-source code |
+| The name note | owner | the owner's words |
