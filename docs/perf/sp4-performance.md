@@ -118,7 +118,7 @@ Spike (spec §2.3): masking 70 %, tree 11 %. Masking dominates, as in the spike.
 | 5,000 | 1.69 ms (2.96 Melem/s) | 252 µs (19.84 Melem/s) | 924 µs (5.41 Melem/s) | 6.71× | 1.83× | 3.67: **gpu slower** |
 | 50,000 | 16.6 ms (3.00 Melem/s) | 1.95 ms (25.66 Melem/s) | 3.10 ms (16.14 Melem/s) | 8.54× | 5.37× | 1.59: **gpu slower** |
 
-Criterion's point estimate (the middle value of the confidence interval) of `cargo bench -p tayga-drain --bench mining --features gpu -- fingerprint`, all three backends from one run on 2026-10-07 (this run replaces the earlier scalar/parallel-only table; its scalar times were within 3 % of it). `gpu` is `GpuFingerprinter` on the M3 Max through Metal (wgpu 30.0.1).
+Criterion's point estimate of `cargo bench -p tayga-drain --bench mining --features gpu -- fingerprint`, all three backends from one run on 2026-10-07 (this run replaces the earlier scalar/parallel-only table; its scalar times were within 3 % of it). `gpu` is `GpuFingerprinter` on the M3 Max through Metal (wgpu 30.0.1).
 
 - **Below `GPU_MIN_BATCH` (2,048) the GPU backend runs scalar**, so 5, 64 and 512 equal scalar. Batches under 512 run on the calling thread for `parallel` too (`PAR_MIN_BATCH`).
 - **The GPU is slower than `parallel` at every size**: 5.0× slower at 2,048, 3.7× at 5,000, 1.6× at 50,000.
@@ -127,7 +127,7 @@ Criterion's point estimate (the middle value of the confidence interval) of `car
 
 Correctness: `parallel` and `gpu` equal `ScalarFingerprinter` on the corpus (50,000 bodies), on NUL, non-ASCII and empty edge cases either side of their thresholds (for `gpu` also 2,048 + 1, + 63, + 64, + 65, which end inside, at and past a 64-invocation workgroup), and on random batches (`tests/backends.rs`; the GPU proptest has 32 cases of up to 3,000 bodies). `gpu::tests::the_kernel_equals_fingerprint_body_on_small_batches` runs the kernel itself, without the CPU threshold, on batches of 1, 2, 63, 64, 65 and 129 bodies; it fails when the kernel's NUL rule is removed (checked by mutation, then reverted). Every ASCII body equals `reference_fingerprint` (`tests/fingerprint.rs`); NUL and non-ASCII bodies take the Drain path.
 
-Reproduce (GPU rows need a build with the feature and an adapter): `cargo bench -p tayga-drain --bench mining --features gpu -- fingerprint` and `cargo test -p tayga-drain --features gpu --test backends`.
+Reproduce (GPU rows need a build with the feature and an adapter): `cargo bench -p tayga-drain --bench mining --features gpu -- fingerprint` and `TAYGA_REQUIRE_GPU=1 cargo test -p tayga-drain --features gpu` (without `TAYGA_REQUIRE_GPU=1` the GPU tests skip when no adapter exists).
 
 ## Cache
 

@@ -88,11 +88,16 @@ mod gpu {
     use std::sync::OnceLock;
     use tayga_drain::gpu::{GPU_MIN_BATCH, GpuFingerprinter};
 
-    /// One device for every test; `None` without a usable adapter.
+    /// One device for every test; `None` without a usable adapter, which skips the test unless
+    /// `TAYGA_REQUIRE_GPU=1`, which fails it.
     fn gpu() -> Option<&'static GpuFingerprinter> {
         static GPU: OnceLock<Option<GpuFingerprinter>> = OnceLock::new();
         let g = GPU.get_or_init(GpuFingerprinter::new).as_ref();
         if g.is_none() {
+            assert!(
+                std::env::var("TAYGA_REQUIRE_GPU").as_deref() != Ok("1"),
+                "TAYGA_REQUIRE_GPU=1 but no usable GPU adapter"
+            );
             eprintln!("no GPU adapter: skipped");
         }
         g

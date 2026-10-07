@@ -4,6 +4,7 @@
 use crate::fingerprint::{
     BatchFingerprinter, BodyBatch, Fingerprint, ScalarFingerprinter, from_lanes,
 };
+use std::time::Duration;
 use wgpu::util::DeviceExt;
 
 /// Below this many bodies a batch runs on the CPU: the dispatch and readback alone took about
@@ -12,6 +13,46 @@ use wgpu::util::DeviceExt;
 pub const GPU_MIN_BATCH: usize = 2048;
 const WORKGROUP: usize = 64;
 const SHADER: &str = include_str!("fingerprint.wgsl");
+/// Longest wait for one batch; past it the batch runs on the CPU.
+const POLL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Error scopes for every [`wgpu::ErrorFilter`]. In wgpu 30 an error outside any scope goes to
+/// the default uncaptured-error handler, which panics; inside these scopes it is reported by
+/// [`failed`](Self::failed) and the batch falls back to scalar. Scopes are thread-local and
+/// must be popped in reverse order: `failed` and `Drop` (an early return) both do that.
+struct ErrorScopes(Vec<wgpu::ErrorScopeGuard>);
+
+impl ErrorScopes {
+    fn push(device: &wgpu::Device) -> Self {
+        Self(
+            [
+                wgpu::ErrorFilter::OutOfMemory,
+                wgpu::ErrorFilter::Internal,
+                wgpu::ErrorFilter::Validation,
+            ]
+            .into_iter()
+            .map(|f| device.push_error_scope(f))
+            .collect(),
+        )
+    }
+
+    /// Pops every scope, innermost first; true when any of them captured an error.
+    fn failed(mut self) -> bool {
+        let mut failed = false;
+        while let Some(scope) = self.0.pop() {
+            failed |= pollster::block_on(scope.pop()).is_some();
+        }
+        failed
+    }
+}
+
+impl Drop for ErrorScopes {
+    fn drop(&mut self) {
+        while let Some(scope) = self.0.pop() {
+            drop(scope);
+        }
+    }
+}
 
 pub struct GpuFingerprinter {
     device: wgpu::Device,
@@ -41,7 +82,7 @@ impl GpuFingerprinter {
             ..Default::default()
         }))
         .ok()?;
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scopes = ErrorScopes::push(&device);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("tayga-fingerprint"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -54,7 +95,7 @@ impl GpuFingerprinter {
             compilation_options: Default::default(),
             cache: None,
         });
-        if pollster::block_on(scope.pop()).is_some() {
+        if scopes.failed() {
             return None;
         }
         Some(Self {
@@ -70,15 +111,18 @@ impl GpuFingerprinter {
         &self.adapter
     }
 
-    /// The batch on the GPU; `None` when it exceeds a device limit or the GPU reports an error.
+    /// The batch on the GPU; `None` when it exceeds a device limit, the GPU reports an error, or
+    /// the batch takes longer than [`POLL_TIMEOUT`].
     fn run(&self, batch: &BodyBatch, keep_http_status: bool) -> Option<Vec<Option<Fingerprint>>> {
         let n = batch.len();
         let limits = self.device.limits();
         let mut data = batch.bytes().to_vec();
         data.resize(data.len().div_ceil(4).max(1) * 4, 0);
         let lanes_size = (n * 16) as u64;
-        // `lanes` is the largest buffer but for `bytes`; a dispatch of at most 65,535 workgroups
-        // (the default limit) also keeps `n` far below `u32::MAX`.
+        // `lanes` (16 bytes per body) is the largest buffer but for `bytes`. Its binding check
+        // bounds `n` to `max_binding / 16`, below `u32::MAX` for any `u64` limit up to 64 GiB,
+        // and the workgroup-count check bounds it to `65,535 * 64` on default limits; so the
+        // `n as u32` casts below are exact.
         let max_binding = limits
             .max_storage_buffer_binding_size
             .min(limits.max_buffer_size);
@@ -88,7 +132,7 @@ impl GpuFingerprinter {
         {
             return None;
         }
-        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scopes = ErrorScopes::push(&self.device);
         let storage = |contents: &[u8]| {
             self.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -158,7 +202,7 @@ impl GpuFingerprinter {
         }
         encoder.copy_buffer_to_buffer(&lanes, 0, &lanes_read, 0, lanes_size);
         encoder.copy_buffer_to_buffer(&valid, 0, &valid_read, 0, valid_size);
-        self.queue.submit([encoder.finish()]);
+        let submitted = self.queue.submit([encoder.finish()]);
         let (tx, rx) = std::sync::mpsc::channel();
         for buffer in [&lanes_read, &valid_read] {
             let tx = tx.clone();
@@ -166,8 +210,17 @@ impl GpuFingerprinter {
                 let _ = tx.send(r.is_ok());
             });
         }
-        self.device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
-        if pollster::block_on(scope.pop()).is_some() || !(rx.recv().ok()? && rx.recv().ok()?) {
+        drop(tx);
+        // A timeout or a lost device is an `Err`: the batch runs on the CPU.
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submitted),
+                timeout: Some(POLL_TIMEOUT),
+            })
+            .ok()?;
+        // The poll ran the map callbacks; `try_iter` never blocks on one that did not run.
+        let mapped = rx.try_iter().filter(|&ok| ok).count();
+        if scopes.failed() || mapped != 2 {
             return None;
         }
         let lanes: Vec<u32> = bytemuck::allocation::pod_collect_to_vec(
@@ -219,10 +272,39 @@ mod tests {
     use super::*;
     use crate::fingerprint::fingerprint_body;
 
+    /// Dropping the scopes (an early return in `run`) pops them in reverse order: wgpu panics
+    /// on any other order. A captured validation error is reported, not raised.
+    #[test]
+    fn error_scopes_capture_errors_and_drop_in_order() {
+        let Some(g) = GpuFingerprinter::new() else {
+            assert!(
+                std::env::var("TAYGA_REQUIRE_GPU").as_deref() != Ok("1"),
+                "TAYGA_REQUIRE_GPU=1 but no usable GPU adapter"
+            );
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        drop(ErrorScopes::push(&g.device));
+        assert!(!ErrorScopes::push(&g.device).failed());
+        let scopes = ErrorScopes::push(&g.device);
+        // `MAP_READ | MAP_WRITE` without `MAPPABLE_PRIMARY_BUFFERS` is a validation error.
+        let _invalid = g.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 3,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::MAP_WRITE,
+            mapped_at_creation: false,
+        });
+        assert!(scopes.failed());
+    }
+
     /// The kernel itself, below `GPU_MIN_BATCH`: workgroup edges and every rejection rule.
     #[test]
     fn the_kernel_equals_fingerprint_body_on_small_batches() {
         let Some(g) = GpuFingerprinter::new() else {
+            assert!(
+                std::env::var("TAYGA_REQUIRE_GPU").as_deref() != Ok("1"),
+                "TAYGA_REQUIRE_GPU=1 but no usable GPU adapter"
+            );
             eprintln!("no GPU adapter: skipped");
             return;
         };
