@@ -1,0 +1,75 @@
+---
+title: Tayga Enterprise
+description: Tayga Enterprise adds identity, isolation, scale, compliance controls, integrations and support on top of the open-source core. Available on request, priced per cluster or node.
+---
+
+import { Aside, Card, CardGrid, LinkButton } from '@astrojs/starlight/components';
+
+**Tayga Enterprise is available on request.** It builds on the open-source core with what larger organisations need to run Tayga across teams, clusters and regions: identity and access control, isolation, high availability, compliance controls, integrations with the tools you already use, and support with an SLA.
+
+<div class="tg-button-row">
+	<LinkButton href="mailto:hello@softberries.dev" icon="email" iconPlacement="start">{'hello@softberries.dev'}</LinkButton>
+	<LinkButton href="https://softberries.dev" variant="secondary" icon="external">softberries.dev</LinkButton>
+</div>
+
+## What it includes
+
+<CardGrid>
+	<Card title="Identity and access" icon="padlock">
+		Single sign-on with **SSO / SAML**, user provisioning with **SCIM**, **fine-grained RBAC**, and **audit logs** of who did what.
+	</Card>
+	<Card title="Multi-tenancy and federation" icon="random">
+		**Multi-tenancy** to keep teams and customers apart, and **multi-cluster federation** to see several clusters from one place.
+	</Card>
+	<Card title="High availability and scale" icon="rocket">
+		**High-availability** and **scale-out deployment**, with **upgrade tooling** for moving between versions safely.
+	</Card>
+	<Card title="Privacy and compliance" icon="approve-check-circle">
+		**PII redaction policies** applied to telemetry, and **data-residency controls** for where data is stored.
+	</Card>
+	<Card title="Long-term baselines" icon="analytics">
+		Compare a release with **the last 30 deploys**, not only with the last hour, to see whether a change made things worse.
+	</Card>
+	<Card title="Enterprise integrations" icon="puzzle">
+		**ServiceNow**, **Jira** and **advanced PagerDuty** integrations, so stories and alerts reach the systems your teams already work in.
+	</Card>
+	<Card title="LLM incident summaries" icon="comment-alt">
+		Incident summaries written by a large language model, with **bring-your-own model**, so your telemetry goes only to the model you choose.
+	</Card>
+	<Card title="Support" icon="heart">
+		**Support with an SLA**, **onboarding** and **training** for your teams.
+	</Card>
+</CardGrid>
+
+## Open source and Enterprise
+
+| Capability | Open source (AGPLv3) | Enterprise |
+|---|---|---|
+| Error and slow stories, story groups, root cause, critical path, baseline diff | Yes | Yes |
+| Log templates and new / spike / silence alerts | Yes | Yes |
+| Service map, trace explorer, pipeline health | Yes | Yes |
+| Webhook and Slack alert delivery | Yes | Yes |
+| Authentication | One account, no roles | SSO / SAML, SCIM, fine-grained RBAC, audit logs |
+| Tenancy | Single tenant | Multi-tenancy, multi-cluster federation |
+| Deployment | Docker Compose, Helm, from source | High availability, scale-out, upgrade tooling |
+| Baselines | The last 60 minutes per endpoint | Long-term: a release against the last 30 deploys |
+| Privacy controls | Not included | PII redaction policies, data-residency controls |
+| Integrations | Webhook, Slack | ServiceNow, Jira, advanced PagerDuty |
+| Incident summaries | Not included | LLM summaries with your own model |
+| Support | Community, through GitHub | SLA, onboarding, training |
+| License | AGPLv3 | Commercial |
+
+## Pricing
+
+Tayga Enterprise is priced **per cluster or node**, not per GB ingested. Contact us for a quote.
+
+## Get in touch
+
+Tell us about your setup (clusters, services, telemetry volume) and what you need, and we will come back with a proposal.
+
+- Email: [hello@softberries.dev](mailto:hello@softberries.dev)
+- Web: [softberries.dev](https://softberries.dev)
+
+<Aside type="note">
+The features on this page are part of the commercial enterprise edition. The open-source edition is described in the rest of these docs; see [License](/tayga/license/) for how the two are licensed.
+</Aside>

@@ -1,0 +1,74 @@
+---
+title: What is Tayga
+description: Tayga turns OpenTelemetry traces and logs into error stories, so one failing request comes with its root cause, its path across services, what differs from normal and the logs that matter.
+---
+
+import { Card, CardGrid, LinkCard, Aside } from '@astrojs/starlight/components';
+
+Tayga turns OpenTelemetry traces and logs into **error stories**. For each failing or slow request it shows the root-cause span, the request path across services, the critical path, a diff against the endpoint's normal baseline, and the related logs. Stories are grouped by fingerprint, so one underlying problem shows up as one group rather than as hundreds of traces.
+
+Tayga reads standard OTLP, so anything instrumented with OpenTelemetry can send to it, directly or through an OpenTelemetry Collector. It stores raw spans and logs in ClickHouse, assembles traces as they stream through Redpanda, and serves a web app and a JSON API.
+
+## What a story tells you
+
+Open a story and you get the answer to "what broke, where, and why does it look different from usual":
+
+- **The root cause.** Among the spans that failed without a failing child, the one that ended first, explained in one sentence such as "`checkout` could not reach `payment`" or "`payment` `Charge` failed: ...". The other failing spans are listed as also failed.
+- **The path.** The chain of spans from the request's entry point to the root cause, with the services it crossed.
+- **The critical path.** Where the time actually went, with the top contributors by self-time.
+- **The comparison with normal.** Operations that are new, missing or slower than in the endpoint's baseline from the last hour.
+- **The logs.** The request's logs (errors first), each with its log template and a badge when that template was alerting at the time.
+
+A request that did not fail but took much longer than its endpoint's normal becomes a **slow story**, with the same structure.
+
+## What Tayga does
+
+<CardGrid>
+	<Card title="Error and slow stories" icon="warning">
+		Every assembled trace is checked. Failing requests and requests slower than max(p99 × 1.5, p99 + 100 ms) of their endpoint's baseline become stories. [Error stories](/tayga/concepts/error-stories/)
+	</Card>
+	<Card title="Story groups" icon="list-format">
+		A fingerprint of the kind, endpoint, root-cause span and masked message folds repeats of one problem into one group with a trend. [Story groups](/tayga/concepts/story-groups/)
+	</Card>
+	<Card title="Log templates and alerts" icon="document">
+		Drain mines each service's logs into templates. New templates, rate spikes and, when you ask for it, silence raise alerts that the notifier sends to webhook and Slack targets. [Log templates](/tayga/concepts/log-templates/)
+	</Card>
+	<Card title="Service map and traces" icon="random">
+		A live service map with rate, error ratio and p99 against each service's 24-hour baseline, and a trace explorer with a waterfall for any trace. [Service map](/tayga/concepts/service-map/)
+	</Card>
+</CardGrid>
+
+The whole pipeline is described in [Architecture](/tayga/concepts/architecture/).
+
+## What it needs
+
+- **Telemetry:** OpenTelemetry traces, and logs if you want templates and log alerts, over OTLP gRPC or OTLP/HTTP. Metrics are not ingested.
+- **Infrastructure:** ClickHouse for storage and Redpanda as the bus, through its Kafka API. The Docker images run every Tayga service as an unprivileged user.
+- **A browser:** the web app and the JSON API are served together by `tayga-api` on one port (8090 in the default setup).
+
+## What it is not
+
+Tayga is a focused tool, and it is fair to say where it stops:
+
+- **Not a metrics backend.** It takes traces and logs only. Keep your metrics where they are.
+- **Not a log search engine.** Logs are mined into templates and attached to stories and traces; there is no free-text search across all logs.
+- **Not multi-user in the open-source edition.** Authentication, when you turn it on, is one account with no roles. Identity, roles and audit logs are part of [Tayga Enterprise](/tayga/enterprise/).
+
+## Editions
+
+The core is open source under the **AGPLv3**. **Tayga Enterprise** adds SSO, RBAC, multi-tenancy, high availability, long-term baselines, enterprise integrations and support, under a commercial license, and is available on request. See [License](/tayga/license/) and [Enterprise](/tayga/enterprise/).
+
+## Why the name
+
+<Aside type="tip" title="A note from the author" icon="heart">
+Tayga, properly spelled *Tajga*, is my hunting dog. Tajga can trace anything, anywhere, in the harshest conditions. I love that dog as much as I love writing software, so the name was obvious. The "y" is for English speakers, who wouldn't read *Tajga* the way it's meant ;)
+</Aside>
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="Quickstart" description="Install Tayga and send it your first traces." href="/tayga/getting-started/quickstart/" />
+	<LinkCard title="Demo with the OTel demo" description="Run Tayga next to the OpenTelemetry demo and break something on purpose." href="/tayga/getting-started/otel-demo/" />
+	<LinkCard title="Architecture" description="How the services, topics and tables fit together." href="/tayga/concepts/architecture/" />
+	<LinkCard title="Connect your Collector" description="Send your own telemetry to Tayga." href="/tayga/install/collector/" />
+</CardGrid>
