@@ -97,7 +97,8 @@ api:
   auth:
     enabled: false
     username: ""
-    # Argon2id PHC string, for example from `tayga-devtools hash-password`.
+    # Argon2id PHC string, for example from
+    #   kubectl exec -it deploy/<release>-api -- tayga-devtools hash-password
     passwordHash: ""
     # Base64 of 32 or more random bytes (openssl rand -base64 32). Empty: a
     # random key per pod start, so every restart signs everyone out.
@@ -119,7 +120,9 @@ notifier:
   # Base of the links in notifications (where people open the app).
   publicUrl: "http://localhost:8090"
   kinds: ["new", "spike", "silence"]
-  # Each: {name, kind: webhook|slack, url}. URLs are secrets; they are stored in a Secret.
+  # Each: {name, kind: webhook|slack, url}. URLs are credentials: they are rendered
+  # into a Secret, but also stay in the release's values (helm get values). For real
+  # webhooks prefer existingSecret.
   targets: []
   # Use an existing Secret holding a complete notifier.toml under the key
   # notifier.toml instead of publicUrl, kinds and targets.
@@ -154,7 +157,7 @@ clickhouse:
   enabled: true
   image:
     repository: clickhouse/clickhouse-server
-    tag: "26.8"
+    tag: "26.8.15.10"
     pullPolicy: IfNotPresent
   persistence:
     enabled: true

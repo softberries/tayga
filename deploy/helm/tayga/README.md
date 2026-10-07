@@ -11,7 +11,7 @@ Installs Tayga on Kubernetes: the six Tayga services, the ClickHouse schema migr
 | `<release>-api` | Deployment, `api.replicas` | Web app and JSON API on 8090; optional Ingress |
 | `<release>-notifier` | Deployment, 1 replica, `notifier.enabled` | Delivers log alerts to webhook and Slack targets |
 | `<release>-migrate[-<revision>]` | Job | `tayga-writer migrate`; see [Schema migration](#schema-migration) |
-| `<release>-clickhouse` | StatefulSet, `clickhouse.enabled` | `clickhouse/clickhouse-server:26.8`, one node |
+| `<release>-clickhouse` | StatefulSet, `clickhouse.enabled` | `clickhouse/clickhouse-server:26.8.15.10`, one node |
 | `<release>-redpanda` | StatefulSet, `redpanda.enabled` | `redpandadata/redpanda:v26.2.3`, one broker in `dev-container` mode |
 
 The release name `tayga` gives the shortest names (`tayga-api`, `tayga-ingest`, ...). Every Tayga pod runs as uid 10001 with a read-only root filesystem, no capabilities and the `RuntimeDefault` seccomp profile, and waits in an init container until Kafka accepts connections.
@@ -92,12 +92,12 @@ Limits of what Tayga supports today: ClickHouse over HTTP as the `default` user 
 | `api.auth.enabled`, `.username`, `.passwordHash`, `.sessionKey`, `.secureCookie` | off | Login. The hash is an Argon2id PHC string. Stored in a Secret |
 | `api.auth.existingSecret` | empty | A Secret with `TAYGA__AUTH__USERNAME`, `TAYGA__AUTH__PASSWORD_HASH` and optionally `TAYGA__AUTH__SESSION_KEY` |
 | `notifier.enabled`, `.publicUrl`, `.kinds` | `true`, `http://localhost:8090`, all kinds | Alert delivery; `publicUrl` is the base of the links in notifications |
-| `notifier.targets` | `[]` | `[{name, kind: webhook\|slack, url}]`, rendered into a Secret |
+| `notifier.targets` | `[]` | `[{name, kind: webhook\|slack, url}]`, rendered into a Secret. The URLs also stay in the release's values (`helm get values`); for real webhooks use `notifier.existingSecret` |
 | `notifier.existingSecret` | empty | A Secret with a complete `notifier.toml` |
 | `<service>.resources`, `<service>.extraEnv` | see `values.yaml` | Per service: `ingest`, `writer`, `assembler`, `logminer`, `api`, `notifier` |
 | `migrate.backoffLimit`, `.activeDeadlineSeconds`, `.resources` | `6`, `900` | The migration Job |
 | `ingress.enabled`, `.className`, `.annotations`, `.hosts`, `.tls` | off | Ingress to the API Service |
-| `clickhouse.enabled`, `.image`, `.persistence.{enabled,size,storageClass}`, `.resources` | `true`, `26.8`, 20Gi | Bundled ClickHouse |
+| `clickhouse.enabled`, `.image`, `.persistence.{enabled,size,storageClass}`, `.resources` | `true`, `26.8.15.10`, 20Gi | Bundled ClickHouse |
 | `redpanda.enabled`, `.image`, `.memory`, `.persistence`, `.resources` | `true`, `v26.2.3`, `1G`, 10Gi | Bundled Redpanda; keep `resources.limits.memory` above `memory` |
 | `external.clickhouse.url`, `external.kafka.brokers` | empty | Required when the bundled services are disabled |
 | `database` | `tayga` | ClickHouse database |
@@ -106,16 +106,62 @@ Limits of what Tayga supports today: ClickHouse over HTTP as the `default` user 
 
 Other Tayga settings (`TAYGA__SECTION__KEY`) go in `extraEnv` or a service's `extraEnv`; the configuration reference in the documentation lists them.
 
-## Authentication
+## Upgrade
 
 ```sh
-helm upgrade tayga oci://ghcr.io/softberries/charts/tayga --reuse-values \
+helm upgrade tayga oci://ghcr.io/softberries/charts/tayga --version <new version> \
+  --namespace tayga --reset-then-reuse-values --wait
+```
+
+`--reset-then-reuse-values` keeps your settings and takes the new chart's defaults for keys it adds (plain `--reuse-values` does not). The schema migration runs first; see [Schema migration](#schema-migration).
+
+## Authentication
+
+The image ships `tayga-devtools`; make the Argon2id hash with it (it asks for the password twice without echo):
+
+```sh
+kubectl --namespace tayga exec -it deploy/tayga-api -- tayga-devtools hash-password
+```
+
+Then turn login on, keeping the installed chart version:
+
+```sh
+helm upgrade tayga oci://ghcr.io/softberries/charts/tayga --version 0.1.0 --namespace tayga --reuse-values \
   --set api.auth.enabled=true --set api.auth.username=admin \
   --set-string api.auth.passwordHash='$argon2id$v=19$...' \
   --set-string api.auth.sessionKey="$(openssl rand -base64 32)"
 ```
 
-Make the hash with `cargo run -q -p tayga-devtools -- hash-password` in a checkout, or with the `argon2` tool (see `deploy/standalone/README.md`). Behind an HTTPS Ingress, also set `api.auth.secureCookie=true`.
+Behind an HTTPS Ingress, also set `api.auth.secureCookie=true`. To keep the hash and key out of the release's values, put them in a Secret and set `api.auth.existingSecret`.
+
+## Alert delivery
+
+Webhook and Slack URLs are credentials. `notifier.targets` renders them into a Secret, but they also stay in the release's values. For real targets, create the Secret yourself and point the chart at it:
+
+```sh
+kubectl --namespace tayga create secret generic tayga-notifier-config --from-file=notifier.toml
+helm upgrade tayga oci://ghcr.io/softberries/charts/tayga --version 0.1.0 --namespace tayga --reuse-values \
+  --set notifier.existingSecret=tayga-notifier-config
+```
+
+The file has the format of `deploy/standalone/notifier.toml`; set `public_url` in its `[notifier]` table. The notifier redacts target URLs in its logs.
+
+## Re-mining log templates
+
+After a change to the Drain or masking settings, `tayga-devtools remine` rebuilds the templates (see the documentation's "Re-mining templates" page). A dry run is read-only:
+
+```sh
+kubectl --namespace tayga exec deploy/tayga-logminer -- tayga-devtools remine --dry-run
+```
+
+A real run needs every logminer replica stopped for 3 minutes; run it from the API pod, which has the same ClickHouse settings. Pass any `TAYGA__LOGMINER__*` variables you set in `logminer.extraEnv` through `env`:
+
+```sh
+kubectl --namespace tayga scale deploy/tayga-logminer --replicas 0
+# wait 3 minutes
+kubectl --namespace tayga exec deploy/tayga-api -- tayga-devtools remine
+kubectl --namespace tayga scale deploy/tayga-logminer --replicas 1   # or your logminer.replicas
+```
 
 ## Uninstall
 

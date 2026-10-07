@@ -40,5 +40,7 @@ external.* values.
 {{- if not .Values.api.auth.enabled }}
 
 Authentication is off: anyone who reaches the API can read every trace and
-log. Set api.auth.* before exposing it.
+log. Set api.auth.* before exposing it. Make the password hash with the
+tayga-devtools binary in the image:
+  kubectl --namespace {{ .Release.Namespace }} exec -it deploy/{{ $fullname }}-api -- tayga-devtools hash-password
 {{- end }}

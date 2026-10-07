@@ -4,6 +4,11 @@ One Deployment per Tayga service. Each entry:
   probe {path, port}, schema (wait for the migration), env, config (mount).
 */ -}}
 {{- $fullname := include "tayga.fullname" . }}
+{{- with .Values.api.auth }}
+{{- if and .enabled (gt (int $.Values.api.replicas) 1) (not .sessionKey) (not .existingSecret) }}
+{{- fail "api.replicas > 1 with api.auth.enabled needs api.auth.sessionKey (or api.auth.existingSecret with TAYGA__AUTH__SESSION_KEY): without it each replica signs its own sessions" }}
+{{- end }}
+{{- end }}
 {{- $services := list
   (dict "name" "ingest" "replicas" .Values.ingest.replicas "values" .Values.ingest "schema" false
     "ports" (list (dict "name" "otlp-grpc" "port" 4317) (dict "name" "otlp-http" "port" 4318))
