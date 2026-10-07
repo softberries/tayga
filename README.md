@@ -23,6 +23,10 @@
 
 **Tayga turns OpenTelemetry traces and logs into error stories.** For each failing or slow request it shows the root-cause span, the request path across services, the critical path, a diff against the endpoint's normal baseline, and the logs that matter. It analyses traces as they stream in, so by the time you open it the failing requests are already explained, and repeats of one problem fold into one story group instead of hundreds of traces. It mines your logs into templates and alerts on new, spiking and silent ones. Tayga is written in Rust, reads standard OTLP, stores in ClickHouse, streams through Redpanda, and is self-hosted under the AGPLv3.
 
+<p align="center">
+  <a href="https://softberries.github.io/tayga/#tour"><img src="docs/assets/tour-poster.jpg" width="720" alt="Watch the narrated tour of Tayga, 4 minutes: an injected payment failure becomes an error story, then the service map, log templates and alerts, and the pipeline."></a>
+</p>
+
 ## Why Tayga?
 
 > Tayga, properly spelled *Tajga*, is my hunting dog. Tajga can trace anything, anywhere, in the harshest conditions. I love that dog as much as I love writing software, so the name was obvious. The "y" is for English speakers, who wouldn't read *Tajga* the way it's meant ;)

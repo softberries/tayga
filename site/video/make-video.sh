@@ -56,4 +56,5 @@ if [ -z "${SKIP_RECORD:-}" ]; then
 fi
 
 (cd "$SITE" && node video/assemble.ts)
+(cd "$SITE" && node video/poster.ts)
 ls -l "$SITE/public/media/"

@@ -8,8 +8,9 @@ The tour on the landing page is built from this directory:
 | `segments.ts` | Parses `script.md`; shared paths; finds when a phrase is spoken (cues). |
 | `tts.ts` | ElevenLabs text to speech, one MP3 per segment, with the character alignment. |
 | `record.ts` | Playwright at 1920×1080 with `recordVideo`, one clip per segment, paced by the narration. |
-| `assemble.ts` | ffmpeg: fits each clip to its narration, crossfades, mixes and normalizes the audio, encodes, writes the poster and the captions. |
-| `cards/` | The title, end, architecture and deployment cards (HTML in the Tayga fonts and colours). |
+| `assemble.ts` | ffmpeg: fits each clip to its narration, crossfades, mixes and normalizes the audio, encodes, writes the captions. |
+| `poster.ts` | Renders `cards/poster.html` to the landing page's poster and to `docs/assets/tour-poster.jpg`, the README's poster with a play button drawn in. Runs without the app: `cd site && node video/poster.ts`. |
+| `cards/` | The title, end, architecture and deployment cards, and the poster (HTML in the Tayga fonts and colours). |
 | `make-video.sh` | Runs the three steps. |
 
 Output: `site/public/media/tayga-tour.mp4`, `tayga-tour-poster.jpg` and `tayga-tour.vtt`, which

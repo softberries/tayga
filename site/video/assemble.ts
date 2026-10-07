@@ -10,8 +10,8 @@
  * 3. Everything is joined with crossfades; each narration is placed at its segment's start, the
  *    mix is loudness-normalized to -16 LUFS (two-pass loudnorm), and the result is encoded as
  *    H.264 + AAC with faststart into site/public/media/tayga-tour.mp4.
- * 4. The poster (tayga-tour-poster.jpg) is a frame of the story page, and the captions
- *    (tayga-tour.vtt) are timed from the narration's character alignment.
+ * 4. The captions (tayga-tour.vtt) are timed from the narration's character alignment. The
+ *    poster is rendered separately by poster.ts.
  */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync, statSync } from 'node:fs';
@@ -27,8 +27,6 @@ const END = 6.0;
 /** Size budget for the MP4; the video bitrate is derived from it. */
 const BUDGET_BYTES = 29 * 1000 * 1000;
 const AUDIO_KBPS = 128;
-/** Segment and narration second of the poster frame: the story page with its root cause. */
-const POSTER = { seg: '04', t: 4.0 };
 
 mkdirSync(SEG, { recursive: true });
 mkdirSync(OUT, { recursive: true });
@@ -135,12 +133,8 @@ ff([...finalInputs, '-filter_complex', graph, '-map', '[v]', '-map', '[a]', ...x
 ff([...finalInputs, '-filter_complex', graph, '-map', '[v]', '-map', '[a]', ...x264, '-pass', '2', '-passlogfile', passlog, '-c:a', 'aac', '-b:a', `${AUDIO_KBPS}k`, '-ac', '2', '-ar', '48000', '-movflags', '+faststart', mp4]);
 console.log(`${mp4}: ${(statSync(mp4).size / 1e6).toFixed(1)} MB, ${probeDuration(mp4).toFixed(1)} s`);
 
-// 4a. Poster: a frame of the story page.
-const pk = clips.findIndex((c) => c.id === POSTER.seg);
-const pt = starts[pk] + clips[pk].lead! + POSTER.t;
-ff(['-ss', pt.toFixed(2), '-i', mp4, '-frames:v', '1', '-q:v', '3', `${OUT}tayga-tour-poster.jpg`]);
 
-// 4b. Captions from the alignment: sentence or clause chunks of at most two short lines.
+// 4. Captions from the alignment: sentence or clause chunks of at most two short lines.
 const SHOW: [RegExp, string][] = [
 	[/hello at softberries dot dev/g, 'hello@softberries.dev'],
 	[/two point eight microseconds/g, '2.8 µs'],

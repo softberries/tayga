@@ -39,6 +39,11 @@ const hasCaptions = existsSync(media('tayga-tour.vtt'));
 					{hasCaptions && <track kind="captions" src={href('media/tayga-tour.vtt')} srclang="en" label="English" default />}
 					<a href={href('media/tayga-tour.mp4')}>Download the tour video (MP4)</a>
 				</video>
+				<button type="button" class="tg-video__start" aria-label="Play the narrated tour (4 minutes)" hidden>
+					<span class="tg-video__play tg-video__play--lg" aria-hidden="true">
+						<Icon name="play" size={34} />
+					</span>
+				</button>
 			) : (
 				<div class="tg-video__placeholder">
 					<Image
@@ -63,6 +68,23 @@ const hasCaptions = existsSync(media('tayga-tour.vtt'));
 		}
 	</div>
 </Section>
+
+<script>
+	// A large play button over the poster; the native controls stay for everything else.
+	for (const box of document.querySelectorAll<HTMLElement>('.tg-video')) {
+		const video = box.querySelector('video');
+		const start = box.querySelector<HTMLButtonElement>('.tg-video__start');
+		if (!video || !start) continue;
+		const hide = () => (start.hidden = true);
+		start.hidden = !video.paused || video.currentTime > 0;
+		start.addEventListener('click', () => {
+			hide();
+			void video.play();
+			video.focus();
+		});
+		video.addEventListener('play', hide);
+	}
+</script>
 
 <style>
 	.tg-video {
@@ -113,6 +135,36 @@ const hasCaptions = existsSync(media('tayga-tour.vtt'));
 		color: #fff;
 		padding-inline-start: 0.2rem;
 	}
+	.tg-video__start {
+		position: absolute;
+		inset: 0;
+		display: grid;
+		place-content: center;
+		border: 0;
+		padding: 0;
+		/* The poster leaves its middle free for this button; a light scrim keeps it the first thing read. */
+		background: radial-gradient(closest-side, rgba(8, 13, 26, 0.3), rgba(8, 13, 26, 0.1));
+		color: #e6eefb;
+		font: inherit;
+		cursor: pointer;
+	}
+	.tg-video__play--lg {
+		width: 5.5rem;
+		height: 5.5rem;
+		transition: transform 0.15s ease;
+	}
+	.tg-video__start:hover .tg-video__play--lg,
+	.tg-video__start:focus-visible .tg-video__play--lg {
+		transform: scale(1.06);
+	}
+	.tg-video__start:focus-visible {
+		outline: none;
+	}
+	.tg-video__start:focus-visible .tg-video__play--lg {
+		box-shadow:
+			0 0 0 4px #fff,
+			0 0 0 8px var(--tg-cta-from);
+	}
 	.tg-video__title {
 		margin: 0.6rem 0 0;
 		font-size: clamp(1rem, 0.9rem + 0.6vw, 1.3rem);
@@ -136,6 +188,10 @@ const hasCaptions = existsSync(media('tayga-tour.vtt'));
 		}
 		.tg-video__sub {
 			font-size: 0.82rem;
+		}
+		.tg-video__play--lg {
+			width: 3.5rem;
+			height: 3.5rem;
 		}
 	}
 </style>
