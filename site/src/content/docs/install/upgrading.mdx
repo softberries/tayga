@@ -13,7 +13,7 @@ Every install method upgrades the same way underneath: the ClickHouse schema mig
 Run the installer again with the new version and the same directory:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/softberries/tayga/master/scripts/install.sh | sh -s -- --version 0.2.0 --dir ~/tayga
+curl -fsSL https://raw.githubusercontent.com/softberries/tayga/master/scripts/install.sh | sh -s -- --version <new version> --dir ~/tayga
 ```
 
 It sets `TAYGA_VERSION` in `.env`, replaces `compose.yaml`, keeps your `.env` settings, `notifier.toml` and `otel-collector.yaml` (new copies of those two go next to them as `*.new`, to compare), runs `docker compose up -d`, and waits for health.
@@ -26,7 +26,7 @@ It sets `TAYGA_VERSION` in `.env`, replaces `compose.yaml`, keeps your `.env` se
 1. In the install directory, set the new release in `.env`:
 
    ```sh title=".env"
-   TAYGA_VERSION=0.2.0
+   TAYGA_VERSION=<new version>
    ```
 
 2. Pull and recreate:
@@ -46,7 +46,7 @@ If the new release changes `compose.yaml` itself, take the new file from the rel
 <TabItem label="Helm">
 
 ```sh
-helm upgrade tayga oci://ghcr.io/softberries/charts/tayga --version 0.2.0 \
+helm upgrade tayga oci://ghcr.io/softberries/charts/tayga --version <new version> \
   --namespace tayga --reset-then-reuse-values --wait
 ```
 

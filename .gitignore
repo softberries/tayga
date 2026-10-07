@@ -11,3 +11,7 @@ docs/Product_Strategy.docx
 site/node_modules/
 site/dist/
 site/.astro/
+
+# macOS and local tool output
+.DS_Store
+.playwright-mcp/
