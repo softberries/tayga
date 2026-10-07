@@ -1,0 +1,59 @@
+---
+title: "The data clock"
+description: "Why the logminer judges new templates and silences in log time, and how its clock behaves on restarts, lag and replicas."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The logminer can fall behind: it restarts, Kafka rebalances, or a backlog builds up after an outage. If it judged "is this template new?" against the wall clock, a template that appeared during the gap would be minutes old by the time it was mined and would never count as new. So the logminer keeps a **data clock**, the timestamp of the newest log it has mined, and judges new templates and silences against it.
+
+## How the clock moves
+
+After every detection pass the logminer checks for templates **first seen after the previous pass's data clock minus 60 seconds** (the 60-second overlap catches logs that arrive slightly out of order). Then the watermark moves to the current data clock and is saved to `logminer_state`.
+
+The clock is kept **per partition** of `tayga.logs`, and it holds back while a partition is behind:
+
+- A partition counts as **behind** when unconsumed records are waiting in it and its newest record is more than 60 seconds old.
+- While a partition is behind, the clock stops at that partition's newest mined log, so templates in a lagging partition are not skipped.
+- While the consumer has no partitions (during a rebalance), or the assignment cannot be read, the clock holds at the stored watermark.
+- A log stamped more than one minute in the future does not move the clock, and the clock never runs ahead of the wall clock.
+
+With several replicas each replica has its own clock over its own partitions.
+
+## Restarts and fresh installs
+
+| Situation | Where the clock starts |
+|---|---|
+| Restart | The stored watermark of each assigned partition, clamped to the wall clock. A template that appeared while the logminer was down is announced on the first pass after the restart. |
+| New partition, or first start after the upgrade to per-partition keys | The old global watermark, if there is one. |
+| Fresh install (no hits yet) | The wall clock minus 10 minutes. A replayed backlog does not announce its whole history. |
+| After `tayga-devtools remine` | The newest re-mined log, so the rebuilt templates are not announced as new. |
+
+<Aside type="note" title="Seen live">
+On 2026-10-04 the logminer was stopped at 14:09:06 UTC and a probe template was emitted at the same time; a second probe followed 12 minutes later. Both `new` alerts were written on the first detection pass after the restart, 60 seconds after it.
+</Aside>
+
+## What uses the data clock, and what does not
+
+| Rule | Clock |
+|---|---|
+| `new` alerts | Data clock (log time). |
+| `silence` alerts | Log time: a service's newest hit, counted only up to the data clock. A pipeline outage does not make templates silent. |
+| `spike` alerts | **Wall clock.** The spike windows are the last 5 and 60 minutes before now, so a spike that happened while the logminer was behind is not reported once it catches up. |
+| Alert `last_at` | Wall clock. |
+
+## Watching the lag
+
+`tayga_logminer_data_lag_seconds` is the wall clock minus a replica's data clock at its last detection pass:
+
+- with a partition still behind, it is measured from that replica's slowest lagging partition;
+- with every partition caught up, it follows the later of the replica's own clock and the newest hit in the store, so a quiet, caught-up replica does not show a growing lag;
+- before anything is consumed, it uses the store's newest hit.
+
+The logminer logs a warning when the lag exceeds 10 minutes. The Pipeline page charts it ("Logminer data lag"), and `GET /api/v1/overview` returns `data_lag_secs`: the largest of the replicas' newest samples from the last 300 seconds, so it shows the slowest replica. While the stack keeps up it is around a second (0.98 s on the live demo stack on 2026-10-07).
+
+## Limits
+
+- Partitions lagging by less than 60 seconds count as caught up.
+- The per-partition position and committed-offset paths are tested with fakes, not against a real broker.
+- On an idle system with no logs at all there is nothing to judge, and a caught-up replica follows the store's clock.

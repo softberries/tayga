@@ -12,7 +12,7 @@ Tayga is a streaming pipeline. Telemetry enters through one OTLP endpoint, trave
 
 ## The flow
 
-1. **Ingest.** An OpenTelemetry Collector (or any OTLP sender) exports traces and logs to `tayga-ingest`, over gRPC or HTTP. Ingest publishes one record per trace id to the topic `tayga.signals`, keyed by trace id, so every span of a trace lands on the same partition. It also publishes each log batch to `tayga.logs`, keyed by service, one record per request and service.
+1. **Ingest.** An OpenTelemetry Collector (or any OTLP sender) exports traces and logs to `tayga-ingest`, over gRPC or HTTP. For each export request, ingest publishes one record per trace id to the topic `tayga.signals`, keyed by trace id, so every span of a trace lands on the same partition (a record is split further if it would pass 900,000 bytes; items without a valid trace id are keyed by service). It also publishes each log batch to `tayga.logs`, keyed by service, one record per request and service.
 2. **Store.** `tayga-writer` reads `tayga.signals` and writes the raw spans and logs to ClickHouse.
 3. **Assemble and analyse.** `tayga-assembler` reads the same topic, buffers spans per trace, and closes a trace when it goes quiet. For each closed trace it builds the span tree, writes a trace summary, counts service-to-service calls, and, when the request failed or was unusually slow, writes an error story to ClickHouse and publishes it to `tayga.stories`.
 4. **Mine the logs.** `tayga-logminer` reads `tayga.logs`, mines templates per service with Drain, and every 60 seconds checks for new, spiking and silent templates. Alerts go to ClickHouse and to the topic `tayga.alerts`.
@@ -34,14 +34,14 @@ The web app is a React single-page app built into the `tayga-api` binary, so one
 
 ## Topics
 
-| Topic | Key | Producer | Consumers |
-|---|---|---|---|
-| `tayga.signals` | trace id | ingest | writer, assembler |
-| `tayga.logs` | service | ingest | logminer |
-| `tayga.stories` | | assembler | none in Tayga; for other consumers |
-| `tayga.alerts` | template id | logminer | notifier |
+| Topic | Key | Partitions | Producer | Consumers |
+|---|---|---|---|---|
+| `tayga.signals` | trace id | 12 | ingest | writer, assembler |
+| `tayga.logs` | service | 12 | ingest | logminer |
+| `tayga.stories` | story fingerprint | 3 | assembler | none in Tayga; for other consumers |
+| `tayga.alerts` | template id | 3 | logminer | notifier |
 
-`tayga.signals` and `tayga.logs` are created with 12 partitions. Every log is written to Kafka twice, once per topic; spans are not duplicated. Topics that Tayga creates get a retention of 24 hours by default.
+Partition counts apply when a topic is created; see [Replicas and partitioning](/tayga/concepts/replicas/). Every log is written to Kafka twice, once per topic; spans are not duplicated. Topics that Tayga creates get a retention of 24 hours by default.
 
 ## Closing a trace
 

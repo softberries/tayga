@@ -1,0 +1,66 @@
+---
+title: "Story groups and fingerprints"
+description: "How Tayga folds stories of one underlying problem into one story group."
+---
+
+import RefShot from '../../../components/RefShot.astro';
+
+A failure that hits a hundred requests produces a hundred stories. Tayga groups them by a **fingerprint**, so the Stories page shows one row per problem, with a count and a trend, instead of a hundred traces.
+
+<RefShot
+	name="stories-group-row"
+	alt="A story-group row on the Stories page: kind badge, summary, endpoint, root-cause service, story count and a trend sparkline."
+	caption="One story group on the Stories page."
+/>
+
+## The fingerprint
+
+The fingerprint is a 64-bit xxh3 hash of six parts, each terminated by a zero byte so that no two different lists hash the same text:
+
+| Part | Example |
+|---|---|
+| Story kind | `error` |
+| Endpoint service | `load-generator` |
+| Endpoint name | `user_checkout_single` |
+| Root-cause service | `payment` |
+| Root-cause span name | `charge` |
+| Root-cause message, **masked** | `Payment request failed. Invalid token. demo.user_context.loyalty_level=gold` |
+
+The message is masked before hashing, so request-specific values do not split a group:
+
+| Pattern | Becomes |
+|---|---|
+| UUIDs (`8d65a798-c253-11f1-b093-923aa2a82e3c`) | `<*>` |
+| Hex runs of 8 or more characters, with or without `0x` | `<*>` |
+| Numbers, including decimals (`42`, `3.14`) | `<*>` |
+
+`timeout after 5003 ms on 10.0.4.17` and `timeout after 4980 ms on 10.0.4.21` therefore land in the same group. A slow story's message is always `slow`, so slow stories group by endpoint and root-cause span.
+
+The fingerprint is a `u64`; the API returns it as a decimal string, because JavaScript loses precision above 2⁵³.
+
+## One problem, several groups
+
+The endpoint is part of the fingerprint, so one failing service can form **one group per calling endpoint**. On the live demo stack on 2026-10-07 the `paymentFailure` flag produced two groups with the same summary, `payment charge failed: Payment request failed. Invalid token. …`: one for `load-generator user_checkout_single` and one for `load-generator user_checkout_multi`. The demo's `adFailure` flag likewise forms one `GetAds failed` group per calling endpoint.
+
+This is deliberate: the same root cause hurts different user journeys, and the groups show which ones and how much. Filter the Stories page by root-cause service to see them together.
+
+## What a group shows
+
+| Field | Meaning |
+|---|---|
+| `fingerprint`, `kind`, `summary` | The group key, the kind and the summary of the newest story. |
+| `rc_service`, `rc_span_name` | The root-cause service and span. |
+| `endpoint_service`, `endpoint_name` | The endpoint. |
+| `stories` | Stories in the time window. |
+| `first_seen_ns`, `last_seen_ns` | The first and last story in the window. |
+| `sample_story_id` | The newest story. |
+| `buckets`, `bucket_secs` | The trend: `[bucket_start_unix_s, stories]` pairs, about 120 per window. |
+
+`GET /api/v1/story-groups` returns the 100 groups with the most stories in the window (the `service` filter matches the root-cause service); `GET /api/v1/story-groups/{fingerprint}` returns one group with its example stories. See the [HTTP API](/tayga/reference/api/#get-apiv1story-groups).
+
+Stories are kept 7 days, so a group lives as long as it has stories in that time. There is no separate group table and no state to reset: a group exists while stories with its fingerprint do.
+
+## Related
+
+- [Error stories](/tayga/concepts/error-stories/)
+- [The Stories page](/tayga/guide/stories/)
