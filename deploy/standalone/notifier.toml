@@ -5,7 +5,9 @@
 #
 # No targets by default: the notifier logs "delivery disabled: no targets" and
 # keeps committing tayga.alerts offsets. Webhook URLs are secrets (a Slack
-# incoming-webhook URL is a credential): keep this file private.
+# incoming-webhook URL is a credential): keep this directory private
+# (chmod 700). The notifier runs as uid 10001 and must still read this file,
+# so do not chmod 600 the file itself.
 
 [notifier]
 kinds = ["new", "spike", "silence"]

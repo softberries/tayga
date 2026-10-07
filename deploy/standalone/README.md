@@ -8,7 +8,7 @@ Tayga, ClickHouse and Redpanda on one Docker host, without the OpenTelemetry dem
 | `tayga-api` | Web app and JSON API (`/healthz`, `/metrics`, `/api/v1/...`) | `TAYGA_HTTP_PORT` (8090) |
 | `tayga-writer`, `tayga-assembler`, `tayga-logminer`, `tayga-notifier` | Raw storage, error stories, log templates and alerts, alert delivery | no |
 | `tayga-migrate` | One-shot ClickHouse schema migration; the services above wait for it | no |
-| `clickhouse` | `clickhouse/clickhouse-server:26.8`, volume `clickhouse-data` | no |
+| `clickhouse` | `clickhouse/clickhouse-server:26.8.15.10`, volume `clickhouse-data` | no |
 | `redpanda` | `redpandadata/redpanda:v26.2.3`, one broker in `dev-container` mode, volume `redpanda-data` | no |
 
 Requirements: Docker with the Compose v2 plugin, and disk for ClickHouse (raw spans and logs are kept 3 days). Memory: Redpanda may use up to `REDPANDA_MEMORY` (1 GB by default). With a little test traffic the whole stack used about 1.2 GB (ClickHouse about 950 MB, Redpanda about 220 MB, each Tayga service under 10 MB; measured with `docker stats` on 2026-10-07, Docker Desktop on Apple silicon); real traffic needs more.
@@ -32,9 +32,9 @@ curl -fsSL https://raw.githubusercontent.com/softberries/tayga/master/scripts/in
 | `--bind ADDR` | Address the ports bind to (default `127.0.0.1`) |
 | `--local` | From a checkout: use its `deploy/standalone` and a local image `tayga:local` (built from `docker/Dockerfile` when missing) |
 | `--uninstall` | Remove the containers and network; keep the volumes and the directory |
-| `--purge` | With `--uninstall`: also delete the volumes and the directory |
+| `--purge` | With `--uninstall`: also delete the volumes and the files the installer put in the directory (the directory goes too when nothing else is left in it) |
 
-Re-running the installer is safe: it updates the settings it manages in `.env` (`TAYGA_VERSION`, the ports, the bind address, the project name) and runs `docker compose up -d` again. It copies itself to `<dir>/install.sh`, so `sh ~/tayga/install.sh --uninstall` works later. It replaces `compose.yaml`, but never your edited `notifier.toml` or `otel-collector.yaml` (the new copies go next to them as `*.new`).
+Re-running the installer is safe: it updates the settings it manages in `.env` (`TAYGA_VERSION`, the ports, the bind address, the project name, and `TAYGA_PUBLIC_URL` while it is still a `http://localhost:` URL) and runs `docker compose up -d` again. It verifies the bundle against its published SHA-256 checksum and refuses to install without it. It creates the directory readable by you only, since `.env` and `notifier.toml` hold secrets. It copies itself to `<dir>/install.sh`, so `sh ~/tayga/install.sh --uninstall` works later. It replaces `compose.yaml`, but never your edited `notifier.toml` or `otel-collector.yaml` (the new copies go next to them as `*.new`).
 
 Without the installer:
 
@@ -140,12 +140,16 @@ TAYGA_AUTH_PASSWORD_HASH='$argon2id$v=19$m=19456,t=2,p=1$...'
 TAYGA_AUTH_SESSION_KEY=<output of: openssl rand -base64 32>
 ```
 
-Keep the single quotes around the hash: it contains `$`. The hash is an Argon2id PHC string. Make it from a source checkout with `cargo run -q -p tayga-devtools -- hash-password`, or without Rust with the `argon2` tool from Debian (the API accepts any Argon2id PHC string):
+Keep the single quotes around the hash: it contains `$`. The hash is an Argon2id PHC string. The Tayga image ships `tayga-devtools`, which makes one; it asks for the password twice without echo, or reads the first line of piped input:
 
 ```sh
-printf '%s' 'my password' | docker run --rm -i debian:trixie-slim sh -c \
-  'apt-get update -qq >/dev/null && apt-get install -qq -y argon2 >/dev/null && argon2 "$(head -c 16 /dev/urandom | base64)" -id -m 16 -t 3 -p 1 -e'
+docker compose exec tayga-api tayga-devtools hash-password
+printf '%s' 'my password' | docker compose exec -T tayga-api tayga-devtools hash-password
+# without a running stack:
+docker run --rm -it ghcr.io/softberries/tayga:<version> tayga-devtools hash-password
 ```
+
+Any other Argon2id PHC string works too (from a source checkout: `cargo run -q -p tayga-devtools -- hash-password`).
 
 ## Operations
 
@@ -156,7 +160,17 @@ docker compose restart tayga-notifier     # after editing notifier.toml
 docker compose exec clickhouse clickhouse-client   # SQL on the tayga database
 ```
 
-- **Alert delivery:** add webhook or Slack targets to `notifier.toml` and restart `tayga-notifier`. The file holds secrets (a Slack webhook URL is a credential).
+- **Alert delivery:** add webhook or Slack targets to `notifier.toml` and restart `tayga-notifier`. The file holds secrets (a Slack webhook URL is a credential). Keep the install directory private (`chmod 700`, as the installer creates it) rather than the file: the notifier runs as uid 10001 and must be able to read `notifier.toml`, so on Linux a `chmod 600` on the file stops it from starting.
+- **Re-mining log templates** after a change to the Drain or masking settings (see the documentation's "Re-mining templates" page). `tayga-devtools` is in the image and reads the same settings as the logminer service:
+
+  ```sh
+  docker compose exec tayga-logminer tayga-devtools remine --dry-run   # read-only preview
+  docker compose stop tayga-logminer
+  # wait 3 minutes: a real run refuses while a logminer heartbeat is fresher
+  docker compose run --rm --no-deps tayga-logminer tayga-devtools remine
+  docker compose start tayga-logminer
+  ```
+
 - **Upgrade:** set `TAYGA_VERSION` to the new release (or re-run the installer with `--version`) and run `docker compose up -d`. `tayga-migrate` runs first and the other services wait for it. Reload open browser tabs afterwards.
 - **Retention:** raw spans and logs keep 3 days, trace summaries 2 days, stories, service edges and alerts 7 days (ClickHouse TTLs). Redpanda topics keep 24 h.
-- **Uninstall:** `docker compose down` keeps the volumes; `docker compose down -v` deletes them. The installer's `--uninstall` and `--uninstall --purge` do the same.
+- **Uninstall:** `docker compose down` keeps the volumes; `docker compose down -v` deletes them. The installer's `--uninstall` and `--uninstall --purge` do the same; `--purge` also deletes the installer's files.

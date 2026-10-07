@@ -17,6 +17,12 @@ x-tayga-env: &tayga-env
   TAYGA__KAFKA__BROKERS: redpanda:9092
   TAYGA__CLICKHOUSE__URL: http://clickhouse:8123
 
+# The Tayga containers run as uid 10001, write nothing to disk and need no capabilities.
+x-tayga-hardening: &tayga-hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
 services:
   redpanda:
     image: redpandadata/redpanda:v26.2.3
@@ -40,7 +46,7 @@ services:
       retries: 30
 
   clickhouse:
-    image: clickhouse/clickhouse-server:26.8
+    image: clickhouse/clickhouse-server:26.8.15.10
     environment:
       # Tayga connects as the passwordless `default` user. ClickHouse is not
       # published, so only containers on this compose network reach it.
@@ -60,6 +66,7 @@ services:
 
   # One-shot schema migration; every service that reads or writes ClickHouse waits for it.
   tayga-migrate:
+    <<: *tayga-hardening
     image: *tayga-image
     command: ["tayga-writer", "migrate"]
     environment: *tayga-env
@@ -70,6 +77,7 @@ services:
 
   # OTLP receiver: gRPC on 4317, HTTP on 4318 (/v1/traces, /v1/logs).
   tayga-ingest:
+    <<: *tayga-hardening
     image: *tayga-image
     command: ["tayga-ingest"]
     environment: *tayga-env
@@ -89,6 +97,7 @@ services:
         condition: service_healthy
 
   tayga-writer:
+    <<: *tayga-hardening
     image: *tayga-image
     command: ["tayga-writer"]
     environment: *tayga-env
@@ -100,6 +109,7 @@ services:
         condition: service_completed_successfully
 
   tayga-assembler:
+    <<: *tayga-hardening
     image: *tayga-image
     command: ["tayga-assembler"]
     environment: *tayga-env
@@ -112,6 +122,7 @@ services:
 
   # Scales with LOGMINER_REPLICAS (tayga.logs has 12 partitions; replicas beyond 12 idle).
   tayga-logminer:
+    <<: *tayga-hardening
     image: *tayga-image
     command: ["tayga-logminer"]
     environment:
@@ -131,6 +142,7 @@ services:
   # Delivers log alerts to the webhook and Slack targets in notifier.toml.
   # With no targets it idles and logs "delivery disabled: no targets".
   tayga-notifier:
+    <<: *tayga-hardening
     image: *tayga-image
     command: ["tayga-notifier"]
     environment:
@@ -150,6 +162,7 @@ services:
   # Web app and JSON API on 8090. The recorder scrapes the other services'
   # /metrics by these compose service names (its built-in default targets).
   tayga-api:
+    <<: *tayga-hardening
     image: *tayga-image
     command: ["tayga-api"]
     environment:
