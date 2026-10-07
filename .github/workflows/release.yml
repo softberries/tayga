@@ -18,9 +18,21 @@ env:
   CHART_REPO: oci://ghcr.io/softberries/charts
 
 jobs:
+  # The tag must match the workspace version the binaries are built with.
+  version:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tag matches Cargo.toml
+        run: |
+          cargo="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          echo "tag ${GITHUB_REF_NAME}, workspace version ${cargo}"
+          test "v${cargo}" = "$GITHUB_REF_NAME"
+
   # One native runner per platform (no QEMU); each pushes its image by digest.
   image:
     name: Image (${{ matrix.platform }})
+    needs: version
     strategy:
       fail-fast: true
       matrix:
