@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Tayga tour: architecture</title>
+<link rel="stylesheet" href="base.css" />
+<style>
+	header { position: absolute; left: 110px; top: 70px; }
+	header h1 { margin: 12px 0 0; font-size: 54px; font-weight: 700; letter-spacing: -0.02em; }
+	.frame { position: absolute; left: 600px; top: 250px; width: 1240px; height: 660px; border: 1px solid var(--panel-line); border-radius: 28px; background: rgba(14, 22, 42, 0.55); }
+	.frame .label { position: absolute; left: 28px; top: 22px; display: flex; align-items: center; gap: 14px; font-weight: 700; font-size: 26px; letter-spacing: 0.04em; }
+	.frame .label img { width: 40px; height: 40px; border-radius: 10px; }
+	.box { position: absolute; width: 200px; height: 120px; border: 1.5px solid var(--panel-line); border-radius: 18px; background: var(--panel); padding: 18px 20px; transition: border-color 0.45s, box-shadow 0.45s, transform 0.45s, opacity 0.45s; }
+	.box .t { font-size: 25px; font-weight: 600; }
+	.box .d { margin-top: 8px; font-size: 18px; color: var(--muted); line-height: 1.35; }
+	.box.ext { width: 220px; background: var(--inner); }
+	.on { border-color: var(--accent) !important; box-shadow: 0 0 0 5px rgba(124, 196, 255, 0.16), 0 0 44px rgba(124, 196, 255, 0.35); transform: translateY(-3px); }
+	svg { position: absolute; inset: 0; }
+	svg path { fill: none; stroke: #2e4266; stroke-width: 3; transition: stroke 0.45s; }
+	svg path.on { stroke: var(--accent); stroke-dasharray: 10 8; animation: flow 0.9s linear infinite; box-shadow: none; transform: none; }
+	@keyframes flow { to { stroke-dashoffset: -18; } }
+	.otlp { position: absolute; left: 352px; top: 448px; font-size: 20px; color: var(--muted); text-align: center; width: 230px; transition: color 0.45s; }
+	.otlp.on { color: var(--accent); box-shadow: none; transform: none; }
+	.otlp b { display: block; font-size: 26px; color: var(--ink); }
+	.badge { position: absolute; left: 110px; top: 800px; width: 470px; border: 1.5px solid var(--panel-line); border-radius: 18px; padding: 20px 24px; background: var(--inner); transition: border-color 0.45s, box-shadow 0.45s, transform 0.45s; }
+	.badge .t { font-size: 26px; font-weight: 600; }
+	.badge .d { font-size: 19px; color: var(--muted); margin-top: 6px; }
+	.out { position: absolute; font-size: 18px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="grid-bg"></div>
+<header>
+	<div class="eyebrow">How it fits</div>
+	<h1>OpenTelemetry in, <span class="brand">error stories</span> out</h1>
+</header>
+
+<svg width="1920" height="1080" viewBox="0 0 1920 1080">
+	<path id="p-svc" d="M220 440 V520" />
+	<path id="p-otlp" d="M330 580 H640" />
+	<path id="p-rp" d="M840 580 H880" />
+	<path id="p-w" d="M1080 580 H1100 V380 H1120" />
+	<path id="p-a" d="M1080 580 H1120" />
+	<path id="p-l" d="M1080 580 H1100 V780 H1120" />
+	<path id="p-wc" d="M1320 380 H1350 V580 H1380" />
+	<path id="p-ac" d="M1320 580 H1380" />
+	<path id="p-lc" d="M1320 780 H1350 V580 H1380" />
+	<path id="p-ln" d="M1320 800 H1380" />
+	<path id="p-api" d="M1580 580 H1620" />
+</svg>
+
+<div class="box ext" id="services" style="left:110px; top:320px"><div class="t">Your services</div><div class="d">instrumented with OpenTelemetry</div></div>
+<div class="box ext" id="collector" style="left:110px; top:520px"><div class="t">Collector</div><div class="d">OpenTelemetry Collector</div></div>
+<div class="otlp" id="otlp"><b>OTLP</b>gRPC or HTTP<br />traces and logs</div>
+
+<div class="frame"><div class="label"><img src="/logo.svg" alt="" />TAYGA</div></div>
+<div class="box" id="ingest" style="left:640px; top:520px"><div class="t">ingest</div><div class="d">OTLP receiver</div></div>
+<div class="box" id="redpanda" style="left:880px; top:520px"><div class="t">Redpanda</div><div class="d">Kafka API buffer</div></div>
+<div class="box" id="writer" style="left:1120px; top:320px"><div class="t">writer</div><div class="d">raw spans and logs</div></div>
+<div class="box" id="assembler" style="left:1120px; top:520px"><div class="t">assembler</div><div class="d">traces → stories</div></div>
+<div class="box" id="logminer" style="left:1120px; top:720px"><div class="t">logminer</div><div class="d">templates, alerts</div></div>
+<div class="box" id="clickhouse" style="left:1380px; top:520px"><div class="t">ClickHouse</div><div class="d">storage</div></div>
+<div class="box" id="notifier" style="left:1380px; top:740px"><div class="t">notifier</div><div class="d">Slack, webhooks</div></div>
+<div class="box" id="api" style="left:1620px; top:520px; width:190px"><div class="t">API</div><div class="d">and web app</div></div>
+
+<div class="badge" id="license"><div class="t">Open-source core</div><div class="d">AGPLv3 · self-hosted · no proprietary agent</div></div>
+
+<script>
+	// light('a', 'b') adds the highlight to those boxes and to the arrows that lead into them.
+	const arrows = { collector: ['p-svc'], otlp: ['p-otlp'], ingest: ['p-otlp'], redpanda: ['p-rp'], writer: ['p-w'], assembler: ['p-a'], logminer: ['p-l'], clickhouse: ['p-wc', 'p-ac', 'p-lc'], notifier: ['p-ln'], api: ['p-api'] };
+	window.light = (...ids) => {
+		document.querySelectorAll('.on').forEach((e) => e.classList.remove('on'));
+		for (const id of ids) {
+			document.getElementById(id)?.classList.add('on');
+			for (const a of arrows[id] ?? []) document.getElementById(a)?.classList.add('on');
+		}
+	};
+</script>
+</body>
+</html>
