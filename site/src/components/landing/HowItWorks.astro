@@ -1,0 +1,96 @@
+---
+import Section from './Section.astro';
+import PipelineDiagram from '../PipelineDiagram.astro';
+import { href } from '../../lib/links';
+
+const steps = [
+	{
+		n: '01',
+		title: 'Ingest',
+		body: 'Point an OpenTelemetry Collector at tayga‑ingest over OTLP (gRPC or HTTP). Each trace becomes one record on Redpanda, keyed by trace id; logs also go to a second topic, keyed by service.',
+	},
+	{
+		n: '02',
+		title: 'Assemble and analyse',
+		body: 'The assembler closes a trace after 10 s without new spans, or 60 s at most, builds the span tree, and turns failing and slow requests into stories with root cause, critical path and baseline diff.',
+	},
+	{
+		n: '03',
+		title: 'Explain and alert',
+		body: 'The logminer mines log templates per service and raises new, spike and silence alerts; the notifier delivers them. tayga‑api serves it all from ClickHouse.',
+	},
+];
+---
+
+<Section
+	id="how-it-works"
+	eyebrow="How it works"
+	title="A streaming pipeline, not a query you have to write"
+	lede="Tayga analyses traces as they arrive. By the time you open the app, the failing requests are already stories."
+>
+	<PipelineDiagram />
+
+	<ol class="tg-steps">
+		{
+			steps.map((s) => (
+				<li>
+					<span class="tg-steps__n" aria-hidden="true">{s.n}</span>
+					<h3>{s.title}</h3>
+					<p>{s.body}</p>
+				</li>
+			))
+		}
+	</ol>
+	<p class="tg-more">
+		<a href={href('concepts/architecture/')}>Read the architecture <span aria-hidden="true">→</span></a>
+	</p>
+</Section>
+
+<style>
+	.tg-steps {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+		gap: 1rem;
+		margin: 1.5rem 0 0;
+		padding: 0;
+		list-style: none;
+		counter-reset: none;
+	}
+	.tg-steps li {
+		margin: 0;
+		padding: 1.4rem 1.5rem;
+		border-radius: var(--tg-radius-card);
+		border: 1px solid var(--sl-color-hairline-light);
+		background: color-mix(in srgb, var(--tg-panel) 70%, transparent);
+	}
+	.tg-steps__n {
+		font-family: var(--__sl-font-mono);
+		font-size: 0.8rem;
+		color: var(--sl-color-text-accent);
+	}
+	.tg-steps h3 {
+		margin: 0.35rem 0 0.5rem;
+		font-size: 1.05rem;
+		font-weight: 600;
+		color: var(--sl-color-white);
+	}
+	.tg-steps p {
+		margin: 0;
+		font-size: 0.9rem;
+		line-height: 1.65;
+		color: var(--sl-color-gray-2);
+	}
+	.tg-more {
+		margin: 1.5rem 0 0;
+		text-align: center;
+	}
+	.tg-more a {
+		color: var(--sl-color-text-accent);
+		font-weight: 600;
+		text-decoration: none;
+	}
+	.tg-more a:hover {
+		text-decoration: underline;
+		text-underline-offset: 0.2em;
+	}
+</style>

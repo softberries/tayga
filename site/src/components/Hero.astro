@@ -127,16 +127,7 @@ const isLanding = Astro.locals.starlightRoute.id === '';
 		height: 0.5rem;
 		border-radius: 50%;
 		background: var(--tg-ok);
-		box-shadow: 0 0 0 0 color-mix(in srgb, var(--tg-ok) 55%, transparent);
-		animation: tg-pulse 2s ease-out infinite;
-	}
-	@keyframes tg-pulse {
-		70% {
-			box-shadow: 0 0 0 8px color-mix(in srgb, var(--tg-ok) 0%, transparent);
-		}
-		100% {
-			box-shadow: 0 0 0 0 transparent;
-		}
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--tg-ok) 22%, transparent);
 	}
 	.tg-hero__title {
 		margin: 0;
@@ -330,11 +321,6 @@ const isLanding = Astro.locals.starlightRoute.id === '';
 		}
 		.tg-shot {
 			border-radius: 12px;
-		}
-	}
-	@media (prefers-reduced-motion: reduce) {
-		.tg-eyebrow__dot {
-			animation: none;
 		}
 	}
 </style>

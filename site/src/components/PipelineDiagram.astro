@@ -1,0 +1,277 @@
+---
+/** The Tayga pipeline as a designed SVG: a wide layout, and a stacked one below 56rem. */
+type Kind = 'tayga' | 'ext';
+interface Node {
+	x: number;
+	y: number;
+	w: number;
+	h: number;
+	title: string;
+	sub: string;
+	kind: Kind;
+}
+
+/* Desktop layout (viewBox 1200 × 384). */
+const desk: Node[] = [
+	{ x: 10, y: 158, w: 180, h: 68, title: 'OTel Collector', sub: 'your services', kind: 'ext' },
+	{ x: 240, y: 158, w: 180, h: 68, title: 'tayga-ingest', sub: 'OTLP gRPC + HTTP', kind: 'tayga' },
+	{ x: 730, y: 30, w: 200, h: 68, title: 'tayga-assembler', sub: 'traces → stories', kind: 'tayga' },
+	{ x: 730, y: 158, w: 200, h: 68, title: 'tayga-writer', sub: 'raw spans + logs', kind: 'tayga' },
+	{ x: 730, y: 298, w: 200, h: 68, title: 'tayga-logminer', sub: 'Drain · log alerts', kind: 'tayga' },
+	{ x: 1010, y: 30, w: 180, h: 68, title: 'tayga-api', sub: 'web app + JSON API', kind: 'tayga' },
+	{ x: 1010, y: 158, w: 180, h: 68, title: 'ClickHouse', sub: 'stories · traces', kind: 'ext' },
+	{ x: 1010, y: 298, w: 180, h: 68, title: 'tayga-notifier', sub: 'webhook · Slack', kind: 'tayga' },
+];
+const deskTopics = [
+	{ x: 470, y: 104, w: 200, label: 'tayga.signals', key: 'key = trace_id' },
+	{ x: 470, y: 256, w: 200, label: 'tayga.logs', key: 'key = service' },
+];
+const deskEdges = [
+	'M190 192 H240',
+	'M420 192 C445 192 445 128 470 128',
+	'M420 192 C445 192 445 280 470 280',
+	'M670 128 C700 128 700 64 730 64',
+	'M670 128 C700 128 700 192 730 192',
+	'M670 280 C700 280 700 332 730 332',
+	'M930 72 C970 72 970 182 1010 182',
+	'M930 192 H1010',
+	'M930 324 C970 324 970 202 1010 202',
+	'M930 340 H1010',
+	'M1100 158 V98',
+];
+
+/* Mobile layout (viewBox 340 × 600). */
+const mob: Node[] = [
+	{ x: 70, y: 8, w: 200, h: 56, title: 'OTel Collector', sub: 'your services', kind: 'ext' },
+	{ x: 70, y: 100, w: 200, h: 56, title: 'tayga-ingest', sub: 'OTLP gRPC + HTTP', kind: 'tayga' },
+	{ x: 8, y: 304, w: 104, h: 56, title: 'assembler', sub: 'stories', kind: 'tayga' },
+	{ x: 118, y: 304, w: 104, h: 56, title: 'writer', sub: 'raw data', kind: 'tayga' },
+	{ x: 228, y: 304, w: 104, h: 56, title: 'logminer', sub: 'templates', kind: 'tayga' },
+	{ x: 8, y: 408, w: 214, h: 56, title: 'ClickHouse', sub: 'stories · traces · logs', kind: 'ext' },
+	{ x: 228, y: 408, w: 104, h: 56, title: 'notifier', sub: 'webhook/Slack', kind: 'tayga' },
+	{ x: 8, y: 512, w: 214, h: 56, title: 'tayga-api', sub: 'web app + JSON API', kind: 'tayga' },
+];
+const mobTopics = [
+	{ x: 8, y: 216, w: 214, label: 'tayga.signals', key: 'key = trace_id' },
+	{ x: 228, y: 216, w: 104, label: 'tayga.logs', key: 'key = service' },
+];
+const mobEdges = [
+	'M170 64 V100',
+	'M170 156 V180 C170 196 115 196 115 216',
+	'M170 156 V180 C170 196 280 196 280 216',
+	'M60 264 V304',
+	'M170 264 V304',
+	'M280 264 V304',
+	'M60 360 V408',
+	'M170 360 V408',
+	'M240 360 C240 392 222 400 222 436',
+	'M280 360 V408',
+	'M115 464 V512',
+];
+
+const desc =
+	'An OpenTelemetry Collector sends traces and logs over OTLP to tayga-ingest. Ingest publishes them to the Redpanda topic tayga.signals, keyed by trace id, and also publishes logs to tayga.logs, keyed by service. tayga-assembler reads tayga.signals and turns traces into stories; tayga-writer stores the raw spans and logs; tayga-logminer reads tayga.logs, mines log templates and raises alerts. All three write to ClickHouse. tayga-notifier delivers alerts to webhook and Slack targets, and tayga-api serves the web app and JSON API from ClickHouse.';
+
+---
+
+<figure class="tg-diagram not-content">
+	<div class="tg-diagram__inner">
+	<svg class="tg-diagram__svg tg-diagram__svg--desk" viewBox="0 0 1200 384" role="img" aria-labelledby="pipe-t pipe-d">
+		<title id="pipe-t">The Tayga pipeline</title>
+		<desc id="pipe-d">{desc}</desc>
+		<defs>
+			<marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+				<path d="M0 1 L9 5 L0 9 Z" class="tg-d-arrow" />
+			</marker>
+			<linearGradient id="tg-node-stroke" x1="0" y1="0" x2="1" y2="1">
+				<stop offset="0" stop-color="var(--tg-brand-from)" />
+				<stop offset="1" stop-color="var(--tg-brand-to)" />
+			</linearGradient>
+		</defs>
+		<rect x="452" y="56" width="236" height="272" rx="18" class="tg-d-group" />
+		<text x="470" y="84" class="tg-d-grouplabel">Redpanda · Kafka API</text>
+		{deskEdges.map((d) => <path d={d} class="tg-d-edge" marker-end="url(#arr)" />)}
+		{deskEdges.map((d) => <path d={d} class="tg-d-flow" />)}
+		<text x="970" y="362" text-anchor="middle" class="tg-d-edgelabel">tayga.alerts</text>
+		{
+			deskTopics.map((t) => (
+				<g>
+					<rect x={t.x} y={t.y} width={t.w} height="48" rx="24" class="tg-d-topic" />
+					<text x={t.x + t.w / 2} y={t.y + 21} text-anchor="middle" class="tg-d-topiclabel">{t.label}</text>
+					<text x={t.x + t.w / 2} y={t.y + 37} text-anchor="middle" class="tg-d-sub">{t.key}</text>
+				</g>
+			))
+		}
+		{
+			desk.map((n) => (
+				<g class={`tg-d-node tg-d-node--${n.kind}`}>
+					<rect x={n.x} y={n.y} width={n.w} height={n.h} rx="12" />
+					{n.kind === 'tayga' && <circle cx={n.x + 18} cy={n.y + 26} r="4" class="tg-d-dot" />}
+					<text x={n.x + (n.kind === 'tayga' ? 30 : 16)} y={n.y + 31} class="tg-d-title">{n.title}</text>
+					<text x={n.x + 16} y={n.y + 52} class="tg-d-sub">{n.sub}</text>
+				</g>
+			))
+		}
+	</svg>
+
+	<svg class="tg-diagram__svg tg-diagram__svg--mob" viewBox="0 0 340 576" role="img" aria-labelledby="pipe-tm pipe-dm">
+		<title id="pipe-tm">The Tayga pipeline</title>
+		<desc id="pipe-dm">{desc}</desc>
+		<defs>
+			<marker id="arrm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+				<path d="M0 1 L9 5 L0 9 Z" class="tg-d-arrow" />
+			</marker>
+		</defs>
+		<rect x="2" y="190" width="336" height="84" rx="16" class="tg-d-group" />
+		<text x="14" y="207" class="tg-d-grouplabel">Redpanda</text>
+		{mobEdges.map((d) => <path d={d} class="tg-d-edge" marker-end="url(#arrm)" />)}
+		{mobEdges.map((d) => <path d={d} class="tg-d-flow" />)}
+		{
+			mobTopics.map((t) => (
+				<g>
+					<rect x={t.x} y={t.y} width={t.w} height="48" rx="24" class="tg-d-topic" />
+					<text x={t.x + t.w / 2} y={t.y + 21} text-anchor="middle" class="tg-d-topiclabel tg-d-sm">{t.label}</text>
+					<text x={t.x + t.w / 2} y={t.y + 37} text-anchor="middle" class="tg-d-sub tg-d-xs">{t.key}</text>
+				</g>
+			))
+		}
+		{
+			mob.map((n) => (
+				<g class={`tg-d-node tg-d-node--${n.kind}`}>
+					<rect x={n.x} y={n.y} width={n.w} height={n.h} rx="11" />
+					<text x={n.x + 12} y={n.y + 24} class="tg-d-title tg-d-sm">{n.title}</text>
+					<text x={n.x + 12} y={n.y + 42} class="tg-d-sub tg-d-xs">{n.sub}</text>
+				</g>
+			))
+		}
+	</svg>
+	</div>
+</figure>
+
+<style>
+	.tg-diagram {
+		margin: 0;
+		padding: clamp(1rem, 2.5vw, 1.75rem);
+		border-radius: var(--tg-radius-panel);
+		border: 1px solid var(--sl-color-hairline-light);
+		background:
+			radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--sl-color-gray-4) 22%, transparent) 1px, transparent 0) 0 0 / 22px 22px,
+			var(--tg-panel);
+		box-shadow: var(--tg-shadow-lg);
+	}
+	.tg-diagram__svg {
+		display: block;
+		width: 100%;
+		height: auto;
+		font-family: var(--__sl-font);
+	}
+	.tg-diagram__svg--mob {
+		display: none;
+		max-width: 26rem;
+		margin-inline: auto;
+	}
+	.tg-diagram {
+		container-type: inline-size;
+	}
+	@container (max-width: 52rem) {
+		.tg-diagram__svg--desk {
+			display: none;
+		}
+		.tg-diagram__svg--mob {
+			display: block;
+		}
+	}
+
+	.tg-d-group {
+		fill: color-mix(in srgb, var(--tg-inner) 70%, transparent);
+		stroke: var(--tg-node-line);
+		stroke-dasharray: 5 6;
+		stroke-width: 1;
+		opacity: 0.9;
+	}
+	.tg-d-grouplabel {
+		font-family: var(--__sl-font-mono);
+		font-size: 11px;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		fill: var(--sl-color-gray-3);
+	}
+	.tg-d-edge {
+		fill: none;
+		stroke: var(--tg-edge);
+		stroke-width: 1.6;
+	}
+	.tg-d-flow {
+		fill: none;
+		stroke: var(--sl-color-text-accent);
+		stroke-width: 1.6;
+		stroke-dasharray: 3 19;
+		stroke-linecap: round;
+		opacity: 0.9;
+		animation: tg-dash 1.4s linear infinite;
+	}
+	@keyframes tg-dash {
+		to {
+			stroke-dashoffset: -22;
+		}
+	}
+	.tg-d-arrow {
+		fill: var(--tg-edge);
+	}
+	.tg-d-edgelabel {
+		font-family: var(--__sl-font-mono);
+		font-size: 9.5px;
+		fill: var(--sl-color-gray-3);
+	}
+	.tg-d-topic {
+		fill: var(--tg-node);
+		stroke: var(--tg-node-line);
+		stroke-width: 1;
+	}
+	.tg-d-topiclabel {
+		font-family: var(--__sl-font-mono);
+		font-size: 13.5px;
+		font-weight: 500;
+		fill: var(--sl-color-white);
+	}
+	.tg-d-node rect {
+		fill: var(--tg-panel);
+		stroke: var(--tg-node-line);
+		stroke-width: 1;
+	}
+	.tg-d-node--tayga rect {
+		stroke: url(#tg-node-stroke);
+		stroke-width: 1.5;
+		filter: drop-shadow(0 6px 14px color-mix(in srgb, var(--tg-brand-from) 22%, transparent));
+	}
+	.tg-diagram__svg--mob .tg-d-node--tayga rect {
+		stroke: var(--sl-color-accent);
+	}
+	.tg-d-dot {
+		fill: var(--tg-ok);
+	}
+	.tg-d-title {
+		font-size: 16.5px;
+		font-weight: 600;
+		fill: var(--sl-color-white);
+		letter-spacing: -0.01em;
+	}
+	.tg-d-sub {
+		font-family: var(--__sl-font-mono);
+		font-size: 12.5px;
+		fill: var(--sl-color-gray-3);
+	}
+	.tg-d-sm {
+		font-size: 13.5px;
+	}
+	.tg-d-xs {
+		font-size: 10.5px;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.tg-d-flow {
+			animation: none;
+			display: none;
+		}
+	}
+</style>

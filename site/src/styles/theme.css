@@ -284,6 +284,11 @@ h1#_top:not(.tg-hero__title) {
 	border-inline: 0;
 	border-top: 0;
 }
+.sl-markdown-content :is(th, td):not(:where(.not-content *)),
+.sl-markdown-content :is(th, td):first-child:not(:where(.not-content *)),
+.sl-markdown-content :is(th, td):last-child:not(:where(.not-content *)) {
+	padding: 0.6rem 0.9rem;
+}
 .sl-markdown-content tr:last-child td:not(:where(.not-content *)) {
 	border-bottom: 0;
 }
@@ -335,6 +340,23 @@ h1#_top:not(.tg-hero__title) {
 	border-color: transparent !important;
 	color: #fff !important;
 	box-shadow: var(--tg-shadow-cta);
+}
+
+/* A row of LinkButtons. */
+.tg-button-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.75rem;
+}
+.tg-button-row .sl-link-button {
+	margin: 0;
+}
+.sl-link-button.secondary {
+	border-color: var(--sl-color-hairline-shade) !important;
+}
+:root:not([data-theme='light']) .sl-link-button.secondary {
+	border-color: var(--sl-color-gray-5) !important;
 }
 
 /* Steps markers in brand colours. */

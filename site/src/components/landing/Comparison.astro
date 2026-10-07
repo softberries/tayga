@@ -1,0 +1,169 @@
+---
+import Section from './Section.astro';
+import Icon from './Icon.astro';
+import { href } from '../../lib/links';
+
+const strengths = [
+	{ title: 'Analysis while data streams in', body: 'Stories are built as traces close, not when someone writes a query.' },
+	{ title: 'Deterministic, documented rules', body: 'Root cause, critical path and baselines follow rules you can read. No model in the loop.' },
+	{ title: 'Plain OpenTelemetry in', body: 'Anything that speaks OTLP, directly or through a Collector. No proprietary agent.' },
+	{ title: 'Self-hosted', body: 'Your telemetry stays in your ClickHouse and Redpanda.' },
+];
+const elsewhere = [
+	{ title: 'You need metrics', body: 'Tayga takes traces and logs only. Keep a metrics backend next to it.' },
+	{ title: 'You need full-text log search', body: 'Tayga mines logs into templates and links them to stories; it is not a log search engine.' },
+	{ title: 'You want a managed service', body: 'The open-source edition is self-hosted.' },
+];
+const products = ['Jaeger', 'Grafana Tempo + Loki', 'SigNoz', 'Coroot', 'OpenObserve', 'ClickStack / HyperDX', 'Datadog', 'Dynatrace', 'New Relic'];
+---
+
+<Section
+	id="comparison"
+	eyebrow="Comparison"
+	title="Where Tayga fits, honestly"
+	lede="Tayga is a focused tool: it explains failing and slow requests. Here is what it is built for, and when another tool is the better choice."
+>
+	<div class="tg-compare">
+		<div class="tg-compare__col tg-compare__col--yes">
+			<h3>Choose Tayga for</h3>
+			<ul>
+				{
+					strengths.map((s) => (
+						<li>
+							<span class="tg-compare__mark">
+								<Icon name="check" size={16} />
+							</span>
+							<span>
+								<strong>{s.title}.</strong> {s.body}
+							</span>
+						</li>
+					))
+				}
+			</ul>
+		</div>
+		<div class="tg-compare__col tg-compare__col--no">
+			<h3>Look elsewhere if</h3>
+			<ul>
+				{
+					elsewhere.map((s) => (
+						<li>
+							<span class="tg-compare__mark">
+								<Icon name="minus" size={16} />
+							</span>
+							<span>
+								<strong>{s.title}.</strong> {s.body}
+							</span>
+						</li>
+					))
+				}
+			</ul>
+		</div>
+	</div>
+	<div class="tg-compare__more">
+		<p>The full comparison covers, with a source and access date for every cell:</p>
+		<ul class="tg-chips" aria-label="Products compared">
+			{products.map((p) => <li>{p}</li>)}
+		</ul>
+		<a class="tg-btn tg-btn--secondary" href={href('comparison/')}>
+			Read the comparison
+			<Icon name="arrow" size={16} />
+		</a>
+	</div>
+</Section>
+
+<style>
+	.tg-compare {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+		gap: 1rem;
+	}
+	.tg-compare__col {
+		padding: 1.6rem;
+		border-radius: var(--tg-radius-panel);
+		border: 1px solid var(--sl-color-hairline-light);
+		background: var(--tg-panel);
+		box-shadow: var(--tg-shadow);
+	}
+	.tg-compare__col--yes {
+		border-top: 3px solid var(--tg-ok);
+	}
+	.tg-compare__col--no {
+		border-top: 3px solid var(--sl-color-gray-4);
+	}
+	h3 {
+		margin: 0 0 1rem;
+		font-size: 1.05rem;
+		font-weight: 600;
+		color: var(--sl-color-white);
+	}
+	.tg-compare__col ul {
+		display: grid;
+		gap: 0.85rem;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+	.tg-compare__col li {
+		display: grid;
+		grid-template-columns: auto 1fr;
+		gap: 0.75rem;
+		margin: 0;
+		font-size: 0.9rem;
+		line-height: 1.6;
+		color: var(--sl-color-gray-2);
+	}
+	.tg-compare__col strong {
+		color: var(--sl-color-white);
+		font-weight: 600;
+	}
+	.tg-compare__mark {
+		display: grid;
+		place-items: center;
+		width: 1.6rem;
+		height: 1.6rem;
+		margin-top: 0.05rem;
+		border-radius: 50%;
+	}
+	.tg-compare__col--yes .tg-compare__mark {
+		color: var(--tg-ok);
+		background: var(--tg-ok-soft);
+	}
+	.tg-compare__col--no .tg-compare__mark {
+		color: var(--sl-color-gray-3);
+		background: var(--sl-color-gray-6);
+	}
+	:global(:root[data-theme='light']) .tg-compare__col--no .tg-compare__mark {
+		background: var(--sl-color-gray-7);
+	}
+	.tg-compare__more {
+		display: grid;
+		justify-items: center;
+		gap: 1rem;
+		margin-top: 2rem;
+		text-align: center;
+	}
+	.tg-compare__more p {
+		margin: 0;
+		font-size: 0.9rem;
+		color: var(--sl-color-gray-3);
+	}
+	.tg-chips {
+		display: flex;
+		flex-wrap: wrap;
+		justify-content: center;
+		gap: 0.5rem;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		max-width: 50rem;
+	}
+	.tg-chips li {
+		margin: 0;
+		padding: 0.3rem 0.75rem;
+		border-radius: 999px;
+		border: 1px solid var(--sl-color-hairline-light);
+		background: color-mix(in srgb, var(--tg-panel) 80%, transparent);
+		font-size: 0.8rem;
+		color: var(--sl-color-gray-2);
+	}
+</style>

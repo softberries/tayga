@@ -21,12 +21,14 @@ export default defineConfig({
 	base: '/tayga/',
 	trailingSlash: 'always',
 	outDir: './dist',
+	// Inline the CSS (about 20 kB) so it does not block the first paint with extra requests.
+	build: { inlineStylesheets: 'always' },
 	integrations: [
 		starlight({
 			title: 'Tayga',
 			description:
 				'Tayga turns OpenTelemetry traces and logs into error stories: root cause, request path, critical path, what differs from normal, and the related logs.',
-			logo: { src: './src/assets/logo-mark.png', alt: 'Tayga' },
+			logo: { src: './src/assets/logo-mark-72.webp', alt: 'Tayga' },
 			favicon: '/favicon-32.png',
 			head: [
 				{ tag: 'link', attrs: { rel: 'icon', href: '/tayga/favicon-192.png', type: 'image/png', sizes: '192x192' } },

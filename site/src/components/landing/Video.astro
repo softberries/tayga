@@ -1,0 +1,141 @@
+---
+/**
+ * The narrated tour. When site/public/media/tayga-tour.mp4 exists at build time the real player is
+ * rendered (poster tayga-tour-poster.jpg, captions tayga-tour.vtt when present); until then a
+ * placeholder built from a real screenshot holds the slot at the same 16:9 size.
+ */
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { Image } from 'astro:assets';
+import Section from './Section.astro';
+import Icon from './Icon.astro';
+import { href } from '../../lib/links';
+import storyDark from '../../assets/screens/story-dark.png';
+
+const media = (f: string) => resolve(process.cwd(), 'public/media', f);
+const hasVideo = existsSync(media('tayga-tour.mp4'));
+const hasPoster = existsSync(media('tayga-tour-poster.jpg'));
+const hasCaptions = existsSync(media('tayga-tour.vtt'));
+---
+
+<Section
+	id="tour"
+	eyebrow="Tour"
+	title="See a failure become a story"
+	lede="A narrated walk through the app: an injected failure, the story it produces, the service map, log templates and alerts, and the pipeline."
+>
+	<div class="tg-video">
+		{
+			hasVideo ? (
+				<video
+					controls
+					preload="none"
+					playsinline
+					width="1920"
+					height="1080"
+					poster={hasPoster ? href('media/tayga-tour-poster.jpg') : undefined}
+				>
+					<source src={href('media/tayga-tour.mp4')} type="video/mp4" />
+					{hasCaptions && <track kind="captions" src={href('media/tayga-tour.vtt')} srclang="en" label="English" default />}
+					<a href={href('media/tayga-tour.mp4')}>Download the tour video (MP4)</a>
+				</video>
+			) : (
+				<div class="tg-video__placeholder">
+					<Image
+						src={storyDark}
+						widths={[640, 960, 1440]}
+						sizes="(min-width: 76rem) 70rem, 94vw"
+						alt=""
+						loading="lazy"
+					/>
+					<div class="tg-video__overlay">
+						<span class="tg-video__play" aria-hidden="true">
+							<Icon name="play" size={28} />
+						</span>
+						<p class="tg-video__title">The narrated tour is being recorded</p>
+						<p class="tg-video__sub">
+							Until it lands, the <a href={href('getting-started/otel-demo/')}>demo with the OpenTelemetry demo</a> shows the same
+							flow on your machine.
+						</p>
+					</div>
+				</div>
+			)
+		}
+	</div>
+</Section>
+
+<style>
+	.tg-video {
+		position: relative;
+		aspect-ratio: 16 / 9;
+		border-radius: var(--tg-radius-panel);
+		border: 1px solid var(--sl-color-hairline-light);
+		background: #080d1a;
+		box-shadow: var(--tg-shadow-lg);
+		overflow: hidden;
+	}
+	video,
+	.tg-video__placeholder,
+	.tg-video__placeholder :global(img) {
+		display: block;
+		width: 100%;
+		height: 100%;
+	}
+	.tg-video__placeholder :global(img) {
+		object-fit: cover;
+		object-position: top left;
+		filter: saturate(0.85);
+	}
+	.tg-video__overlay {
+		position: absolute;
+		inset: 0;
+		display: grid;
+		place-content: center;
+		justify-items: center;
+		gap: 0.6rem;
+		padding: 1.5rem;
+		text-align: center;
+		background:
+			radial-gradient(30rem 18rem at 50% 50%, rgba(10, 16, 32, 0.72), rgba(10, 16, 32, 0.5)),
+			linear-gradient(180deg, rgba(10, 16, 32, 0.1), rgba(10, 16, 32, 0.7));
+		color: #e6eefb;
+	}
+	.tg-video__play {
+		display: grid;
+		place-items: center;
+		width: 4.25rem;
+		height: 4.25rem;
+		border-radius: 50%;
+		background: linear-gradient(135deg, var(--tg-cta-from), var(--tg-cta-to));
+		box-shadow:
+			0 0 0 8px rgba(124, 196, 255, 0.12),
+			0 12px 30px rgba(43, 108, 176, 0.5);
+		color: #fff;
+		padding-inline-start: 0.2rem;
+	}
+	.tg-video__title {
+		margin: 0.6rem 0 0;
+		font-size: clamp(1rem, 0.9rem + 0.6vw, 1.3rem);
+		font-weight: 600;
+		color: #f2f6fc;
+	}
+	.tg-video__sub {
+		margin: 0;
+		max-width: 32rem;
+		font-size: 0.9rem;
+		line-height: 1.6;
+		color: #c3cfe2;
+	}
+	.tg-video__sub a {
+		color: #a9d8ff;
+		font-weight: 600;
+	}
+	@media (max-width: 30rem) {
+		.tg-video {
+			aspect-ratio: 4 / 3;
+		}
+		.tg-video__sub {
+			font-size: 0.82rem;
+		}
+	}
+</style>
