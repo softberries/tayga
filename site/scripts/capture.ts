@@ -975,7 +975,7 @@ const scenes: Scene[] = [
 				page: 'traces',
 				route,
 				state: 'the hero story trace',
-				description: 'Trace view: summary stats, the link to its story and the full waterfall; a span's logs open in the span drawer.',
+				description: 'Trace view: summary stats, the link to its story and the full waterfall; a span’s logs open in the span drawer.',
 			});
 			await frag(page, page.locator('[data-variant="panel"]').first(), 'trace-header', theme, {
 				page: 'traces',
