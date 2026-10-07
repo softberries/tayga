@@ -7,7 +7,7 @@ const steps = [
 	{
 		n: '01',
 		title: 'Ingest',
-		body: 'Point an OpenTelemetry Collector at tayga‑ingest over OTLP (gRPC or HTTP). Each trace becomes one record on Redpanda, keyed by trace id; logs also go to a second topic, keyed by service.',
+		body: 'Point an OpenTelemetry Collector at tayga‑ingest over OTLP (gRPC or HTTP). Spans are grouped into one record per trace id per export request on Redpanda, keyed by trace id; logs also go to a second topic, keyed by service.',
 	},
 	{
 		n: '02',

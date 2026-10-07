@@ -1,0 +1,285 @@
+---
+title: "Docker Compose"
+description: "Run Tayga, ClickHouse and Redpanda on one Docker host with the standalone bundle: the installer and its flags, .env settings, authentication, exposing the ports, and sending telemetry."
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+The standalone bundle runs Tayga with ClickHouse and Redpanda on one Docker host, and nothing else: no demo services. Your services, or your OpenTelemetry Collector, send OTLP to it. The bundle lives in the repository under `deploy/standalone/`, and each release attaches it as `tayga-standalone-<version>.tar.gz`.
+
+## What runs
+
+| Service | What it does | Published on the host |
+|---|---|---|
+| `tayga-ingest` | OTLP receiver: gRPC on 4317, HTTP on 4318 (`/v1/traces`, `/v1/logs`) | `TAYGA_OTLP_GRPC_PORT` (4317), `TAYGA_OTLP_HTTP_PORT` (4318) |
+| `tayga-api` | Web app and JSON API (`/healthz`, `/metrics`, `/api/v1/…`) | `TAYGA_HTTP_PORT` (8090) |
+| `tayga-writer`, `tayga-assembler`, `tayga-logminer`, `tayga-notifier` | Raw storage, error stories, log templates and alerts, alert delivery | no |
+| `tayga-migrate` | One-shot ClickHouse schema migration; the services above wait for it | no |
+| `clickhouse` | `clickhouse/clickhouse-server`, volume `clickhouse-data` | no |
+| `redpanda` | `redpandadata/redpanda:v26.2.3`, one broker in `dev-container` mode, volume `redpanda-data` | no |
+
+The Tayga image is `ghcr.io/softberries/tayga`, pinned through `TAYGA_VERSION`. Every Tayga container runs as an unprivileged user (uid 10001).
+
+**Requirements.** Docker with the Compose v2 plugin, and disk for ClickHouse (raw spans and logs are kept 3 days). Redpanda may use up to `REDPANDA_MEMORY` (1 GB by default). With a little test traffic the whole stack used about 1.2 GB of memory: ClickHouse about 950 MB, Redpanda about 220 MB, each Tayga service under 10 MB (`docker stats`, 2026-10-07, Docker Desktop on Apple silicon). Real traffic needs more; see [Retention and disk](/tayga/operations/retention/) for sizing.
+
+## Install with the installer
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/softberries/tayga/master/scripts/install.sh | sh
+```
+
+The installer:
+
+1. checks that Docker and Compose are there and that the ports are free (it stops before creating anything if one is taken);
+2. downloads the bundle of the release you ask for (the latest by default) and verifies it against its published SHA-256 checksum, or, with `--local`, uses your checkout;
+3. writes the settings it manages into `<dir>/.env`, starts the stack, waits up to 300 seconds for `tayga-api` to report healthy, and prints the URLs and a Collector snippet.
+
+### Installer options
+
+Pass options after `sh -s --` when you pipe the script, or directly when you run a copy:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/softberries/tayga/master/scripts/install.sh | sh -s -- --version 0.1.0 --dir ~/tayga
+```
+
+| Option | Meaning |
+|---|---|
+| `--version V` | Release to install (`0.1.0` or `v0.1.0`). Default: the latest release. |
+| `--dir DIR` | Install directory. Default: `$TAYGA_DIR`, else `~/tayga`. |
+| `--project NAME` | Compose project name, default `tayga` (kept in `DIR/.env`). It prefixes the containers, the network (`tayga_default`) and the volumes. |
+| `--ports N` | Adds `N` to every published port: `--ports 10000` gives 18090, 14317 and 14318. |
+| `--bind ADDR` | Address the published ports bind to. Default `127.0.0.1` (this machine only); `0.0.0.0` exposes them on every interface. Read [Exposing the ports](#exposing-the-ports) first. |
+| `--local` | Use this checkout's `deploy/standalone` and a locally built image (`tayga:local`, built from `docker/Dockerfile` if missing) instead of downloading a release. |
+| `--uninstall` | Stop and remove the stack's containers and network. Keeps the data volumes and `DIR`, so a later install picks the data up again. |
+| `--purge` | With `--uninstall`: also delete the data volumes and the files the installer put in `DIR` (`DIR` itself goes when nothing else is left in it). |
+| `-h`, `--help` | Show the help. |
+
+| Environment variable | Meaning |
+|---|---|
+| `TAYGA_DIR` | Default for `--dir`. |
+| `TAYGA_IMAGE` | With `--local`: the image to use (default `tayga:local`). |
+| `TAYGA_DOWNLOAD_BASE` | Base URL of the release downloads, for a mirror. Default `https://github.com/softberries/tayga/releases/download`; the bundle is fetched from `<base>/v<version>/`. |
+
+**Running it again is safe.** It updates the settings it manages in `.env` (`TAYGA_VERSION`, the ports, the bind address, the project name, and `TAYGA_PUBLIC_URL` while it is still a `http://localhost:` URL) and runs `docker compose up -d` again; your data stays. It replaces `compose.yaml`, but never your edited `notifier.toml` or `otel-collector.yaml`: the new copies go next to them as `*.new`. It creates the directory readable by you only, because `.env` and `notifier.toml` hold secrets, and copies itself to `<dir>/install.sh`, so later you can run:
+
+```sh
+sh ~/tayga/install.sh --uninstall
+```
+
+## Install by hand
+
+Without the installer, unpack the bundle (or use `deploy/standalone` in a checkout) and:
+
+<Steps>
+
+1. Create `.env` from the example and set `TAYGA_VERSION` to a release:
+
+   ```sh
+   cp .env.example .env
+   ```
+
+2. Start the stack:
+
+   ```sh
+   docker compose up -d
+   ```
+
+3. Wait until `tayga-api` reads `(healthy)`:
+
+   ```sh
+   docker compose ps
+   ```
+
+</Steps>
+
+To run an image you built yourself, from a checkout:
+
+```sh
+docker build -f docker/Dockerfile -t tayga:local .
+sh scripts/install.sh --local
+```
+
+Open the app at `http://localhost:8090`. It is empty until telemetry arrives.
+
+## Configuration (`.env`)
+
+Everything is set in `.env` next to `compose.yaml`. After a change run `docker compose up -d` (or the installer again), which recreates the containers whose settings changed.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `COMPOSE_PROJECT_NAME` | `tayga` | Compose project name |
+| `TAYGA_VERSION` | `latest` | Image tag of `ghcr.io/softberries/tayga`. Pin a release. |
+| `TAYGA_IMAGE` | unset | A whole image reference that replaces the GHCR image, for example `tayga:local` |
+| `TAYGA_BIND` | `127.0.0.1` | Address the published ports bind to |
+| `TAYGA_HTTP_PORT` | `8090` | Host port of the web app and API |
+| `TAYGA_OTLP_GRPC_PORT`, `TAYGA_OTLP_HTTP_PORT` | `4317`, `4318` | Host ports of the OTLP receivers |
+| `TAYGA_PUBLIC_URL` | `http://localhost:8090` | Base of the links in alert notifications: where people open the app |
+| `LOGMINER_REPLICAS` | `1` | Logminer replicas. `tayga.logs` has 12 partitions; replicas beyond 12 idle. See [Scaling logminer replicas](/tayga/operations/scaling-logminer/). |
+| `LOGMINER_FINGERPRINTER` | `scalar` | Fingerprint cache in front of Drain: `scalar`, `parallel` or `off`. See [Performance tuning](/tayga/operations/performance-tuning/#the-fingerprinter). |
+| `REDPANDA_MEMORY` | `1G` | Redpanda's memory (Seastar `--memory`) |
+| `RUST_LOG` | `info` | Log filter of the Tayga services |
+| `TAYGA_AUTH_ENABLED`, `TAYGA_AUTH_USERNAME`, `TAYGA_AUTH_PASSWORD_HASH`, `TAYGA_AUTH_SESSION_KEY`, `TAYGA_AUTH_SECURE_COOKIE` | off | Login; see [Authentication](#authentication) |
+
+### Any other setting
+
+Every Tayga setting has a `TAYGA__SECTION__KEY` environment variable ([Configuration reference](/tayga/operations/configuration/)). Add the ones you need in a `compose.override.yaml` next to `compose.yaml`; Compose loads it automatically, and the installer never touches it:
+
+```yaml title="compose.override.yaml"
+services:
+  tayga-assembler:
+    environment:
+      TAYGA__ASSEMBLER__GAP_MS: "15000"
+  tayga-api:
+    environment:
+      TAYGA__QUERY_TIMEOUT_SECS: "30"
+```
+
+<Aside type="caution">
+Compose interpolates `$` in its YAML files. A value that contains `$` (a password hash) must be written with `$$` in `compose.override.yaml`; in `.env`, single quotes are enough.
+</Aside>
+
+## Authentication
+
+Off by default: anyone who reaches port 8090 can read every trace and log. One account protects the app and every data route once it is on; details are in [Authentication](/tayga/operations/authentication/).
+
+<Steps>
+
+1. **Make a password hash.** The Tayga image ships `tayga-devtools`, which asks for the password twice without echo (or reads the first line of piped input) and prints an Argon2id hash:
+
+   {/* TODO-verify: needs tayga-devtools in the published image (another agent is adding it) */}
+   ```sh
+   docker compose exec tayga-api tayga-devtools hash-password
+   ```
+
+   Without a running stack, or in a script:
+
+   {/* TODO-verify: needs tayga-devtools in the published image */}
+   ```sh
+   docker run --rm -it ghcr.io/softberries/tayga:0.1.0 tayga-devtools hash-password
+   printf '%s' 'my password' | docker compose exec -T tayga-api tayga-devtools hash-password
+   ```
+
+   The output starts `$argon2id$v=19$m=19456,t=2,p=1$`. Any Argon2id PHC string works.
+
+2. **Make a session key**, so that a restart does not sign everyone out:
+
+   ```sh
+   openssl rand -base64 32
+   ```
+
+3. **Put both in `.env`.** Keep the single quotes around the hash: it contains `$`.
+
+   ```sh title=".env"
+   TAYGA_AUTH_ENABLED=true
+   TAYGA_AUTH_USERNAME=admin
+   TAYGA_AUTH_PASSWORD_HASH='$argon2id$v=19$m=19456,t=2,p=1$...'
+   TAYGA_AUTH_SESSION_KEY=<output of openssl rand -base64 32>
+   ```
+
+4. **Recreate the API:**
+
+   ```sh
+   docker compose up -d tayga-api
+   ```
+
+   The app now shows a sign-in page, and the API answers 401 without a session. Scripts can send HTTP Basic credentials: `curl -u admin:'my password' http://localhost:8090/api/v1/story-groups`.
+
+</Steps>
+
+Behind an HTTPS reverse proxy, also set `TAYGA_AUTH_SECURE_COOKIE=true`.
+
+## Exposing the ports
+
+By default every published port binds to 127.0.0.1, so only this machine reaches Tayga. To reach it from other machines, set `TAYGA_BIND=0.0.0.0` (or one interface's address) in `.env` and run `docker compose up -d`, or install with `--bind 0.0.0.0`. Before you do:
+
+- **Turn on [authentication](#authentication)**, or put an authenticating reverse proxy in front of port 8090.
+- **The OTLP ports accept data from anyone who reaches them**, with no authentication and no TLS. Prefer a Collector on the trusted side that forwards to Tayga, or a firewall that admits only your senders.
+- **Tayga serves plain HTTP.** For HTTPS, terminate TLS in a reverse proxy and set `TAYGA_AUTH_SECURE_COOKIE=true`.
+- **Set `TAYGA_PUBLIC_URL`** to the address people use, so the links in alert notifications work.
+
+ClickHouse and Redpanda are never published. ClickHouse's `default` user has no password (Tayga does not support ClickHouse credentials yet); only containers on the Compose network reach it.
+
+## Sending telemetry
+
+Tayga reads OTLP traces and logs; it ignores metrics.
+
+- **SDKs on the same host:** `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` (HTTP) or `http://localhost:4317` (gRPC).
+- **A container on the same Docker host:** join the network `tayga_default` and send to `tayga-ingest:4317` or `http://tayga-ingest:4318`.
+- **Your own OpenTelemetry Collector:** add the Tayga exporter to its traces and logs pipelines. [Connect your Collector](/tayga/install/collector/) has the snippets.
+
+### The bundled Collector config or your own
+
+The bundle includes `otel-collector.yaml`, a complete Collector config that receives OTLP and forwards traces and logs to Tayga. It is not started by `compose.yaml`; use it in one of two ways:
+
+<Tabs syncKey="collector-choice">
+<TabItem label="Run the sample Collector">
+
+If you have no Collector yet, run the sample next to the stack. It joins the stack's network and receives on 127.0.0.1:5317 (gRPC) and 5318 (HTTP), so your services send to it instead of to Tayga directly:
+
+```sh
+cd ~/tayga
+docker run -d --name tayga-otelcol --network tayga_default \
+  -p 127.0.0.1:5317:4317 -p 127.0.0.1:5318:4318 \
+  -v "$PWD/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro" \
+  otel/opentelemetry-collector-contrib:0.162.0
+```
+
+It batches, compresses, queues in memory and retries for up to 5 minutes, so it rides out a short Tayga restart.
+
+</TabItem>
+<TabItem label="Use your existing Collector">
+
+Copy the `otlp_grpc/tayga` exporter from `otel-collector.yaml` into your Collector's config and append it to the `exporters` of your `traces` and `logs` pipelines, next to the ones you have. Set `endpoint` to the address your Collector reaches Tayga at: `localhost:4317` on the Docker host, or `tayga-ingest:4317` from a container on `tayga_default`.
+
+</TabItem>
+</Tabs>
+
+### A quick test
+
+```sh
+docker run --rm --network tayga_default ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:latest \
+  traces --otlp-endpoint tayga-ingest:4317 --otlp-insecure --traces 20 --child-spans 3 --status-code Error --service checkout
+```
+
+Error stories appear on the Stories page a few seconds after a trace ends (the assembler closes a trace 10 s after its last span). The [Quickstart](/tayga/getting-started/quickstart/#send-your-first-data) has a logs example too.
+
+## Alert delivery
+
+Log alerts show in the app without any setup. To also send them to a webhook or Slack, add targets to `notifier.toml` in the install directory and restart the notifier:
+
+```toml title="notifier.toml"
+[[notifier.targets]]
+name = "ops-slack"
+kind = "slack"        # or "webhook"
+url = "https://hooks.slack.com/services/..."
+```
+
+```sh
+docker compose restart tayga-notifier
+```
+
+A Slack incoming-webhook URL is a credential. Keep the install directory private (`chmod 700`, as the installer creates it) rather than the file: the notifier runs as uid 10001 and must be able to read `notifier.toml`, so a `chmod 600` on the file stops it on Linux. The formats and the retry rules are in [Alerting](/tayga/alerting/notifier/).
+
+## Day-to-day commands
+
+Run these in the install directory:
+
+```sh
+docker compose ps                                   # status; tayga-api and tayga-ingest have healthchecks
+docker compose logs -f tayga-api                    # logs of one service
+docker compose restart tayga-notifier               # after editing notifier.toml
+docker compose exec clickhouse clickhouse-client    # SQL on the tayga database
+```
+
+Re-mining log templates after a Drain or masking change runs `tayga-devtools` in the logminer container; see [Re-mining templates](/tayga/operations/remine/).
+
+**Retention:** raw spans and logs are kept 3 days, trace summaries 2 days, stories, service edges and alerts 7 days (ClickHouse TTLs). Redpanda topics keep 24 hours.
+
+## Next
+
+<CardGrid>
+	<LinkCard title="Connect your Collector" description="Exporter config for gRPC and HTTP." href="/tayga/install/collector/" />
+	<LinkCard title="Upgrading" description="Move to a new release; migrations run first." href="/tayga/install/upgrading/" />
+	<LinkCard title="Uninstalling" description="Remove the stack, with or without its data." href="/tayga/install/uninstalling/" />
+	<LinkCard title="Configuration reference" description="Every setting and its environment variable." href="/tayga/operations/configuration/" />
+</CardGrid>

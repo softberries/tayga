@@ -1,0 +1,88 @@
+---
+title: "Uninstalling"
+description: "Remove Tayga's containers or pods, and, separately, its data: Docker volumes and Kubernetes PersistentVolumeClaims are kept unless you purge them."
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Removing Tayga and removing its data are two separate steps. Every method below keeps the data by default, so a later install picks it up again: **Docker volumes and Kubernetes PersistentVolumeClaims survive an uninstall** until you delete them.
+
+<Tabs syncKey="uninstall-method">
+<TabItem label="Installer">
+
+```sh
+sh ~/tayga/install.sh --uninstall
+```
+
+Stops and removes the containers and the network. The data volumes (`tayga_clickhouse-data`, `tayga_redpanda-data`) and `~/tayga` stay.
+
+To delete the data too:
+
+```sh
+sh ~/tayga/install.sh --uninstall --purge
+```
+
+This deletes the volumes and the files the installer put in the directory; the directory itself goes when nothing else is left in it. Add `--dir` if you installed elsewhere.
+
+</TabItem>
+<TabItem label="Docker Compose">
+
+In the install directory:
+
+```sh
+docker compose down        # removes the containers and network; keeps the volumes
+```
+
+To delete the data too:
+
+```sh
+docker compose down -v     # also deletes the clickhouse-data and redpanda-data volumes
+```
+
+If you started the sample Collector, remove it as well: `docker rm -f tayga-otelcol`.
+
+</TabItem>
+<TabItem label="Helm">
+
+```sh
+helm uninstall tayga --namespace tayga
+```
+
+The bundled ClickHouse and Redpanda StatefulSets' PersistentVolumeClaims are kept, as Kubernetes does for every StatefulSet. To delete the data (the names are for the release `tayga`):
+
+```sh
+kubectl --namespace tayga delete pvc data-tayga-clickhouse-0 data-tayga-redpanda-0
+```
+
+Then remove the namespace if nothing else lives in it, along with any Secrets you created yourself (`tayga-auth`, `tayga-notifier-config`):
+
+```sh
+kubectl delete namespace tayga
+```
+
+</TabItem>
+<TabItem label="Demo stack (make up)">
+
+```sh
+make down
+```
+
+Stops and removes the demo and Tayga containers (and Grafana and Prometheus, if `make up-extras` started them). The volumes stay. Deleting them deletes the demo's data as well as Tayga's; to do it, run the Makefile's Compose command with `down -v`.
+
+</TabItem>
+</Tabs>
+
+<Aside type="danger" title="Purging cannot be undone">
+`--purge`, `docker compose down -v` and deleting the PVCs remove every stored span, log, story, template and alert. There is no recycle bin.
+</Aside>
+
+## External ClickHouse and Kafka
+
+With external backends, uninstalling Tayga leaves its data in them. Tayga created these, and you can drop them when you no longer need them:
+
+- **Kafka topics:** `tayga.signals`, `tayga.logs`, `tayga.stories`, `tayga.alerts` (or the names set in `[kafka]`), and the consumer groups `tayga-writer`, `tayga-assembler`, `tayga-logminer` and `tayga-notifier`.
+- **ClickHouse:** the database `tayga` (or the `database` value), with every table in it:
+
+  ```sql
+  DROP DATABASE tayga;
+  ```
