@@ -590,6 +590,14 @@ async fn argmax_baselines_equal_final_over_duplicates() {
     let s = settings();
     migrate(&s).await.unwrap();
     let store = Store::new(&s);
+    // Keep every version in its own part: a background merge would collapse the duplicates (to
+    // the newest version) before the queries run, and the comparison would prove nothing.
+    store
+        .client()
+        .query("SYSTEM STOP MERGES trace_summaries")
+        .execute()
+        .await
+        .unwrap();
     let two_hours_ago = now_ns() - 2 * 3_600 * 1_000_000_000;
     // 40 single-version traces; t0..t39 with the cart op on even ids.
     let base: Vec<TraceSummaryRow> = (0..40).map(|i| summary_row(i, i % 2 == 0)).collect();
@@ -681,6 +689,12 @@ async fn argmax_baselines_equal_final_over_duplicates() {
             final_baselines(&store, 60, c).await,
         ));
     }
+    // Rows and traces after the comparisons: the duplicates were still unmerged.
+    let unmerged: clickhouse::error::Result<(u64, u64)> = store
+        .client()
+        .query("SELECT count(), uniqExact(trace_id) FROM trace_summaries")
+        .fetch_one()
+        .await;
     // t200: in the window, then a newer version outside it.
     let t200 = |ts: i64, span_count: u32| TraceSummaryRow {
         trace_id: "t200".into(),
@@ -701,6 +715,13 @@ async fn argmax_baselines_equal_final_over_duplicates() {
     );
     drop_db(&s, &store).await;
 
+    // 50 rows of 45 traces: t100 has 3 versions, t101, t102 and t103 have 2 each.
+    let (rows, traces) = unmerged.unwrap();
+    assert!(
+        rows > traces,
+        "duplicates merged: {rows} rows, {traces} traces"
+    );
+    assert_eq!((rows, traces), (50, 45));
     for (i, (argmax, fin)) in runs.into_iter().enumerate() {
         let (argmax, fin) = (argmax.unwrap(), fin.unwrap());
         assert_eq!(argmax, fin, "run {i}");

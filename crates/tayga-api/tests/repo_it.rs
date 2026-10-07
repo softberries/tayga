@@ -2,7 +2,9 @@
 //! inserts its own rows with random ids and `now`-based timestamps, reads them back and drops
 //! the database. Runs on the empty `make it` ClickHouse and against the live stack alike.
 
-use tayga_api::model::{OverviewView, SilenceSetting};
+use std::collections::HashMap;
+
+use tayga_api::model::{OverviewView, SilenceSetting, TraceHitRow, TraceHitView};
 use tayga_api::params::{
     AlertFilter, GroupFilter, SeriesKind, SeriesQuery, TemplateFilter, TraceFilter, Window,
 };
@@ -1856,4 +1858,464 @@ async fn the_map_baseline_is_cached_per_minute_and_the_window_is_not() {
     assert_eq!(cached, Some((2, first)));
     let (_, next) = next.expect("basesvc node");
     assert!(next > first, "{next} > {first}");
+}
+
+/// The trace search before plan 10, copied verbatim: `trace_summaries FINAL`, every filter on
+/// the newest version.
+const FINAL_TRACE_SEARCH: &str = "SELECT trace_id, toUnixTimestamp64Nano(ts) AS ts_ns, endpoint_service, endpoint_name, \
+     duration_ns, is_error, span_count FROM trace_summaries FINAL \
+     WHERE ts >= toDateTime(?) AND ts < toDateTime(?) AND {SERVICE} \
+     AND (? = '' OR endpoint_name = ?) AND duration_ns >= ? AND duration_ns <= ? \
+     AND (? = 0 OR is_error = 1) ORDER BY ts DESC LIMIT ?";
+const FINAL_SERVICE_IS_ENDPOINT: &str = "(? = '' OR endpoint_service = ?)";
+const FINAL_SERVICE_TOUCHED: &str = "trace_id IN (SELECT trace_id FROM spans \
+     WHERE service_name = ? AND start_ts >= toDateTime(?))";
+
+/// `FINAL_TRACE_SEARCH` bound as the pre-plan-10 `traces_search` bound it, as views without
+/// stories (the test inserts none).
+async fn final_traces(
+    store: &Store,
+    f: &TraceFilter,
+) -> clickhouse::error::Result<Vec<TraceHitView>> {
+    let service = f.service.as_deref().unwrap_or_default();
+    let endpoint = f.endpoint.as_deref().unwrap_or_default();
+    let touched = f.touched && !service.is_empty();
+    let sql = FINAL_TRACE_SEARCH.replace(
+        "{SERVICE}",
+        if touched {
+            FINAL_SERVICE_TOUCHED
+        } else {
+            FINAL_SERVICE_IS_ENDPOINT
+        },
+    );
+    let mut q = store
+        .client()
+        .query(&sql)
+        .bind(f.window.start)
+        .bind(f.window.upper());
+    q = if touched {
+        q.bind(service).bind(f.window.start)
+    } else {
+        q.bind(service).bind(service)
+    };
+    let rows: Vec<TraceHitRow> = q
+        .bind(endpoint)
+        .bind(endpoint)
+        .bind(f.min_ns)
+        .bind(f.max_ns)
+        .bind(u8::from(f.errors_only))
+        .bind(f.limit)
+        .fetch_all()
+        .await?;
+    let none = HashMap::new();
+    Ok(rows
+        .into_iter()
+        .map(|r| TraceHitView::from_row(r, &none))
+        .collect())
+}
+
+/// Hits in `ORDER BY ts DESC, trace_id` order. `FINAL`'s order among equal `ts` is unspecified.
+fn tie_sorted(mut v: Vec<TraceHitView>) -> Vec<TraceHitView> {
+    v.sort_by(|a, b| {
+        b.ts_ns
+            .cmp(&a.ts_ns)
+            .then_with(|| a.trace_id.cmp(&b.trace_id))
+    });
+    v
+}
+
+/// One `trace_summaries` version.
+fn version(
+    trace_id: &str,
+    ts: i64,
+    endpoint: (&str, &str),
+    ms: u64,
+    err: bool,
+    span_count: u32,
+) -> TraceSummaryRow {
+    TraceSummaryRow {
+        span_count,
+        ..summary(trace_id, ts, endpoint.0, endpoint.1, ms, err)
+    }
+}
+
+/// The plan 10 trace search (`argMax` over the rows near the window) equals the old
+/// `trace_summaries FINAL` search over deliberate duplicates in separate parts:
+/// - a newer version changing every filtered field (endpoint, duration, error flag);
+/// - newer versions moving a trace into the window and out of it, past either edge;
+/// - version ties: an identical replay, and a later insert with a later `ts`;
+/// - five traces sharing one `ts`, cut by `LIMIT 3`, and other limits;
+/// - versions further apart than the scan slack, the newest (most spans) outside the window: a
+///   long-lived trace whose late 2-span fragment is the window's newest row, and a trace whose
+///   newest version is two hours earlier. The post-lookup drops their in-window rows, and the
+///   extra rows keep `LIMIT 1` full.
+///
+/// For every filter the new result is the old unlimited result, ordered `ts DESC, trace_id`,
+/// cut at the limit; the old limited result has the same `ts` list and only rows of that set.
+/// The documented tie edges (`FINAL` keeps the last insert, the search the newer `ts`) are
+/// asserted last, in both directions.
+#[tokio::test]
+#[ignore = "requires ClickHouse: make it, or TAYGA_IT_CLICKHOUSE against the live stack"]
+async fn argmax_trace_search_equals_final_over_duplicates() {
+    let s = settings();
+    migrate(&s).await.unwrap();
+    let store = Store::new(&s);
+    let r = ChRepo::new(&s);
+    // Keep every version in its own part: a background merge would collapse the duplicates (to
+    // the last insert) before the queries run.
+    store
+        .client()
+        .query("SYSTEM STOP MERGES trace_summaries")
+        .execute()
+        .await
+        .unwrap();
+    let sec = 1_000_000_000_i64;
+    let w = last(3600);
+    // A distinct in-window ts per slot, 10 s apart from 100 s before the end.
+    let at = |slot: i64, ns: i64| (w.end - 100 - slot * 10) * sec + ns;
+    let front = ("frontend", "GET /");
+    let base: Vec<TraceSummaryRow> = (0..30)
+        .map(|i| {
+            let ep = if i % 4 == 0 {
+                ("frontend", "GET /a")
+            } else {
+                front
+            };
+            version(&hex32(), at(i, 0), ep, i as u64 + 1, i % 7 == 0, 2)
+        })
+        .collect();
+    // Five traces with one ts, the newest of the window.
+    let tie_ts = (w.end - 50) * sec;
+    let tied: Vec<TraceSummaryRow> = (0..5)
+        .map(|_| version(&hex32(), tie_ts, front, 3, false, 2))
+        .collect();
+    // a: the newest version changes the endpoint, the duration and the error flag (new root).
+    let a = hex32();
+    let a_v = [
+        version(&a, at(3, 1), ("frontend", "GET /a"), 5, false, 1),
+        version(&a, at(3, 2), ("cart", "Get"), 2_000, true, 3),
+    ];
+    // b: moved into the window across its start; e: across its (live) upper bound.
+    let b = hex32();
+    let b_v = [
+        version(&b, (w.start - 120) * sec, front, 4, false, 1),
+        version(&b, at(12, 3), front, 4, false, 2),
+    ];
+    let e = hex32();
+    let e_v = [
+        version(&e, (w.upper() + 120) * sec, front, 4, false, 1),
+        version(&e, at(25, 5), front, 4, false, 2),
+    ];
+    // c: moved out across the start; d: out across the upper bound (from inside the live slack).
+    let c = hex32();
+    let c_v = [
+        version(&c, at(20, 4), front, 4, false, 1),
+        version(&c, (w.start - 120) * sec, front, 4, false, 2),
+    ];
+    let d = hex32();
+    let d_v = [
+        version(&d, (w.end + 30) * sec, front, 4, false, 1),
+        version(&d, (w.upper() + 60) * sec, front, 4, false, 2),
+    ];
+    // f: an identical replay (a tie). g: a tie whose later insert has the later ts and another
+    // endpoint. h: the newer version clears the error flag.
+    let f = version(&hex32(), at(9, 0), front, 6, true, 2);
+    let g = hex32();
+    let g_v = [
+        version(&g, at(14, 6), ("frontend", "GET /old"), 7, false, 2),
+        version(&g, at(14, 7), ("frontend", "GET /new"), 7, false, 2),
+    ];
+    let h = hex32();
+    let h_v = [
+        version(&h, at(16, 8), front, 8, true, 1),
+        version(&h, at(16, 9), front, 8, false, 2),
+    ];
+    // x1: a long-lived trace (as the payment flagd `EventStream` of a checkout): the 85-span
+    // version 20 minutes before the window, beyond the scan slack, and a 2-span error fragment
+    // assembled later at the window's newest ts. x2: the newest version two hours earlier.
+    let x1 = hex32();
+    let x1_v = [
+        version(
+            &x1,
+            (w.start - 1_200) * sec,
+            ("load-generator", "user_checkout"),
+            900,
+            false,
+            85,
+        ),
+        version(
+            &x1,
+            (w.end - 10) * sec,
+            ("payment", "flagd.evaluation.v2.Service/EventStream"),
+            600_000,
+            true,
+            2,
+        ),
+    ];
+    let x2 = hex32();
+    let x2_v = [
+        version(&x2, at(8, 10), front, 9, false, 1),
+        version(&x2, (w.start - 2 * 3600) * sec, front, 9, false, 2),
+    ];
+    let parts: [Vec<TraceSummaryRow>; 3] = [
+        base.iter()
+            .chain(&tied)
+            .cloned()
+            .chain([
+                a_v[0].clone(),
+                b_v[0].clone(),
+                e_v[0].clone(),
+                c_v[0].clone(),
+                d_v[0].clone(),
+                f.clone(),
+                g_v[0].clone(),
+                h_v[0].clone(),
+                x1_v[0].clone(),
+                x2_v[0].clone(),
+            ])
+            .collect(),
+        vec![
+            a_v[1].clone(),
+            b_v[1].clone(),
+            e_v[1].clone(),
+            c_v[1].clone(),
+            d_v[1].clone(),
+            h_v[1].clone(),
+            x2_v[1].clone(),
+        ],
+        vec![f.clone(), g_v[1].clone(), x1_v[1].clone()],
+    ];
+    for part in &parts {
+        store.insert_rows("trace_summaries", part).await.unwrap();
+    }
+    // a and base[0] touched ledger inside the window.
+    store
+        .insert_spans(&[
+            span(&a, &hex32()[..16], "", "ledger", at(3, 0)),
+            span(&base[0].trace_id, &hex32()[..16], "", "ledger", at(0, 0)),
+        ])
+        .await
+        .unwrap();
+
+    let all = TraceFilter {
+        window: w,
+        service: None,
+        touched: false,
+        endpoint: None,
+        min_ns: 0,
+        max_ns: u64::MAX,
+        errors_only: false,
+        limit: 500,
+    };
+    let svc = |name: &str| Some(name.to_string());
+    let filters: Vec<(&str, TraceFilter)> = vec![
+        ("all", all.clone()),
+        (
+            "limit 1",
+            TraceFilter {
+                limit: 1,
+                ..all.clone()
+            },
+        ),
+        (
+            "limit 3 (cuts the ts tie)",
+            TraceFilter {
+                limit: 3,
+                ..all.clone()
+            },
+        ),
+        (
+            "limit 7",
+            TraceFilter {
+                limit: 7,
+                ..all.clone()
+            },
+        ),
+        (
+            "service frontend",
+            TraceFilter {
+                service: svc("frontend"),
+                ..all.clone()
+            },
+        ),
+        (
+            "service cart",
+            TraceFilter {
+                service: svc("cart"),
+                ..all.clone()
+            },
+        ),
+        (
+            "touched ledger",
+            TraceFilter {
+                service: svc("ledger"),
+                touched: true,
+                ..all.clone()
+            },
+        ),
+        (
+            "endpoint GET /a",
+            TraceFilter {
+                endpoint: svc("GET /a"),
+                ..all.clone()
+            },
+        ),
+        (
+            "endpoint GET /old",
+            TraceFilter {
+                endpoint: svc("GET /old"),
+                ..all.clone()
+            },
+        ),
+        (
+            "endpoint GET /new",
+            TraceFilter {
+                endpoint: svc("GET /new"),
+                ..all.clone()
+            },
+        ),
+        (
+            "min 1 s",
+            TraceFilter {
+                min_ns: 1_000_000_000,
+                ..all.clone()
+            },
+        ),
+        (
+            "max 5 ms",
+            TraceFilter {
+                max_ns: 5_000_000,
+                ..all.clone()
+            },
+        ),
+        (
+            "errors",
+            TraceFilter {
+                errors_only: true,
+                ..all.clone()
+            },
+        ),
+        (
+            "errors, limit 2",
+            TraceFilter {
+                errors_only: true,
+                limit: 2,
+                ..all.clone()
+            },
+        ),
+    ];
+    let mut runs = Vec::new();
+    for (name, f) in &filters {
+        let unlimited = TraceFilter {
+            limit: 500,
+            ..f.clone()
+        };
+        runs.push((
+            *name,
+            f.limit,
+            r.traces_search(f).await,
+            final_traces(&store, f).await,
+            final_traces(&store, &unlimited).await,
+        ));
+    }
+    // The tie edges. k: two 2-span versions, the newer ts inserted first: FINAL keeps the later
+    // insert (the older ts), the search the newer ts. y: two 2-span versions, the later insert
+    // two hours before the window: FINAL keeps it and omits y; the scan never reads it.
+    let (k, y) = (hex32(), hex32());
+    let k_v = [
+        version(&k, at(18, 11), ("frontend", "GET /k-new"), 10, false, 2),
+        version(
+            &k,
+            at(18, 12) - 5 * sec,
+            ("frontend", "GET /k-old"),
+            10,
+            false,
+            2,
+        ),
+    ];
+    let y_v = [
+        version(&y, at(22, 13), front, 11, false, 2),
+        version(&y, (w.start - 2 * 3600) * sec, front, 11, false, 2),
+    ];
+    for v in [&k_v[0], &y_v[0], &k_v[1], &y_v[1]] {
+        store
+            .insert_rows("trace_summaries", std::slice::from_ref(v))
+            .await
+            .unwrap();
+    }
+    let ties = (
+        r.traces_search(&all).await,
+        final_traces(&store, &all).await,
+    );
+    drop_database(&s).await;
+
+    let ids = |v: &[TraceHitView]| v.iter().map(|h| h.trace_id.clone()).collect::<Vec<_>>();
+    for (name, limit, new, old, old_all) in runs {
+        let (new, old, old_all) = (new.unwrap(), old.unwrap(), old_all.unwrap());
+        let expected: Vec<TraceHitView> = tie_sorted(old_all.clone())
+            .into_iter()
+            .take(limit as usize)
+            .collect();
+        assert_eq!(new, expected, "{name}");
+        let ts = |v: &[TraceHitView]| v.iter().map(|h| h.ts_ns).collect::<Vec<_>>();
+        assert_eq!(ts(&old), ts(&new), "{name}: FINAL's ts list");
+        assert!(old.iter().all(|h| old_all.contains(h)), "{name}");
+        match name {
+            "all" => {
+                // 30 base, 5 tied, a, b, e, f, g, h; c and d moved out.
+                assert_eq!(new.len(), 41, "{name}");
+                for t in [&a, &b, &e, &g, &h] {
+                    assert!(ids(&new).contains(t), "{name}: {t}");
+                }
+                assert!(!ids(&new).contains(&c) && !ids(&new).contains(&d), "{name}");
+                let g_hit = new.iter().find(|h| h.trace_id == g).unwrap();
+                assert_eq!(g_hit.endpoint_name, "GET /new", "{name}");
+                assert_eq!(g_hit.ts_ns, at(14, 7), "{name}");
+            }
+            "limit 3 (cuts the ts tie)" => {
+                let mut tied_ids: Vec<String> = tied.iter().map(|t| t.trace_id.clone()).collect();
+                tied_ids.sort();
+                assert_eq!(ids(&new), tied_ids[..3], "{name}");
+            }
+            "service cart" => assert_eq!(ids(&new), [a.as_str()], "{name}"),
+            "touched ledger" => {
+                assert_eq!(ids(&new), [base[0].trace_id.as_str(), a.as_str()], "{name}")
+            }
+            "endpoint GET /old" => assert!(new.is_empty(), "{name}"),
+            "endpoint GET /new" => assert_eq!(ids(&new), [g.as_str()], "{name}"),
+            "min 1 s" => assert_eq!(ids(&new), [a.as_str()], "{name}"),
+            "errors" => {
+                // base 0, 7, 14, 21, 28, a and f; h's newest version cleared its error.
+                assert_eq!(new.len(), 7, "{name}");
+                assert!(!ids(&new).contains(&h), "{name}");
+            }
+            _ => assert!(!new.is_empty(), "{name}"),
+        }
+    }
+    // x1 and x2 (versions further apart than the scan slack) equal FINAL above: the post-lookup
+    // drops their stale in-window rows.
+    // The tie edges, both directions; every other row still equals FINAL.
+    let (new, old) = (ties.0.unwrap(), ties.1.unwrap());
+    let hit = |v: &[TraceHitView], id: &str| v.iter().find(|h| h.trace_id == id).cloned();
+    let k_new = hit(&new, &k).expect("k by its newer ts");
+    let k_old = hit(&old, &k).expect("FINAL: k by its later insert");
+    assert_eq!(
+        (k_new.ts_ns, k_new.endpoint_name.as_str()),
+        (at(18, 11), "GET /k-new")
+    );
+    assert_eq!(
+        (k_old.ts_ns, k_old.endpoint_name.as_str()),
+        (at(18, 12) - 5 * sec, "GET /k-old")
+    );
+    assert!(
+        hit(&old, &y).is_none(),
+        "FINAL keeps y's version outside the window"
+    );
+    assert_eq!(hit(&new, &y).map(|h| h.ts_ns), Some(at(22, 13)));
+    let others = |v: Vec<TraceHitView>| {
+        v.into_iter()
+            .filter(|h| h.trace_id != k && h.trace_id != y)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(others(new), others(tie_sorted(old)));
 }

@@ -240,18 +240,97 @@ const STORY_SEARCH_SECS: u32 = 7 * 24 * 3600;
 const DATA_LAG_FRESH_SECS: u32 = 300;
 const DATA_LAG_METRIC: &str = "tayga_logminer_data_lag_seconds";
 
-/// Trace search over `trace_summaries` in the window; `{SERVICE}` is the service clause.
-const TRACE_SEARCH: &str = "SELECT trace_id, toUnixTimestamp64Nano(ts) AS ts_ns, endpoint_service, endpoint_name, \
-     duration_ns, is_error, span_count FROM trace_summaries FINAL \
-     WHERE ts >= toDateTime(?) AND ts < toDateTime(?) AND {SERVICE} \
+/// Seconds the trace search scans past each window edge, so every version of a trace whose
+/// versions lie at most this far apart is read and deduplicated together (see `TRACE_SEARCH`).
+/// A re-assembly moves `ts` to another span's start of the same trace, so the spread of a
+/// trace's span start times bounds how far apart its versions lie. Most traces spread well under
+/// this, but not all (see `TRACE_SEARCH`).
+const TRACE_VERSION_SLACK_SECS: i64 = 600;
+
+/// Rows the trace search fetches beyond `limit`, so that versions the post-lookup drops do not
+/// shorten the page. A drop needs a trace whose versions lie more than
+/// `TRACE_VERSION_SLACK_SECS` apart: on the live stack (2026-10-07, one hour of spans) 1 trace
+/// spread its span starts over more than 600 s (13 over more than 60 s). Fifty covers far more than that, and the extra rows
+/// cost little (the scan groups the whole window either way; the post-lookup reads at most
+/// `limit + 50` ids by the primary key).
+const TRACE_SEARCH_EXTRA_ROWS: u32 = 50;
+
+/// Trace search over the newest version of every trace in the window (plan 10). `{SCAN}` is the
+/// service clause that holds for every version of a trace (the touched-service set, or `1`),
+/// `{KEEP}` the one that depends on the version (the endpoint service, or `1`).
+///
+/// It reads the rows within `TRACE_VERSION_SLACK_SECS` of the window instead of
+/// `trace_summaries FINAL`, which read the whole table (`ORDER BY trace_id`, so the `ts` filter
+/// pruned nothing; 4.5 M rows and 237 MiB per default request). Those rows are deduplicated per
+/// trace by `argMax(…, (span_count, ts))`: the `ReplacingMergeTree` version, then the newer `ts`.
+/// The filters a version can change (migration 0003: a re-assembly can pick another root, which
+/// changes `ts`, the endpoint, the duration and the error flag) run after the dedup, on the
+/// newest version, as `FINAL` did; only the touched-service set, stable per trace, runs before it.
+///
+/// A long-lived trace can have versions further apart than the scan reaches. Live example: the
+/// checkout trace `ec70b40f…` has an 85-span version at 09:08:36 and a 2-span payment flagd
+/// `EventStream` error fragment of the same trace at 09:28:46 (2026-10-07), assembled after the
+/// checkout version closed. A window around 09:28 scans only the fragment. `traces_search` therefore fetches `TRACE_SEARCH_EXTRA_ROWS` more
+/// rows, looks up each returned trace's highest `span_count` over all its versions (by the
+/// primary key), drops every row below it and cuts the rest to `limit`. That restores `FINAL`'s
+/// result except at these edges:
+/// - `span_count` ties between different versions. `FINAL` keeps the last inserted, this the
+///   newer `ts`, and any one of rows equal in both (replays of the same trace, so equal). Both
+///   directions differ: a later insert with an older `ts` is `FINAL`'s pick but not this one;
+///   and a tied version outside the scan is never seen, so the version in the window is
+///   returned even when `FINAL` picked the outside one and omitted the trace. Both last only
+///   until the versions' parts merge: a merge keeps the last insert, as `FINAL` does;
+/// - more than `TRACE_SEARCH_EXTRA_ROWS` dropped rows in one page leave it short: rows `FINAL`
+///   would have returned further down are not fetched;
+/// - rows with equal `ts` are ordered by `trace_id`; `FINAL`'s order among them was unspecified,
+///   so a `LIMIT` that cuts such a tie may now keep another, equally valid, subset.
+const TRACE_SEARCH: &str = "SELECT trace_id, toUnixTimestamp64Nano(ts) AS ts_ns, endpoint_service, \
+     endpoint_name, duration_ns, is_error, span_count \
+     FROM (SELECT trace_id, tupleElement(v, 1) AS ts, tupleElement(v, 2) AS endpoint_service, \
+     tupleElement(v, 3) AS endpoint_name, tupleElement(v, 4) AS duration_ns, \
+     tupleElement(v, 5) AS is_error, tupleElement(v, 6) AS span_count \
+     FROM (SELECT trace_id, argMax((ts, endpoint_service, endpoint_name, duration_ns, is_error, \
+     span_count), (span_count, ts)) AS v FROM trace_summaries \
+     WHERE ts >= toDateTime(?) AND ts < toDateTime(?) AND {SCAN} GROUP BY trace_id)) \
+     WHERE ts >= toDateTime(?) AND ts < toDateTime(?) AND {KEEP} \
      AND (? = '' OR endpoint_name = ?) AND duration_ns >= ? AND duration_ns <= ? \
-     AND (? = 0 OR is_error = 1) ORDER BY ts DESC LIMIT ?";
+     AND (? = 0 OR is_error = 1) ORDER BY ts DESC, trace_id LIMIT ?";
 /// The trace's endpoint service matches.
 const SERVICE_IS_ENDPOINT: &str = "(? = '' OR endpoint_service = ?)";
 /// The trace has a span of the service since the window's start. No upper bound: a trace that
 /// starts inside the window may reach the service after its end.
 const SERVICE_TOUCHED: &str = "trace_id IN (SELECT trace_id FROM spans \
      WHERE service_name = ? AND start_ts >= toDateTime(?))";
+
+/// `TRACE_SEARCH` with its service clauses: the touched-service set before the dedup, or the
+/// endpoint service after it. Bound parameters, in order: scan start and end, the touched
+/// service and window start (touched only), window start and upper bound, the endpoint service
+/// twice (not touched), the endpoint twice, min and max duration, errors only, limit.
+fn trace_search_sql(touched: bool) -> String {
+    let (scan, keep) = if touched {
+        (SERVICE_TOUCHED, "1")
+    } else {
+        ("1", SERVICE_IS_ENDPOINT)
+    };
+    TRACE_SEARCH.replace("{SCAN}", scan).replace("{KEEP}", keep)
+}
+
+/// The rows whose `span_count` is their trace's highest (`newest`), in order, at most `limit`.
+/// A row of a trace missing from `newest` is kept.
+fn newest_versions(
+    rows: Vec<TraceHitRow>,
+    newest: &HashMap<String, u32>,
+    limit: u32,
+) -> Vec<TraceHitRow> {
+    rows.into_iter()
+        .filter(|r| {
+            newest
+                .get(&r.trace_id)
+                .is_none_or(|&max| r.span_count >= max)
+        })
+        .take(limit as usize)
+        .collect()
+}
 
 impl ChRepo {
     pub fn new(s: &ClickHouseSettings) -> Self {
@@ -383,6 +462,32 @@ impl ChRepo {
     }
 
     /// The stories among `trace_ids` (story_id equals trace_id), mapped to their kind.
+    /// Each trace's highest `span_count` over all its `trace_summaries` versions, read by the
+    /// primary key (`ORDER BY trace_id`).
+    async fn trace_span_counts<'a>(
+        &self,
+        trace_ids: impl Iterator<Item = &'a str>,
+    ) -> anyhow::Result<HashMap<String, u32>> {
+        let mut traces: Vec<&str> = trace_ids.collect();
+        traces.sort_unstable();
+        traces.dedup();
+        if traces.is_empty() {
+            return Ok(HashMap::new());
+        }
+        Ok(self
+            .client
+            .query(
+                "SELECT trace_id, max(span_count) AS span_count FROM trace_summaries \
+                 WHERE trace_id IN ? GROUP BY trace_id",
+            )
+            .bind(&traces)
+            .fetch_all::<TraceVersionRow>()
+            .await?
+            .into_iter()
+            .map(|r| (r.trace_id, r.span_count))
+            .collect())
+    }
+
     async fn story_kinds_among<'a>(
         &self,
         trace_ids: impl Iterator<Item = &'a str>,
@@ -895,29 +1000,31 @@ impl Repo for ChRepo {
         let service = f.service.as_deref().unwrap_or_default();
         let endpoint = f.endpoint.as_deref().unwrap_or_default();
         let touched = f.touched && !service.is_empty();
-        let sql = TRACE_SEARCH.replace(
-            "{SERVICE}",
-            if touched {
-                SERVICE_TOUCHED
-            } else {
-                SERVICE_IS_ENDPOINT
-            },
-        );
-        let mut q = bind_rows(self.client.query(&sql), f.window);
-        q = if touched {
-            q.bind(service).bind(f.window.start)
-        } else {
-            q.bind(service).bind(service)
-        };
+        let mut q = self
+            .client
+            .query(&trace_search_sql(touched))
+            .bind(f.window.start - TRACE_VERSION_SLACK_SECS)
+            .bind(f.window.upper() + TRACE_VERSION_SLACK_SECS);
+        if touched {
+            q = q.bind(service).bind(f.window.start);
+        }
+        q = bind_rows(q, f.window);
+        if !touched {
+            q = q.bind(service).bind(service);
+        }
         let rows: Vec<TraceHitRow> = q
             .bind(endpoint)
             .bind(endpoint)
             .bind(f.min_ns)
             .bind(f.max_ns)
             .bind(u8::from(f.errors_only))
-            .bind(f.limit)
+            .bind(f.limit.saturating_add(TRACE_SEARCH_EXTRA_ROWS))
             .fetch_all()
             .await?;
+        let newest = self
+            .trace_span_counts(rows.iter().map(|r| r.trace_id.as_str()))
+            .await?;
+        let rows = newest_versions(rows, &newest, f.limit);
         let stories = self
             .story_kinds_among(rows.iter().map(|r| r.trace_id.as_str()))
             .await?;
@@ -1200,6 +1307,48 @@ mod tests {
             assert_eq!(slot_end(&cache), Some(END + 60));
             cache.get(END + 60, loader(&loads, END + 60)).await.unwrap();
             assert_eq!(loads.load(Ordering::SeqCst), 3);
+        }
+    }
+
+    #[test]
+    fn newest_versions_drop_stale_rows_keep_order_and_cut_to_the_limit() {
+        let row = |id: &str, span_count: u32| TraceHitRow {
+            trace_id: id.into(),
+            ts_ns: 0,
+            endpoint_service: String::new(),
+            endpoint_name: String::new(),
+            duration_ns: 0,
+            is_error: 0,
+            span_count,
+        };
+        let rows = vec![
+            row("a", 2),
+            row("b", 5),
+            row("c", 3),
+            row("d", 1),
+            row("e", 4),
+        ];
+        let newest = HashMap::from([
+            ("a".to_string(), 85),
+            ("b".to_string(), 5),
+            ("c".to_string(), 3),
+            ("e".to_string(), 4),
+        ]);
+        let ids = |v: Vec<TraceHitRow>| v.into_iter().map(|r| r.trace_id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(newest_versions(rows.clone(), &newest, 10)),
+            ["b", "c", "d", "e"]
+        );
+        assert_eq!(ids(newest_versions(rows, &newest, 2)), ["b", "c"]);
+    }
+
+    #[test]
+    fn trace_search_reads_no_final_and_binds_twelve_values() {
+        for touched in [false, true] {
+            let sql = trace_search_sql(touched);
+            assert!(!sql.contains("FINAL") && !sql.contains('{'), "{sql}");
+            assert_eq!(sql.matches('?').count(), 12, "{sql}");
+            assert_eq!(sql.contains("FROM spans"), touched, "{sql}");
         }
     }
 

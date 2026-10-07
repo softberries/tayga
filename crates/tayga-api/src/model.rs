@@ -749,6 +749,14 @@ pub struct NodeWindowRow {
     pub p99_ns: f64,
 }
 
+/// A trace's highest `span_count` over all its `trace_summaries` versions (the trace search's
+/// post-lookup).
+#[derive(Debug, Clone, PartialEq, clickhouse::Row, Deserialize)]
+pub struct TraceVersionRow {
+    pub trace_id: String,
+    pub span_count: u32,
+}
+
 /// A service's p99 over the health baseline (`params::HEALTH_BASELINE_SECS`).
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
 pub struct BaselineRow {

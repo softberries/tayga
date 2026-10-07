@@ -257,7 +257,82 @@ The integration test `argmax_baselines_equal_final_over_duplicates` (`crates/tay
 - a newer version that moves a trace into the window;
 - slow stories and caps.
 
-It also pins the documented difference: a newer version that moves a trace out of the window. `FINAL` drops that trace; the `argMax` dedup counts its in-window version.
+Since plan 10 it stops merges on its own `trace_summaries` first, and asserts that the duplicates were still unmerged when it compared (50 rows of 45 traces). Without that, a background merge could collapse them before the queries ran, and the comparison would prove nothing. The `argMin` mutation of `baseline_with` fails it. It also pins the documented difference: a newer version that moves a trace out of the window. `FINAL` drops that trace; the `argMax` dedup counts its in-window version.
+
+## Plan 10: trace search
+
+The trace search (`TRACE_SEARCH` in `crates/tayga-api/src/repo.rs`, `GET /api/v1/traces/search`) read `trace_summaries FINAL`. That read the whole table on every request: the table is `ORDER BY trace_id`, so the `ts` filter pruned nothing. Since `1681aee` the search works in steps:
+1. It reads only the rows within 600 s (`TRACE_VERSION_SLACK_SECS`) of the window.
+2. It deduplicates them with `argMax(…, (span_count, ts)) GROUP BY trace_id`. The touched-service filter is the same for every version, so it runs before this step.
+3. It applies the filters a version can change (window, endpoint, duration, error flag) to the newest version.
+4. It orders by `ts DESC, trace_id` and fetches `limit + 50` rows.
+
+**The post-lookup.** A long-lived trace can have versions further apart than 600 s. Live example: the checkout trace `ec70b40f…` has an 85-span version at 09:08:36 and a 2-span payment flagd `EventStream` error fragment of the same trace at 09:28:46 UTC on 2026-10-07. A window around 09:28 scans only the fragment, so the first version of the rewrite returned it as a payment error trace.
+
+In the hour to about 10:00 UTC (review figures), span start times within one trace spread over more than 60 s for 13 traces and over more than 600 s for 1, at most 1,815 s.
+
+The fix round adds a post-lookup: `SELECT trace_id, max(span_count) … WHERE trace_id IN ? GROUP BY trace_id` over the returned ids, by the primary key. Every row below its trace's maximum is dropped, and the rest is cut to `limit`. This restores `FINAL`'s result except on `span_count` ties between different versions, which differ in both directions:
+- `FINAL` keeps the last insert. The search keeps the newer `ts`, so a later insert with an older `ts` is `FINAL`'s pick but not the search's.
+- A tied version outside the scan is never seen. The search then returns the in-window version where `FINAL` picked the outside one and omitted the trace.
+
+Both last only until the parts merge. A page with more than 50 dropped rows comes back short. Rows with equal `ts` are ordered by `trace_id`; `FINAL` left that order unspecified. The constant's doc comment has the details.
+
+Sources, compared only within one source:
+- **live 10-06**: spec §2.7, the `system.query_log` hour of 2026-10-06 (old code, real UI use);
+- **isolated**: the old and the new SQL run back to back on the live `tayga` database, with `readonly=2`, `use_query_cache=0` and 3 runs each, read from `system.query_log`. The window was the default `1h` request: `[end - 3600, end + 60)` with `end` fixed 5 minutes back, so ingest could not move it. CPU is `ProfileEvents['OSCPUVirtualTimeMicroseconds']`, as the median (min to max) of 3 runs;
+- **deployed**: `GET /api/v1/traces/search` requests after `make up`, read from `system.query_log`.
+
+**Fix round, with the post-lookup** (isolated, 2026-10-07 10:16:53 UTC, window end 10:11:53, `use_query_condition_cache=0`). The search with the post-lookup is two queries: the main query (`limit + 50` rows) and the post-lookup.
+
+| Request | CPU ms, old | CPU ms, new: main + post-lookup | Rows read, old / new | Bytes read, old / new (main + post-lookup) | Result rows |
+|---|---|---|---|---|---|
+| default (`1h`, limit 100) | 477 (443–604) | 93 + 53 = **146** | 4.80 M / 0.34 + 2.52 M | 251.0 / 18.7 + 84.3 = **103.0 MiB (2.4×)** | 100, same set |
+| `service=frontend-web` | 466 | 95 + 50 | 4.80 M / 0.34 + 2.62 M | 255.5 / 18.7 + 87.4 MiB | 100, same set |
+| `service=cart&touched=1` | 432 | 28 + 50 | 4.84 M / 0.38 + 2.55 M | 252.3 / 16.7 + 85.1 MiB | 100, identical |
+| `endpoint=GET /api/cart` | 460 | 92 + 53 | 4.80 M / 0.34 + 2.56 M | 255.6 / 18.7 + 85.4 MiB | 100, identical |
+| `min_ms=1000` | 505 | 92 + 54 | 4.80 M / 0.34 + 2.49 M | 287.4 / 18.7 + 83.3 MiB | 100, identical |
+| `max_ms=5` | 479 | 95 + 54 | 4.80 M / 0.34 + 2.59 M | 287.4 / 18.7 + 86.5 MiB | 100, identical |
+| `errors=1` | 434 | 90 + 15 | 4.85 M / 0.34 + 0.62 M | 251.5 / 18.7 + 21.0 MiB | 15, identical |
+| `limit=500` | 422 | 95 + 76 | 4.80 M / 0.34 + 3.64 M | 251.0 / 18.7 + 121.5 MiB | 500, same set |
+
+- **The post-lookup is the larger part of the cost.** Each id reads about one 8,192-row granule of `trace_id` per part, and the table had 12 parts with 499 marks. 100 ids read 276 marks (73.6 MiB) and 550 ids read 450 (121.1 MiB): most of the `trace_id` column.
+- **The main query alone reads 13.4× less than `FINAL`** (18.7 against 251.0 MiB). With the post-lookup, the default request reads 2.4× less (103.0 MiB) and uses 3.3× less CPU (146 against 477 ms). **The 4× bytes target is missed: 2.4× with the post-lookup.** The controller accepted this on 2026-10-07: correctness comes first. The options to close the gap are an open idea in `docs/superpowers/followups.md`.
+- **The query condition cache.** ClickHouse's query condition cache, on by default, makes a repeated post-lookup with the same ids read about 700 rows (3 ms). A search whose ids change, as they do while traces arrive, does not get that benefit. The table above has the cache off.
+- **Results.** Every request returned the same rows as `FINAL`. Three came back in another order: the default, `service=frontend-web` and `limit=500`. In each case only rows with an equal `ts` swapped places. The `ts` lists are identical, and so are the results once ties are sorted by `trace_id`. The post-lookup dropped 0 rows in these windows.
+- **The `ec70b40f` check** (isolated at 10:15:44 UTC, window 09:20 to 09:40 UTC, `service=payment`, limit 500). `FINAL` returned 0 rows. The main query returned 1 row: the fragment, which the first version of the rewrite showed. The post-lookup dropped it, so the search returned 0 rows. The same request against the deployed API (`since=20m&until=2026-10-07T09:40:00Z`) returned `[]`.
+- **Deployed** (10:15:51 UTC). Three default requests ran the main query (341,981 rows, 18.6 MiB, 90 to 100 CPU ms) and the post-lookup, both with `max_execution_time` 15. The first post-lookup read 2.62 M rows and 87.4 MiB in 55 CPU ms. The next two repeated the same ids and read 555 rows (query condition cache).
+
+**First version, without the post-lookup** (`1681aee`, isolated, 09:48 UTC, window end 09:43:28, query condition cache on).
+
+| Request | CPU ms, old | CPU ms, new | Rows read, old / new | Bytes read, old / new | Result rows |
+|---|---|---|---|---|---|
+| default (`1h`, limit 100) | 423 (392–464) | 72 (70–77) | 4.61 M / 0.30 M | 239.4 / 16.5 MiB (14.5×) | 100, same set |
+| `service=frontend-web` | 404 | 70 | 4.61 M / 0.30 M | 243.7 / 16.5 MiB | 100, same set |
+| `service=cart&touched=1` | 395 | 28 | 4.65 M / 0.34 M | 240.6 / 17.7 MiB | 100, identical |
+| `endpoint=GET /api/cart` | 408 | 74 | 4.61 M / 0.30 M | 243.7 / 16.5 MiB | 100, identical |
+| `min_ms=1000` | 431 | 76 | 4.61 M / 0.30 M | 273.7 / 16.5 MiB | 100, identical |
+| `max_ms=5` | 428 | 75 | 4.61 M / 0.30 M | 273.7 / 16.5 MiB | 100, identical |
+| `errors=1` | 406 | 71 | 4.65 M / 0.30 M | 239.5 / 16.5 MiB | 17, identical |
+| `limit=500` | 390 | 75 | 4.61 M / 0.30 M | 239.4 / 16.5 MiB | 500, same set |
+
+- **Before the change** (isolated, 09:26:48 UTC, old SQL only, window ending 09:21:48): the default request took 400 CPU ms (381–488), 4.53 M rows and 236.5 MiB. A draft of the new SQL, with the slack written inline instead of bound, ran on the same window at 09:26:56 (`log_comment` `plan10:try1:default:new`). It returned the same 100 rows from 0.27 M rows and 14.7 MiB.
+- **Live 10-06 estimate.** At that hour's 172 runs, the isolated CPU medians give about 82 CPU s/h for the old query (477 ms) and about 25 for the new one with the post-lookup (146 ms). The live hour measured 147 CPU s/h for the old query.
+
+The IT `argmax_trace_search_equals_final_over_duplicates` (`crates/tayga-api/tests/repo_it.rs`) runs the old `FINAL` SQL, copied verbatim, against `ChRepo::traces_search` over deliberate duplicates in separate parts, for 14 filter and limit combinations. It stops merges on its table first, so the duplicates stay in separate parts. The duplicates are:
+- a version that changes the endpoint, the duration and the error flag;
+- moves into and out of the window across both edges;
+- an identical replay;
+- a span-count tie whose later insert has the later `ts`;
+- a version that clears the error flag;
+- five traces sharing one `ts`, cut by `LIMIT 3`;
+- versions further apart than the slack, with the newest (most spans) outside the window: an `ec70b40f`-like fragment that is the window's newest row, and a trace whose newest version is two hours earlier.
+
+It then asserts both tie edges against `FINAL`. It fails, each mutation tried alone, when:
+- `argMax` becomes `argMin`;
+- the slack is 0;
+- the post-lookup keeps every row ("all");
+- the extra rows are 0 (`LIMIT 1` comes back empty);
+- the tie-break prefers the older `ts` ("all").
 
 ## Decisions
 
