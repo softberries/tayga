@@ -28,10 +28,10 @@ import { Aside, Card, CardGrid, LinkButton } from '@astrojs/starlight/components
 		**PII redaction policies** applied to telemetry, and **data-residency controls** for where data is stored.
 	</Card>
 	<Card title="Long-term baselines" icon="analytics">
-		Compare a release with **the last 30 deploys**, not only with the last hour, to see whether a change made things worse.
+		Compare a release with **previous deploys**, not only with the last hour, to see whether a change made things worse.
 	</Card>
 	<Card title="Enterprise integrations" icon="puzzle">
-		**ServiceNow**, **Jira** and **advanced PagerDuty** integrations, so stories and alerts reach the systems your teams already work in.
+		**ServiceNow**, **Jira** and **PagerDuty** integrations, so stories and alerts reach the systems your teams already work in.
 	</Card>
 	<Card title="LLM incident summaries" icon="comment-alt">
 		Incident summaries written by a large language model, with **bring-your-own model**, so your telemetry goes only to the model you choose.
@@ -52,9 +52,9 @@ import { Aside, Card, CardGrid, LinkButton } from '@astrojs/starlight/components
 | Authentication | One account, no roles | SSO / SAML, SCIM, fine-grained RBAC, audit logs |
 | Tenancy | Single tenant | Multi-tenancy, multi-cluster federation |
 | Deployment | Docker Compose, Helm, from source | High availability, scale-out, upgrade tooling |
-| Baselines | The last 60 minutes per endpoint | Long-term: a release against the last 30 deploys |
+| Baselines | The last 60 minutes per endpoint | Long-term: compare a release with previous deploys |
 | Privacy controls | Not included | PII redaction policies, data-residency controls |
-| Integrations | Webhook, Slack | ServiceNow, Jira, advanced PagerDuty |
+| Integrations | Webhook, Slack | ServiceNow, Jira, PagerDuty |
 | Incident summaries | Not included | LLM summaries with your own model |
 | Support | Community, through GitHub | SLA, onboarding, training |
 | License | AGPLv3 | Commercial |

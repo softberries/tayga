@@ -167,8 +167,8 @@ Tayga can also sit next to any of them: it takes OTLP from the same Collector, a
 - **Multi-tenancy** and **multi-cluster federation**.
 - **High availability**, scale-out deployment and upgrade tooling.
 - **Privacy and compliance:** PII redaction policies and data-residency controls.
-- **Long-term baselines:** compare a release with the last 30 deploys.
-- **Integrations:** ServiceNow, Jira and advanced PagerDuty.
+- **Long-term baselines:** compare a release with previous deploys.
+- **Integrations:** ServiceNow, Jira and PagerDuty.
 - **LLM incident summaries** with bring-your-own model.
 - **Support** with an SLA, onboarding and training.
 
