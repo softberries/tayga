@@ -161,7 +161,15 @@ fn truncate_utf8(s: &str, max: usize) -> String {
 }
 
 impl Drain {
+    /// `cfg.sim_threshold` must be within `0.0..=1.0` (the logminer validates it): above 1.0 a
+    /// line would not match the template created for it, and the cache would return that
+    /// template where `add` creates another.
     pub fn new(cfg: DrainConfig) -> Self {
+        debug_assert!(
+            (0.0..=1.0).contains(&cfg.sim_threshold),
+            "sim_threshold {} outside 0..=1",
+            cfg.sim_threshold
+        );
         Self {
             cfg,
             trees: HashMap::new(),
@@ -237,6 +245,10 @@ impl Drain {
     /// [`Drain::add`] with the service's cache in front when `fp` is given. Returns the
     /// template, `created` and `overflow` that `add` returns (spec sp4 §3.4 has the argument,
     /// `tests/differential.rs` the check).
+    ///
+    /// Precondition: `sim_threshold` within `0.0..=1.0` (checked in debug builds by
+    /// [`Drain::new`]). A hit relies on a line scoring 1.0 against its cached template, which
+    /// passes only such a threshold.
     pub fn add_fingerprinted(
         &mut self,
         service: &str,
@@ -911,6 +923,16 @@ mod tests {
     fn put(d: &mut Drain, service: &str, body: &str) -> Assignment {
         let fp = crate::fingerprint::fingerprint_body(body.as_bytes(), true);
         d.add_fingerprinted(service, body, fp, 0, 9)
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "sim_threshold")]
+    fn a_threshold_outside_0_to_1_is_rejected() {
+        Drain::new(DrainConfig {
+            sim_threshold: 1.5,
+            ..DrainConfig::default()
+        });
     }
 
     #[test]

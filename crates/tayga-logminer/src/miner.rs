@@ -73,7 +73,19 @@ impl Miner {
             }
             let keep = self.drain.config().keep_http_status;
             f.fingerprint(&self.batch, keep, &mut self.fingerprints);
+            debug_assert_eq!(
+                self.fingerprints.len(),
+                self.batch.len(),
+                "{}: one fingerprint per body",
+                f.name()
+            );
         }
+        self.assign_batch(logs)
+    }
+
+    /// Assigns `logs` with `self.fingerprints` in order; a line past its end has no fingerprint
+    /// and takes the Drain tree (an oversized batch, or a backend that returned too few).
+    fn assign_batch(&mut self, logs: &[LogRow]) -> Vec<(LogHitRow, Assignment)> {
         let mut out = Vec::with_capacity(logs.len());
         for (i, log) in logs.iter().enumerate() {
             let fp = self.fingerprints.get(i).copied().flatten();
@@ -517,5 +529,75 @@ mod tests {
             sorted(one.dirty_templates(1)),
             sorted(batched.dirty_templates(1))
         );
+    }
+
+    /// A faulty backend: fingerprints only the first body of a batch.
+    struct FirstOnly;
+
+    impl BatchFingerprinter for FirstOnly {
+        fn name(&self) -> &'static str {
+            "first-only"
+        }
+
+        fn fingerprint(&self, batch: &BodyBatch, keep: bool, out: &mut Vec<Option<Fingerprint>>) {
+            ScalarFingerprinter.fingerprint(batch, keep, out);
+            out.truncate(1);
+        }
+    }
+
+    fn payment_logs() -> Vec<LogRow> {
+        [
+            "Payment failed for order 1234",
+            "Payment failed for order 9876",
+            "Payment failed for order 5555",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, b)| log(i as u64, b, "t1"))
+        .collect()
+    }
+
+    /// Release path of a backend that returns fewer entries than bodies: the lines past its
+    /// output take the Drain tree and are assigned as without a cache.
+    #[test]
+    fn lines_past_a_short_backend_output_take_the_tree() {
+        let logs = payment_logs();
+        let mut plain = Miner::with_fingerprinter(DrainConfig::default(), None);
+        let expected = plain.mine_batch(&logs);
+        let mut short =
+            Miner::with_fingerprinter(DrainConfig::default(), Some(Arc::new(FirstOnly)));
+        // `fingerprint_batch` without its alignment assert, which `mine_batch` would trip.
+        short.batch.clear();
+        for l in &logs {
+            assert!(short.batch.push(&l.body));
+        }
+        FirstOnly.fingerprint(&short.batch, true, &mut short.fingerprints);
+        assert_eq!(short.fingerprints.len(), 1);
+        let got = short.assign_batch(&logs);
+        assert_eq!(got.len(), expected.len());
+        for ((h1, a1), (h2, a2)) in expected.iter().zip(&got) {
+            assert_eq!(h1, h2);
+            assert_eq!(
+                (a1.template_id, a1.created, a1.overflow),
+                (a2.template_id, a2.created, a2.overflow)
+            );
+        }
+        let lookups: Vec<Lookup> = got.iter().map(|(_, a)| a.lookup).collect();
+        assert_eq!(
+            lookups,
+            [
+                Lookup::Miss,
+                Lookup::Unfingerprinted,
+                Lookup::Unfingerprinted
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "one fingerprint per body")]
+    fn a_short_backend_output_trips_the_debug_assert() {
+        let mut m = Miner::with_fingerprinter(DrainConfig::default(), Some(Arc::new(FirstOnly)));
+        m.mine_batch(&payment_logs());
     }
 }

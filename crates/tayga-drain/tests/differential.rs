@@ -31,6 +31,40 @@ fn compare(cfg: &DrainConfig, lines: &[Line], fp: impl Fn(&str) -> Option<Finger
     hits
 }
 
+/// Both Drains mine `warm` (one through the cache), then restore the templates a third Drain
+/// mined from `other`, then mine `last`: a restore after lines are cached must not change any
+/// assignment.
+fn compare_warm_restore(cfg: &DrainConfig, warm: &[Line], other: &[Line], last: &[Line]) {
+    let keep = cfg.keep_http_status;
+    let mut seed = Drain::new(cfg.clone());
+    for (s, b, ts, sev) in other {
+        seed.add(s, b, *ts, *sev);
+    }
+    let mut stored = seed.take_dirty();
+    stored.sort_by_key(|c| (c.first_seen_ns, c.id));
+    let (mut plain, mut cached) = (Drain::new(cfg.clone()), Drain::new(cfg.clone()));
+    let step = |lines: &[Line], plain: &mut Drain, cached: &mut Drain| {
+        for (i, (s, b, ts, sev)) in lines.iter().enumerate() {
+            let a = plain.add(s, b, *ts, *sev);
+            let fp = fingerprint_body(b.as_bytes(), keep);
+            let c = cached.add_fingerprinted(s, b, fp, *ts, *sev);
+            assert_eq!(
+                (a.template_id, a.created, a.overflow),
+                (c.template_id, c.created, c.overflow),
+                "line {i} {s} {b:?} ({:?})",
+                c.lookup
+            );
+        }
+    };
+    step(warm, &mut plain, &mut cached);
+    for c in &stored {
+        plain.restore(c.clone());
+        cached.restore(c.clone());
+    }
+    step(last, &mut plain, &mut cached);
+    assert_eq!(sorted(plain.take_dirty()), sorted(cached.take_dirty()));
+}
+
 fn sorted(mut v: Vec<Cluster>) -> Vec<Cluster> {
     v.sort_by_key(|c| c.id);
     v
@@ -161,8 +195,10 @@ proptest! {
         max_children in 1usize..4,
         cap in 1usize..12,
         keep in any::<bool>(),
+        sim in prop_oneof![Just(0.0), Just(0.5), Just(1.0), 0.0..=1.0],
     ) {
         let cfg = DrainConfig {
+            sim_threshold: sim,
             max_children,
             max_clusters_per_service: cap,
             keep_http_status: keep,
@@ -173,5 +209,31 @@ proptest! {
             .map(|(s, b, ts, sev)| (format!("svc{s}"), b, ts, sev))
             .collect();
         compare(&cfg, &lines, |b| fingerprint_body(b.as_bytes(), keep));
+    }
+
+    /// Cache, restore, then compare (the restore clears the service's cache).
+    #[test]
+    fn a_restore_after_cached_lines_assigns_like_one_without(
+        warm in prop::collection::vec((0..2u8, small_body(), 0..1_000i64, 0..24u8), 1..150),
+        other in prop::collection::vec((0..2u8, small_body(), 0..1_000i64, 0..24u8), 1..150),
+        last in prop::collection::vec((0..2u8, small_body(), 0..1_000i64, 0..24u8), 1..150),
+        max_children in 1usize..4,
+        cap in 1usize..12,
+        keep in any::<bool>(),
+        sim in prop_oneof![Just(0.0), Just(0.5), Just(1.0), 0.0..=1.0],
+    ) {
+        let cfg = DrainConfig {
+            sim_threshold: sim,
+            max_children,
+            max_clusters_per_service: cap,
+            keep_http_status: keep,
+            ..DrainConfig::default()
+        };
+        let lines = |raw: Vec<(u8, String, i64, u8)>| -> Vec<Line> {
+            raw.into_iter()
+                .map(|(s, b, ts, sev)| (format!("svc{s}"), b, ts, sev))
+                .collect()
+        };
+        compare_warm_restore(&cfg, &lines(warm), &lines(other), &lines(last));
     }
 }
