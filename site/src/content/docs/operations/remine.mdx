@@ -1,0 +1,74 @@
+---
+title: "Re-mining templates"
+description: "Rebuilding log templates from the stored logs with tayga-devtools remine after a change to masking or Drain settings."
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+Templates reflect the settings they were mined with. After you change a Drain or masking setting (`logminer.sim_threshold`, `logminer.max_clusters_per_service` or `logminer.keep_http_status`), only logs mined from then on follow the new settings. `tayga-devtools remine` rebuilds the templates from the stored logs of the **last 3 days**, with the logminer's own code and its current settings, without raising alerts for the rebuilt templates.
+
+## What it does
+
+1. Truncates `log_templates`, `log_template_hits` and `log_template_minutes`.
+2. Reads `logs` from the last 3 days in `(ts, log_id)` order, 10,000 rows per page, and mines them with the current `[logminer]` settings, read from the `TAYGA_CONFIG` file and `TAYGA__LOGMINER__*` variables like the logminer itself.
+3. After each page, writes the hits and the changed templates; `log_template_minutes` is filled through its materialized view.
+4. Stores in `logminer_state` the watermark (the newest mined log), a new masking epoch starting now, and the current masking version.
+
+The watermark keeps the restarted logminer from announcing the rebuilt templates as `new`. The new epoch adds the 15-minute warmup: no `new` alert fires for templates first seen in the 15 minutes after the re-mine. `log_alerts` and the silence settings are kept.
+
+## Running it
+
+`remine` is part of `tayga-devtools`, which is built from source (it is not in the Docker images). It talks to ClickHouse directly: by default `http://localhost:18123`, database `tayga`, or the `[clickhouse]` settings of its config; `--clickhouse` and `--database` override them.
+
+<Steps>
+
+1. **Preview.** The dry run is read-only and allowed while the logminer runs:
+
+   ```sh
+   cargo run --release -q -p tayga-devtools -- remine --dry-run
+   ```
+
+   It prints templates per service before and after, the template ids added, removed and unchanged, and the silence settings that would be orphaned.
+
+2. **Stop every logminer replica.** Next to the OpenTelemetry demo, from the repository root (this is the Makefile's compose command):
+
+   ```sh
+   TAYGA_ROOT=$PWD docker compose --project-directory vendor/opentelemetry-demo \
+     -f vendor/opentelemetry-demo/compose.yaml -f vendor/opentelemetry-demo/compose.full.yaml \
+     -f vendor/opentelemetry-demo/compose.observability.yaml \
+     -f deploy/compose.infra.yaml -f deploy/compose.tayga.yaml stop tayga-logminer
+   ```
+
+   In the standalone bundle: `docker compose stop tayga-logminer`.
+
+3. **Wait about 3 minutes, then re-mine.** A real run refuses while any logminer heartbeat is under 3 minutes old:
+
+   ```sh
+   cargo run --release -q -p tayga-devtools -- remine
+   ```
+
+   If the logminer runs with non-default `TAYGA__LOGMINER__*` variables, pass the same ones to this command. Nothing checks that the two agree.
+
+4. **Start the logminer** with the same compose command and `start tayga-logminer`.
+
+</Steps>
+
+<Aside type="note">
+In the standalone bundle ClickHouse is not published on the host. Run `remine` from a machine or container that can reach it, and point `--clickhouse` at it.
+</Aside>
+
+## Things to know
+
+- **Build with `--release`.** On 8.6 million logs a debug-build dry run took 501 s and a release-build real run 211 s (2026-10-06). The logminer is down for the run plus the 3-minute wait.
+- **The heartbeat guard.** Each replica writes `logminer_heartbeat_ns:<replica id>` on every detection pass. A real run reads all of them and refuses while the newest is under 3 minutes old: `Error: the logminer looks alive (heartbeat 43s ago, limit 180s). Stop it first with ...`. `--force` skips the check; use it only when you know the logminer is down. `--dry-run` never checks.
+- **Not atomic.** The tables are truncated before mining. If a run fails partway, run it again before you start the logminer.
+- **Only 3 days.** Only stored logs are mined. Templates whose logs are all older are dropped, although `log_templates` itself keeps rows for 30 days.
+- **Template ids can change.** An id hashes the service and the template as first seen, so it is stable only for the same logs, order and settings. After a settings change many ids can change:
+  - alerts keep their own template text, but their links can point at ids that no longer exist;
+  - silence settings on vanished ids are reported as orphaned and left in place; switch silence on again for the new ids.
+- **Spikes are not gated.** A template that is spiking when its id changes gets a new spike alert id, and the notifier may deliver it a second time.
+- **An empty window.** With no logs in the last 3 days the template tables end up empty and the watermark is unchanged.
+
+## A real run
+
+On the demo stack on 2026-10-06, the release-build run read and mined 8,647,835 logs in 211.1 s: templates went from 415 to 402 (27 added, 40 removed, 375 unchanged), no silence setting was orphaned, and no alert of any kind fired in the 15 minutes after the logminer restarted.

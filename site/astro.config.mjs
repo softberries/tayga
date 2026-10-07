@@ -139,6 +139,7 @@ export default defineConfig({
 						{ label: 'Re-mining templates', slug: 'operations/remine' },
 						{ label: 'Metrics and Grafana', slug: 'operations/metrics-grafana' },
 						{ label: 'Performance tuning', slug: 'operations/performance-tuning' },
+						{ label: 'Upgrades and migrations', slug: 'operations/upgrades' },
 						{ label: 'Troubleshooting', slug: 'operations/troubleshooting' },
 					],
 				},

@@ -277,7 +277,14 @@ h1#_top:not(.tg-hero__title) {
 	border-collapse: separate;
 	border-spacing: 0;
 	font-size: 0.875rem;
-	overflow: hidden;
+	/* Starlight makes tables blocks; scroll a wide one inside its rounded panel instead of clipping it. */
+	overflow-x: auto;
+}
+/* On narrow screens long identifiers in cells (env vars, ids) may break, so tables stay readable. */
+@media (max-width: 50rem) {
+	.sl-markdown-content td code:not(:where(.not-content *)) {
+		overflow-wrap: anywhere;
+	}
 }
 .sl-markdown-content :is(th, td):not(:where(.not-content *)) {
 	border-bottom: 1px solid var(--sl-color-hairline-light);

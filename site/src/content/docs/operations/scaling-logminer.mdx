@@ -1,0 +1,89 @@
+---
+title: "Scaling logminer replicas"
+description: "Running several logminer replicas: scaling up and down, commands per replica, and what the metrics do at a scale change."
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+`tayga-logminer` is the one Tayga service built to run as several replicas. The replicas share the consumer group `tayga-logminer`, so Kafka splits the 12 partitions of `tayga.logs` between them, and each replica mines and judges only the services of its partitions. How that works is in [Replicas and partitioning](/tayga/concepts/replicas/).
+
+## Do you need more than one?
+
+Probably not for capacity. On the OpenTelemetry demo stack one logminer mined about 40 log lines a second using about 1 % of one CPU core, and the Drain work itself was about 1 % of that (see [Performance](/tayga/performance/)). Replicas spread the work and keep mining going while one restarts; more than 12 add nothing, because the extra ones get no partition and idle.
+
+## Scaling
+
+<Tabs>
+<TabItem label="Standalone Compose">
+
+Set the count in `.env` and apply it:
+
+```sh title=".env"
+LOGMINER_REPLICAS=2
+```
+
+```sh
+docker compose up -d
+```
+
+</TabItem>
+<TabItem label="Next to the OTel demo">
+
+```sh
+LOGMINER_REPLICAS=2 make up    # or: make up LOGMINER_REPLICAS=2
+```
+
+`make up` rebuilds and recreates the stack. To change only the count without a rebuild, use the Makefile's compose command with `LOGMINER_REPLICAS=1 … up -d --no-deps tayga-logminer`; Compose then removes the extra replica and keeps the first.
+
+</TabItem>
+</Tabs>
+
+The setting is `deploy.replicas` of the `tayga-logminer` Compose service (default 1). The service has no `container_name`; its containers are named `<project>-tayga-logminer-<n>`.
+
+<Aside type="caution">
+Address the logminer as the Compose **service**, never by a container name: `docker compose logs tayga-logminer`, `docker compose stop tayga-logminer`. Stop, start and restart act on every replica.
+</Aside>
+
+### What happens on a change
+
+- **Scaling up.** The group rebalances. Each replica flushes and commits, runs one new-template pass for the services it is giving up (bounded at 30 s), and the new owners reload every template from ClickHouse. With two replicas the split is 6 and 6 partitions.
+- **Scaling down.** The survivor takes every partition and resumes each from the slowest stored watermark, so nothing in the slower half is skipped.
+
+Both were checked live on 2026-10-06: two replicas split the partitions 6 and 6, mined disjoint services, raised one alert each in the log e2e scenarios, and after scaling back to one the survivor took all 12 partitions from the minimum watermark and kept mining every service.
+
+## Commands per replica
+
+| Task | Command |
+|---|---|
+| Logs of every replica | `docker compose logs tayga-logminer` (or `make logs SERVICE=tayga-logminer`) |
+| Logs of one replica | `docker compose logs --index 2 tayga-logminer` |
+| A shell in one replica | `docker compose exec --index 2 tayga-logminer bash` |
+| Stop, start or restart all | `docker compose stop tayga-logminer` (likewise `start`, `restart`) |
+| Partitions per replica | `rpk group describe tayga-logminer` in the Redpanda container |
+| One replica's metrics | see below |
+
+Next to the OpenTelemetry demo, `docker compose` stands for the Makefile's compose command (shown in [Re-mining templates](/tayga/operations/remine/)), and Redpanda is `docker exec opentelemetry-demo-redpanda-1 rpk …`. In the standalone bundle use `docker compose exec redpanda rpk …`.
+
+The image has no `curl`; read one replica's metrics through bash:
+
+```sh
+docker compose exec --index 2 tayga-logminer bash -c \
+  'exec 3<>/dev/tcp/127.0.0.1/9100; printf "GET /metrics HTTP/1.0\r\n\r\n" >&3; cat <&3'
+```
+
+`rpk group describe tayga-logminer` may also list old offsets of the group on `tayga.signals`, from before the logminer moved to `tayga.logs`. They inflate rpk's total lag and are harmless; `rpk group offset-delete` removes them.
+
+## Metrics at a scale change
+
+The API's recorder resolves `tayga-logminer` on every tick (bounded at 2 s, IPv4 preferred) and scrapes each address, labelling the samples `instance="<ip>:<port>"`. With a single replica that has never seen more, samples carry no label. Once it has seen several, the label stays for the life of the `tayga-api` process, so a scale-down does not switch series back.
+
+On the Pipeline page, counter rates and quantiles sum the replicas; data lag, template count and `up` take the largest replica; other gauges are summed. On 2026-10-06 the summed rate (41.63 lines/s) was within 2 % of the two replicas' own counters (40.8 lines/s).
+
+Known edges, all limited to the moment of the change:
+
+- **Right after a scale-up**, the unlabelled data-lag sample from before it still counts in the overview's data lag for up to 300 s, so the Stories page can show the single replica's last lag that long.
+- **An unlabelled series next to labelled ones** pairs only adjacent buckets, so one replica's counter is never subtracted from another's; a spell inside one 60 s bucket (or an API restart after a scale-down) can still put one spike into one bucket.
+- **A summed gauge** overshoots in the bucket of the first scale-up, where the unlabelled and labelled series overlap.
+- With several replicas `up` reads 1 while any replica answers; the Pipeline page does not show "1 of 2".
+
+With Prometheus (`make up-extras`), every replica is scraped through `dns_sd_configs`, and the logminer panels aggregate them (`sum` for rates, `max` for the template count and data lag).

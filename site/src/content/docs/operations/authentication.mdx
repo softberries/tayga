@@ -1,0 +1,149 @@
+---
+title: "Authentication"
+description: "Turning on the login page, protecting the API, sessions, the rate limit and HTTPS."
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Authentication is **off by default**: with no `[auth]` settings the app and the API are open to anyone who can reach port 8090. Turning it on adds a login page and protects every `/api/*` route except a few open ones. There is **one account**, with no roles and no per-user data.
+
+## Turning it on
+
+<Steps>
+
+1. **Make a password hash.** Tayga stores only an Argon2id hash in PHC format, never a plain password.
+
+   From a source checkout, the devtools command asks for the password twice without echo, or reads the first line of piped input:
+
+   ```sh
+   cargo run -q -p tayga-devtools -- hash-password
+   printf '%s' 'my password' | cargo run -q -p tayga-devtools -- hash-password
+   ```
+
+   It prints a string that starts `$argon2id$v=19$m=19456,t=2,p=1$`. The Docker images do not include `tayga-devtools`; without Rust, any Argon2id PHC string works, for example from the `argon2` tool in a Debian container:
+
+   ```sh
+   printf '%s' 'my password' | docker run --rm -i debian:trixie-slim sh -c \
+     'apt-get update -qq >/dev/null && apt-get install -qq -y argon2 >/dev/null && argon2 "$(head -c 16 /dev/urandom | base64)" -id -m 16 -t 3 -p 1 -e'
+   ```
+
+2. **Make a session key**, so that a restart does not sign everyone out:
+
+   ```sh
+   openssl rand -base64 32
+   ```
+
+3. **Set the settings** for `tayga-api` and restart it.
+
+   <Tabs>
+   <TabItem label="Standalone (.env)">
+
+   ```sh title=".env"
+   TAYGA_AUTH_ENABLED=true
+   TAYGA_AUTH_USERNAME=admin
+   TAYGA_AUTH_PASSWORD_HASH='$argon2id$v=19$m=19456,t=2,p=1$...'
+   TAYGA_AUTH_SESSION_KEY=<output of openssl rand -base64 32>
+   ```
+
+   Keep the single quotes around the hash. Then run `docker compose up -d`.
+
+   </TabItem>
+   <TabItem label="Config file">
+
+   ```toml title="deploy/tayga-api.toml"
+   [auth]
+   enabled = true
+   username = "admin"
+   password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+   session_key = "<output of openssl rand -base64 32>"
+   ```
+
+   Next to the OpenTelemetry demo, `deploy/tayga-api.toml` is mounted read-only into `tayga-api` as `TAYGA_CONFIG`. It is tracked by git, so keep the edit out of commits. Restart with `docker restart tayga-api`.
+
+   </TabItem>
+   <TabItem label="Environment">
+
+   ```sh
+   export TAYGA__AUTH__ENABLED=true
+   export TAYGA__AUTH__USERNAME=admin
+   export TAYGA__AUTH__PASSWORD_HASH='$argon2id$v=19$m=19456,t=2,p=1$...'
+   export TAYGA__AUTH__SESSION_KEY='...'
+   ```
+
+   </TabItem>
+   </Tabs>
+
+4. **Open the app.** It shows the login page; the header gets a user menu with **Sign out**.
+
+</Steps>
+
+<Aside type="caution" title="The $ in the hash">
+Docker Compose interpolates `$` in its YAML files, so `$argon2id$v=19$...` written in a compose `environment:` entry arrives mangled and the API refuses to start. In a compose file, write every `$` as `$$`. In the standalone `.env` file and in a shell export, single quotes are enough.
+</Aside>
+
+## Settings
+
+| Key | Environment variable | Default | Meaning |
+|---|---|---|---|
+| `enabled` | `TAYGA__AUTH__ENABLED` | `false` | Turns authentication on. When on, the keys below are checked at startup and a bad value stops the API. |
+| `username` | `TAYGA__AUTH__USERNAME` | none | The one account. Required; may not contain `\|` or `:`. |
+| `password_hash` | `TAYGA__AUTH__PASSWORD_HASH` | none | Argon2id PHC string. Required. Plain passwords are refused. |
+| `session_ttl` | `TAYGA__AUTH__SESSION_TTL` | `12h` | Session length: `<n>s`, `<n>m`, `<n>h` or `<n>d`, above 0 and at most `365d`. |
+| `session_key` | `TAYGA__AUTH__SESSION_KEY` | unset | Base64 of at least 32 bytes, used to sign cookies. Unset: a random key per process, and the API logs `auth.session_key is unset: a random key is used, so a restart signs everyone out`. |
+| `secure_cookie` | `TAYGA__AUTH__SECURE_COOKIE` | `false` | Adds `Secure` to the cookie. Set it when the app is served over HTTPS. |
+
+Startup errors name the problem, for example `auth.username must not contain '|' or ':'`, `auth.session_key must decode to at least 32 bytes`, or `auth.session_ttl must be <n>s, <n>m, <n>h or <n>d, above 0 and at most 365d`.
+
+## Sessions
+
+- **Signing in** is `POST /api/v1/auth/login` with a JSON body `{"username": "...", "password": "..."}` and `Content-Type: application/json`. It returns 204 and the cookie `tayga_session`: `HttpOnly`, `SameSite=Strict`, `Path=/`, `Max-Age` of the session length, signed with HMAC-SHA256.
+- **The session is not sliding.** It ends `session_ttl` after sign-in, whatever the activity.
+- **The API keeps no session state.** The cookie is a signed token: signing out clears the browser's cookie but does not revoke a copy of it. Changing `session_key`, or restarting without one, signs everyone out.
+- **Signing out** is `POST /api/v1/auth/logout`. It needs no session but does need the JSON content type, so a cross-site form cannot trigger it.
+- When a later request gets a 401 (an expired session), the app sends the user to `/login?next=…` once, and back after signing in. `next` must be a path inside the app.
+
+## Scripts: HTTP Basic
+
+Scripts can skip the cookie and send Basic credentials with every request:
+
+```sh
+curl -u admin:'my password' http://localhost:8090/api/v1/story-groups
+```
+
+Each Basic request costs one password check, and counts against the rate limit below. `GET /api/v1/auth/me` answers from the session cookie only, so it returns 401 for Basic credentials; scripts call the data routes directly.
+
+## Which routes stay open
+
+Open without a session:
+
+- `GET /healthz` and `GET /metrics` (scrapers need no credentials);
+- `GET /api/v1/config` (it carries `auth_enabled`, which the app reads first);
+- `GET /api/v1/auth/me`, `POST /api/v1/auth/login`, `POST /api/v1/auth/logout`;
+- the app's own files: `/`, `/assets/*` and every client route.
+
+`HEAD` is treated as `GET` for these. Everything else under `/api/`, including unknown paths, returns 401 `{"error":"unauthorized"}` without a valid session or Basic credentials.
+
+When authentication is off, `/api/v1/auth/*` returns 404 and `/login` redirects to `/`.
+
+## The rate limit
+
+Password checks are limited to **5 attempts per client IP in 5 minutes** (IPv6 clients are grouped by their /64 prefix).
+
+- Every attempt counts, before the password is checked; a successful check clears the count. In practice the limit is reached by failures, but more than 5 parallel checks from one client can briefly get 429.
+- Past the limit, both the login page and Basic requests get **429** with `Retry-After` and `{"error":"too many attempts"}`, even with the right password.
+- Logins and Basic requests share one count per IP: a script with a wrong password locks out browser sign-ins from the same IP until the window passes.
+- The limiter uses the connection's address and ignores `X-Forwarded-For`. **Behind a reverse proxy all users share the proxy's one limit.**
+
+## HTTPS and exposure
+
+`tayga-api` serves plain HTTP. For HTTPS, put a reverse proxy in front of it that terminates TLS, and set `secure_cookie = true` so the cookie is only sent over HTTPS.
+
+Authentication covers the web app and the API only:
+
+- The OTLP ports of `tayga-ingest` (4317, 4318) accept data from anyone who reaches them, with no authentication and no TLS. Keep them on a trusted network, or forward through a collector on the trusted side.
+- ClickHouse and Redpanda are not published by the standalone bundle. Tayga connects to ClickHouse as the passwordless `default` user.
+- The bundled Compose files bind every published port to `127.0.0.1` by default.
+
+<Aside type="note" title="Verified">
+Every behaviour on this page was checked against a running API on 2026-10-05: the startup errors, the cookie attributes, Basic access, the open routes, the 415 on logout without JSON, and the sixth attempt refused with 429 and `retry-after: 299`. The IPv6 /64 grouping and `X-Forwarded-For` are covered by unit tests. See [Verified claims](/tayga/verified/#plan-6-login-infrastructure-toggle-no-redirects-agent-noise).
+</Aside>
