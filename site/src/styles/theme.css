@@ -229,13 +229,21 @@ nav.sidebar a:hover {
 	background: color-mix(in srgb, var(--sl-color-accent) 9%, transparent);
 	color: var(--sl-color-white);
 }
+/* Current page: a soft tinted pill with a fine full ring and a gentle glow (no edge stripe). */
 nav.sidebar a[aria-current='page'],
 nav.sidebar a[aria-current='page']:hover,
 nav.sidebar a[aria-current='page']:focus {
-	background: var(--sl-color-accent-low);
+	background:
+		linear-gradient(
+			100deg,
+			color-mix(in srgb, var(--sl-color-accent) 20%, transparent),
+			color-mix(in srgb, var(--sl-color-accent) 7%, transparent) 70%
+		);
 	color: var(--sl-color-text-accent);
 	font-weight: 600;
-	box-shadow: inset 2px 0 0 var(--sl-color-text-accent);
+	box-shadow:
+		inset 0 0 0 1px color-mix(in srgb, var(--sl-color-accent) 30%, transparent),
+		0 6px 18px -10px color-mix(in srgb, var(--sl-color-accent) 70%, transparent);
 }
 
 /* Headings in Sora with tight tracking. */
@@ -374,10 +382,11 @@ h1#_top:not(.tg-hero__title) {
 	background: var(--sl-color-gray-7);
 }
 
-/* Asides: rounded panels with the semantic stripe. */
+/* Asides: rounded, softly tinted panels with an even hairline border (no edge stripe). */
 .starlight-aside {
 	border-radius: var(--tg-radius-field);
-	border-inline-start-width: 3px;
+	border: 1px solid color-mix(in srgb, var(--sl-color-asides-border) 35%, transparent);
+	background: color-mix(in srgb, var(--sl-color-asides-border) 9%, transparent);
 }
 
 /* Cards and link cards. */
@@ -458,4 +467,23 @@ h1#_top:not(.tg-hero__title) {
 		animation: none !important;
 		transition: none !important;
 	}
+}
+
+/* No edge stripes anywhere: nested sidebar groups, quotes and <details> use spacing,
+   tint and even hairlines instead. */
+nav.sidebar ul ul li {
+	border-inline-start: 0;
+}
+.sl-markdown-content blockquote:not(:where(.not-content *)) {
+	border-inline-start: 0;
+	padding: 0.75rem 1rem;
+	border-radius: var(--tg-radius-field);
+	background: color-mix(in srgb, var(--sl-color-gray-6) 60%, transparent);
+	color: var(--sl-color-gray-2);
+}
+.sl-markdown-content details:not(:where(.not-content *)) {
+	border: 1px solid var(--sl-details-border-color);
+	border-radius: var(--tg-radius-field);
+	padding: 0.5rem 1rem;
+	transition: border-color 0.15s ease;
 }
