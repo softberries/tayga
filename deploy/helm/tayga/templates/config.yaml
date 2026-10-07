@@ -1,0 +1,39 @@
+{{- $fullname := include "tayga.fullname" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-api
+  labels:
+    {{- include "tayga.labels" (dict "ctx" $ "component" "api") | nindent 4 }}
+data:
+  # tayga-api settings (TAYGA_CONFIG). TAYGA__ env vars override them.
+  api.toml: |
+    jaeger_url = {{ .Values.api.jaegerUrl | toJson }}
+    grafana_url = {{ .Values.api.grafanaUrl | toJson }}
+
+    [map]
+    infra_services = {{ .Values.api.infraServices | toJson }}
+
+    # The recorder scrapes these /metrics endpoints for the Pipeline page.
+    # tayga-logminer's Service is headless, so every replica is scraped.
+    [[metric_targets]]
+    job = "tayga-ingest"
+    url = "http://{{ $fullname }}-ingest:{{ .Values.ingest.service.httpPort }}/metrics"
+
+    [[metric_targets]]
+    job = "tayga-writer"
+    url = "http://{{ $fullname }}-writer:9100/metrics"
+
+    [[metric_targets]]
+    job = "tayga-assembler"
+    url = "http://{{ $fullname }}-assembler:9100/metrics"
+
+    [[metric_targets]]
+    job = "tayga-logminer"
+    url = "http://{{ $fullname }}-logminer:9100/metrics"
+    {{- if .Values.notifier.enabled }}
+
+    [[metric_targets]]
+    job = "tayga-notifier"
+    url = "http://{{ $fullname }}-notifier:9100/metrics"
+    {{- end }}

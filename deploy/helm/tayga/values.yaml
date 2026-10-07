@@ -1,0 +1,196 @@
+# Default values for the Tayga chart. values.schema.json validates them.
+
+image:
+  # One image holds every Tayga binary (ingest, writer, assembler, logminer, api, notifier).
+  repository: ghcr.io/softberries/tayga
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  # Defaults to the release's full name.
+  name: ""
+  annotations: {}
+
+# Applied to every Tayga pod (not to the bundled ClickHouse and Redpanda).
+# The image runs as the unprivileged user tayga (uid 10001) and writes nothing to disk.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# RUST_LOG of every Tayga service.
+logLevel: info
+# Extra environment for every Tayga container, for example TAYGA__KAFKA__RETENTION_MS.
+extraEnv: []
+
+# OTLP receiver: gRPC 4317, HTTP 4318 (/v1/traces, /v1/logs). Stateless; scale freely.
+ingest:
+  replicas: 1
+  service:
+    type: ClusterIP
+    grpcPort: 4317
+    httpPort: 4318
+    annotations: {}
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 512Mi}
+  extraEnv: []
+
+# Writes raw spans and logs to ClickHouse. Runs as one replica.
+writer:
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 512Mi}
+  extraEnv: []
+
+# Builds error stories from closed traces. Runs as one replica.
+assembler:
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    # Its trace buffer is capped at 512 MiB by default (TAYGA__ASSEMBLER__MAX_BUFFER_BYTES).
+    limits: {memory: 1Gi}
+  extraEnv: []
+
+# Mines log templates and raises log alerts. tayga.logs has 12 partitions, so
+# replicas beyond 12 idle.
+logminer:
+  replicas: 1
+  # Fingerprint cache in front of Drain: scalar, parallel or off.
+  fingerprinter: scalar
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {memory: 1Gi}
+  extraEnv: []
+
+# Web app and JSON API on 8090. Keep one replica unless auth.sessionKey is set
+# (without it every replica signs its own sessions).
+api:
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 8090
+    annotations: {}
+  # Optional links shown in the app; empty hides them.
+  jaegerUrl: ""
+  grafanaUrl: ""
+  # Services the service map hides unless "Show infrastructure" is on.
+  infraServices: ["flagd"]
+  auth:
+    enabled: false
+    username: ""
+    # Argon2id PHC string, for example from `tayga-devtools hash-password`.
+    passwordHash: ""
+    # Base64 of 32 or more random bytes (openssl rand -base64 32). Empty: a
+    # random key per pod start, so every restart signs everyone out.
+    sessionKey: ""
+    # Set when the app is served over HTTPS.
+    secureCookie: false
+    # Use an existing Secret instead of the three values above. Its keys:
+    # TAYGA__AUTH__USERNAME, TAYGA__AUTH__PASSWORD_HASH and, optionally,
+    # TAYGA__AUTH__SESSION_KEY.
+    existingSecret: ""
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 512Mi}
+  extraEnv: []
+
+# Delivers log alerts to webhook and Slack targets.
+notifier:
+  enabled: true
+  # Base of the links in notifications (where people open the app).
+  publicUrl: "http://localhost:8090"
+  kinds: ["new", "spike", "silence"]
+  # Each: {name, kind: webhook|slack, url}. URLs are secrets; they are stored in a Secret.
+  targets: []
+  # Use an existing Secret holding a complete notifier.toml under the key
+  # notifier.toml instead of publicUrl, kinds and targets.
+  existingSecret: ""
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {memory: 128Mi}
+  extraEnv: []
+
+# The ClickHouse schema migration (tayga-writer migrate).
+migrate:
+  backoffLimit: 6
+  activeDeadlineSeconds: 900
+  resources:
+    requests: {cpu: 50m, memory: 32Mi}
+    limits: {memory: 256Mi}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: tayga.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Bundled single-node ClickHouse, for evaluation. Disable it and set
+# external.clickhouse for production.
+clickhouse:
+  enabled: true
+  image:
+    repository: clickhouse/clickhouse-server
+    tag: "26.8"
+    pullPolicy: IfNotPresent
+  persistence:
+    enabled: true
+    size: 20Gi
+    # Empty: the cluster's default StorageClass.
+    storageClass: ""
+  resources:
+    requests: {cpu: 250m, memory: 1Gi}
+    limits: {memory: 4Gi}
+
+# Bundled single-broker Redpanda (dev-container mode), for evaluation. Disable
+# it and set external.kafka for production.
+redpanda:
+  enabled: true
+  image:
+    repository: redpandadata/redpanda
+    tag: v26.2.3
+    pullPolicy: IfNotPresent
+  # Seastar --memory; keep resources.limits.memory above it.
+  memory: 1G
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+  resources:
+    requests: {cpu: 250m, memory: 1280Mi}
+    limits: {memory: 1536Mi}
+
+# Used when the bundled services are disabled.
+external:
+  clickhouse:
+    # HTTP URL; Tayga connects as the `default` user without a password.
+    url: ""
+  kafka:
+    # Comma-separated bootstrap servers (PLAINTEXT).
+    brokers: ""
+
+# ClickHouse database name.
+database: tayga

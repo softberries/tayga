@@ -1,0 +1,157 @@
+{{- /*
+One Deployment per Tayga service. Each entry:
+  name, replicas, values (the service's values block), ports [{name, port}],
+  probe {path, port}, schema (wait for the migration), env, config (mount).
+*/ -}}
+{{- $fullname := include "tayga.fullname" . }}
+{{- $services := list
+  (dict "name" "ingest" "replicas" .Values.ingest.replicas "values" .Values.ingest "schema" false
+    "ports" (list (dict "name" "otlp-grpc" "port" 4317) (dict "name" "otlp-http" "port" 4318))
+    "probe" (dict "path" "/metrics" "port" "otlp-http"))
+  (dict "name" "writer" "replicas" 1 "values" .Values.writer "schema" true
+    "ports" (list (dict "name" "metrics" "port" 9100))
+    "probe" (dict "path" "/metrics" "port" "metrics"))
+  (dict "name" "assembler" "replicas" 1 "values" .Values.assembler "schema" true
+    "ports" (list (dict "name" "metrics" "port" 9100))
+    "probe" (dict "path" "/metrics" "port" "metrics"))
+  (dict "name" "logminer" "replicas" .Values.logminer.replicas "values" .Values.logminer "schema" true
+    "ports" (list (dict "name" "metrics" "port" 9100))
+    "probe" (dict "path" "/metrics" "port" "metrics")
+    "env" (list (dict "name" "TAYGA__LOGMINER__FINGERPRINTER" "value" .Values.logminer.fingerprinter))
+    "grace" 40)
+  (dict "name" "api" "replicas" .Values.api.replicas "values" .Values.api "schema" true
+    "ports" (list (dict "name" "http" "port" 8090))
+    "probe" (dict "path" "/healthz" "port" "http")
+    "config" "api")
+}}
+{{- if .Values.notifier.enabled }}
+{{- $services = append $services (dict "name" "notifier" "replicas" 1 "values" .Values.notifier "schema" true
+    "ports" (list (dict "name" "metrics" "port" 9100))
+    "probe" (dict "path" "/metrics" "port" "metrics")
+    "config" "notifier" "grace" 40) }}
+{{- end }}
+{{- range $s := $services }}
+{{- $ctx := dict "ctx" $ "component" $s.name }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-{{ $s.name }}
+  labels:
+    {{- include "tayga.labels" $ctx | nindent 4 }}
+spec:
+  replicas: {{ $s.replicas }}
+  {{- if has $s.name (list "writer" "assembler" "notifier") }}
+  # One consumer at a time: a new pod starts only after the old one stopped.
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "tayga.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "tayga.labels" $ctx | nindent 8 }}
+        {{- with $.Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- $ann := dict }}
+      {{- if eq (default "" $s.config) "api" }}
+      {{- $_ := set $ann "checksum/config" (include (print $.Template.BasePath "/config.yaml") $ | sha256sum) }}
+      {{- end }}
+      {{- if or (eq (default "" $s.config) "notifier") (eq $s.name "api") }}
+      {{- $_ := set $ann "checksum/secrets" (include (print $.Template.BasePath "/secrets.yaml") $ | sha256sum) }}
+      {{- end }}
+      {{- $ann = merge $ann $.Values.podAnnotations }}
+      {{- with $ann }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "tayga.podCommon" $ | nindent 6 }}
+      {{- with $s.grace }}
+      # Shutdown flushes pending work (bounded at 15 s), then finishes in-flight deliveries or a template pass.
+      terminationGracePeriodSeconds: {{ . }}
+      {{- end }}
+      initContainers:
+        {{- include "tayga.waitInit" (dict "ctx" $ "schema" $s.schema) | nindent 8 }}
+      containers:
+        - name: {{ $s.name }}
+          image: {{ include "tayga.image" $ }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command: ["tayga-{{ $s.name }}"]
+          securityContext:
+            {{- toYaml $.Values.securityContext | nindent 12 }}
+          env:
+            {{- include "tayga.env" $ | nindent 12 }}
+            {{- with $s.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- if eq (default "" $s.config) "api" }}
+            - name: TAYGA_CONFIG
+              value: /etc/tayga/api.toml
+            {{- if $.Values.api.auth.enabled }}
+            - name: TAYGA__AUTH__ENABLED
+              value: "true"
+            - name: TAYGA__AUTH__SECURE_COOKIE
+              value: {{ $.Values.api.auth.secureCookie | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if eq (default "" $s.config) "notifier" }}
+            - name: TAYGA_CONFIG
+              value: /etc/tayga/notifier.toml
+            {{- end }}
+            {{- with $s.values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if and (eq $s.name "api") $.Values.api.auth.enabled }}
+          envFrom:
+            - secretRef:
+                name: {{ default (printf "%s-auth" $fullname) $.Values.api.auth.existingSecret }}
+          {{- end }}
+          ports:
+            {{- range $s.ports }}
+            - name: {{ .name }}
+              containerPort: {{ .port }}
+              protocol: TCP
+            {{- end }}
+          startupProbe:
+            httpGet:
+              path: {{ $s.probe.path }}
+              port: {{ $s.probe.port }}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: {{ $s.probe.path }}
+              port: {{ $s.probe.port }}
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: {{ $s.probe.path }}
+              port: {{ $s.probe.port }}
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml $s.values.resources | nindent 12 }}
+          {{- if $s.config }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tayga
+              readOnly: true
+          {{- end }}
+      {{- if eq (default "" $s.config) "api" }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $fullname }}-api
+      {{- else if eq (default "" $s.config) "notifier" }}
+      volumes:
+        - name: config
+          secret:
+            secretName: {{ default (printf "%s-notifier" $fullname) $.Values.notifier.existingSecret }}
+      {{- end }}
+{{- end }}
