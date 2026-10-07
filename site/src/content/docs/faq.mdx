@@ -1,0 +1,70 @@
+---
+title: "FAQ"
+description: "Common questions about what Tayga does, what it needs, how it is licensed and how it fits next to other tools."
+---
+
+## What it is
+
+### Does Tayga replace my tracing backend?
+
+Not necessarily. Tayga stores raw spans and logs for 3 days, has a trace explorer and a waterfall, and can be used on its own. But it is built to explain failing and slow requests, not to be a long-term trace archive. Many setups send the same OTLP stream from one Collector to both Tayga and their existing backend; the trace view can link to Jaeger (`jaeger_url`).
+
+### Does it store metrics?
+
+No. Tayga takes OpenTelemetry **traces and logs** only; OTLP metrics are not accepted. Keep a metrics backend next to it. Tayga's own metrics are Prometheus endpoints, and the API records them for its Pipeline page.
+
+### Is it a log search engine?
+
+No. It mines logs into [templates](/tayga/concepts/log-templates/), links each log line to its template and its trace, and alerts on new, spiking and silent templates. You can search templates by text, and every story and trace shows its logs, but there is no full-text query language over all logs.
+
+### Does it use AI or an LLM?
+
+No. Root cause, critical path, baselines, fingerprints and log alerts are fixed rules over the data, implemented as pure functions. The same input gives the same output, and the rules are documented in [Concepts](/tayga/concepts/error-stories/).
+
+### What does it need from my services?
+
+OpenTelemetry instrumentation that exports traces, and ideally logs with trace context, over OTLP (gRPC or HTTP), directly or through a Collector. For error stories, failures must be recorded on spans: status `error`, an `exception` event, or an ERROR log attached to the span. Tayga has no agent and does no eBPF.
+
+### Has it been used in production?
+
+It has been developed and tested against the [OpenTelemetry demo](https://github.com/open-telemetry/opentelemetry-demo) 3.1.0, with end-to-end tests that inject real failures through the demo's feature flags. That is a realistic microservice system, but not a production fleet. Try it on your own traffic before you depend on it.
+
+## Running it
+
+### What does it need to run?
+
+Docker with Compose (or Kubernetes with Helm), for Tayga's six services, ClickHouse and Redpanda (any Kafka API broker works). See [Install](/tayga/install/docker-compose/). With a little test traffic the standalone stack used about 1.2 GB of memory in all, most of it ClickHouse and Redpanda.
+
+### How much disk does it use?
+
+It depends on your volume. Raw spans and logs are kept 3 days in ClickHouse and topics 24 hours in Redpanda. On the OpenTelemetry demo, `tayga.signals` held 7.4 GB at 24-hour retention and `tayga.logs` grew by about 53 MB an hour. See [Retention and disk](/tayga/operations/retention/).
+
+### Can I keep data longer?
+
+Topic retention is a setting (`TAYGA__KAFKA__RETENTION_MS`). The ClickHouse TTLs are fixed in the schema migrations: 3 days for raw spans and logs, 7 days for stories and alerts, 30 days for templates.
+
+### Does it scale out?
+
+The logminer runs as up to 12 replicas, one per partition of `tayga.logs`. The other services run as one instance each; running several of them is not tested. Tayga's own services used under 2 % of a core each on the demo; ClickHouse is the largest consumer. See [Performance](/tayga/performance/).
+
+### Is the API protected?
+
+Not by default. Turn on [authentication](/tayga/operations/authentication/) for a login page, a signed session cookie and HTTP Basic for scripts. There is one account and no roles. The OTLP ports have no authentication; keep them on a trusted network.
+
+### Can it send alerts to PagerDuty or Teams?
+
+The open-source notifier delivers to generic JSON webhooks and to Slack. Point a webhook at any tool that accepts one, directly or through a small adapter. See [The notifier](/tayga/alerting/notifier/).
+
+## License and editions
+
+### How is it licensed?
+
+The core is open source under the **GNU AGPL v3** (`AGPL-3.0-only`). You can run, modify and self-host it; if you offer a modified version to users over a network, the AGPL asks you to make its source available to them. See [License](/tayga/license/). This is not legal advice.
+
+### What is in the enterprise edition?
+
+The enterprise edition is a commercial offering, available on request, that adds identity (SSO/SAML, SCIM, roles, audit logs), multi-tenancy, scale-out and support on top of the open-source core, priced per cluster or node. See [Enterprise](/tayga/enterprise/) or write to hello@softberries.dev. Everything else in these docs describes the open-source edition.
+
+### Why the name?
+
+See [What is Tayga](/tayga/getting-started/what-is-tayga/#why-the-name).
