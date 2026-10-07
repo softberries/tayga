@@ -251,9 +251,9 @@ Sources:
 
 Sources:
 - [T1] `README.md` (architecture, Quick start, Web app, Log templates and alerts, ports table) at this commit
-- [T2] `docs/superpowers/specs/2026-10-01-tayga-mvp-design.md` §9.2 Root cause, §9.3 Critical path, fingerprint rule
+- [T2] `crates/tayga-analysis` (crate doc: "Pure trace analysis: no I/O, no clocks"; `rootcause.rs`, `critical_path.rs`, `fingerprint.rs`)
 - [T3] `LICENSE`, `LICENSING.md`
-- [T4] `docs/superpowers/specs/2026-10-07-tayga-docs-launch-design.md` (enterprise wording: "available on request", no prices)
+- [T4] `site/src/content/docs/enterprise.mdx` (enterprise wording: "available on request", no prices)
 
 ## 3. Comparison matrix
 
@@ -276,11 +276,11 @@ Footnotes. All web sources were accessed 2026-10-07. Repo sources are files at t
 
 [^t1]: Tayga streaming: README architecture (assembler session windows; logminer detection every 60 s). [T1]
 [^t2]: Tayga stories: README intro, "failing or slow request ... root-cause span". [T1]
-[^t3]: Tayga deterministic: MVP spec §9 ("All functions are pure"), §9.2. [T2]
+[^t3]: Tayga deterministic: `tayga-analysis` is pure ("no I/O, no clocks"); root cause in `rootcause.rs`. [T2]
 [^t4]: Tayga logs: README "Log templates and alerts". [T1]
 [^t5]: Tayga self-host: README "Quick start" (`make up`). [T1]
 [^t6]: Tayga license: `LICENSE`, `LICENSING.md`. [T3]
-[^t7]: Tayga pricing: `LICENSING.md` (commercial license on request); launch design (no prices). [T3][T4]
+[^t7]: Tayga pricing: `LICENSING.md` (commercial license on request); Enterprise page (no prices). [T3][T4]
 [^t8]: Tayga instrumentation: README architecture and ports table (OTLP gRPC and HTTP). [T1]
 [^t9]: Tayga limits: README Quick start (Grafana and Prometheus only with `make up-extras`; OTel demo 3.1.0). [T1]
 [^j1]: Jaeger trace search and UI: https://www.jaegertracing.io/docs/latest/ [J1]

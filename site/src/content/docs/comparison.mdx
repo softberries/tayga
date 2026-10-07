@@ -82,7 +82,7 @@ All web sources were accessed on 2026-10-07. Repository sources are files of the
 
 [^t1]: Tayga streaming analysis: the assembler closes per-trace session windows from a Redpanda topic and writes stories; the logminer runs detection every 60 s. See [Architecture](/tayga/concepts/architecture/).
 [^t2]: Tayga stories: [Error stories](/tayga/concepts/error-stories/).
-[^t3]: Tayga deterministic: pure functions in `tayga-analysis` (MVP spec §9, §9.2). See [Root cause and critical path](/tayga/concepts/root-cause-critical-path/).
+[^t3]: Tayga deterministic: pure functions in `tayga-analysis` (its crate doc: "no I/O, no clocks"; the root cause in `rootcause.rs`). See [Root cause and critical path](/tayga/concepts/root-cause-critical-path/).
 [^t4]: Tayga logs: [Log templates](/tayga/concepts/log-templates/), [Log alerts](/tayga/concepts/log-alerts/), [The notifier](/tayga/alerting/notifier/).
 [^t5]: Tayga self-hosting: `deploy/standalone/compose.yaml`, `make up`, and the Helm chart in `deploy/helm/tayga`.
 [^t6]: Tayga license: `LICENSE` (AGPL-3.0), `LICENSING.md`. See [License](/tayga/license/).
