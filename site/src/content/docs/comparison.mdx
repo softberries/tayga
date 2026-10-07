@@ -13,10 +13,10 @@ Every competitor fact comes from a primary source: the vendor's docs, pricing pa
 
 ## Summary
 
-- **Nobody else in this set builds per-request error stories from traces as they stream in, with a deterministic root cause.** The closest are Coroot, whose root-cause analysis runs a non-LLM step and then has an LLM summarise it (Enterprise edition), and Dynatrace, which describes its root-cause analysis as "causal AI" over its topology model. Both are much broader products than Tayga.
-- **Log template mining is common.** Grafana Loki, ClickStack, Datadog, Dynatrace, New Relic, Coroot and OpenObserve (Enterprise) all group logs into patterns, most of them at query time over a sample. Loki's optional pattern ingester and Coroot's node agent mine as logs arrive. Tayga mines at ingest, keeps templates, and alerts on new, spiking and silent ones.
+- **No other product in this set documents per-request error stories built from traces as they stream in, with a deterministic root cause.** The closest are Coroot, whose root-cause analysis runs a non-LLM step and then has an LLM summarise it (Enterprise edition), and Dynatrace, which describes its root-cause analysis as "causal AI" over its topology model. Both are much broader products than Tayga.
+- **Log template mining is common, and so is alerting on it.** Grafana Loki, ClickStack, Datadog, Dynatrace, New Relic, Coroot and OpenObserve (Enterprise) all group logs into patterns. ClickStack, Datadog's Log Patterns view and Dynatrace mine at query time; Loki's optional pattern ingester and Coroot's node agent mine as logs arrive. Datadog's Watchdog Log Anomaly Detection also analyses logs at intake, finds new warning and error patterns and increases in existing ones, and can alert through a Watchdog logs monitor. New Relic supports NRQL and anomaly alert conditions on its log patterns. Tayga mines every service's logs at ingest, keeps the templates, and alerts on new, spiking and (opt-in) silent ones, in its open-source core.
 - **The commercial and newer open-source products are moving to LLM agents** for investigation. Tayga uses no LLM: its answers are rules over span data, so the same input gives the same output.
-- **Every other product is broader than Tayga.** All of them cover metrics and dashboards at least, and several add eBPF instrumentation, profiling, RUM or session replay, and years of production use. Tayga needs OpenTelemetry traces and logs, has no metrics store, and has been tested against the OpenTelemetry demo.
+- **Every other product is broader than Tayga.** All of them except Jaeger cover metrics and dashboards at least, and several add eBPF instrumentation, profiling, RUM or session replay, and years of production use. Tayga needs OpenTelemetry traces and logs, has no metrics store, and has been tested against the OpenTelemetry demo.
 
 ## Matrix
 
@@ -31,9 +31,9 @@ Every competitor fact comes from a primary source: the vendor's docs, pricing pa
 | Coroot | Logs S on the node; RCA per investigation [^c1] | Yes: AI-powered RCA [^c2] | Hybrid: non-LLM analysis, then an LLM summary [^c3] | Yes, on the node agent [^c4] | Yes [^c5] | Apache-2.0 [^c6] | Per CPU core (Enterprise) [^c7] | eBPF plus OTel [^c8] |
 | OpenObserve | Q [^o1] | SRE Agent (Enterprise) [^o2] | Yes (LLM providers) [^o3] | Yes, Log Patterns (Enterprise) [^o4] | Yes [^o5] | AGPL-3.0 [^o6] | Per GB ingested and queried [^o7] | OTel [^o8] |
 | ClickStack / HyperDX | Q [^k1] | Not stated (AI Notebooks beta, MCP server) [^k2] | AI Notebooks (prompts) [^k3] | Yes: Drain3, query time, sampled [^k4] | Yes [^k5] | MIT (HyperDX), Apache-2.0 (ClickHouse) [^k6] | Managed: compute plus storage [^k7] | OTel [^k8] |
-| Datadog | Not stated [^d1] | Watchdog RCA (needs APM); Bits AI [^d2] | Bits AI is an AI agent; Watchdog's method is not stated [^d3] | Yes, Q, 10,000 samples [^d4] | Not stated [^d5] | Proprietary [^d6] | Per host, per GB, per indexed event [^d7] | Agent or OTel [^d8] |
+| Datadog | Logs: Watchdog at intake; otherwise not stated [^d1][^d9] | Watchdog RCA (needs APM); Bits AI [^d2] | Bits AI is an AI agent; Watchdog's method is not stated [^d3] | Yes: Patterns, Q, 10,000 samples [^d4]; Watchdog Log Anomaly Detection at intake, with new-pattern and spike alerts (Watchdog logs monitor) [^d9] | Not stated [^d5] | Proprietary [^d6] | Per host, per GB, per indexed event [^d7] | Agent or OTel [^d8] |
 | Dynatrace | Not stated [^y1] | Causal AI RCA [^y2] | RCA page: no LLM mentioned; a separate GenAI assistant [^y3] | Yes, Q (Preview) [^y4] | Yes (Managed) [^y5] | Proprietary [^y6] | Platform subscription; per host-hour, per GiB [^y7] | OneAgent or OTel [^y8] |
-| New Relic | Not stated [^n1] | Autopilot [^n2] | Yes (GenAI terms) [^n3] | Yes, ML model per account [^n4] | Not stated [^n5] | Proprietary [^n6] | Per GB plus per user, or compute [^n7] | APM agents or OTel [^n8] |
+| New Relic | Not stated [^n1] | Autopilot [^n2] | Yes (GenAI terms) [^n3] | Yes: ML model per account; NRQL and anomaly alerts on patterns [^n4] | Not stated [^n5] | Proprietary [^n6] | Per GB plus per user, or compute [^n7] | APM agents or OTel [^n8] |
 
 ## Where Tayga is the better fit
 
@@ -41,7 +41,7 @@ Only claims backed by the matrix:
 
 - **Per-request error and slow stories, built while traces stream in.** Each story has a root-cause span, a critical path and a comparison with the endpoint's baseline [^t1][^t2]. None of the other nine documents per-request stories built at ingest; their RCA runs per investigation or alert (Coroot, OpenObserve, Datadog, New Relic), or the docs do not say when it runs [^c1][^o2][^d2][^n2].
 - **Deterministic, no LLM.** The root cause comes from fixed rules over the span tree [^t3]. Coroot's RCA ends in an LLM summary [^c3]; Grafana Assistant, SigNoz Noz, OpenObserve's SRE Agent, Datadog's Bits AI and New Relic Autopilot are AI or LLM agents [^g3][^s3][^o3][^d3][^n3].
-- **Log templates mined at ingest, with new, spike and silence alerts delivered to webhooks and Slack** [^t4]. ClickStack, Datadog and Dynatrace mine patterns at query time over a sample or as a read-time view [^k4][^d4][^y4]; Loki's pattern ingester is off by default [^g4]. None of the sources fetched for this comparison describes an alert that fires when a new log pattern first appears.
+- **Log templates and log alerts in the open-source core.** Tayga mines every service's logs at ingest and alerts on new, spiking and opt-in silent templates, delivered to your own webhooks and Slack [^t4][^t6]. Datadog's Watchdog Log Anomaly Detection also works at intake and alerts on new and increasing warning or error patterns [^d9], and New Relic alerts on log patterns through NRQL and anomaly conditions [^n4]; both are proprietary platforms [^d6][^n6]. Among the open-source products, Loki's pattern ingester is off by default [^g4], ClickStack mines patterns at query time over a sample [^k4], and OpenObserve's Log Patterns are Enterprise [^o4].
 - **Stories and log alerting are in the self-hosted AGPL core** [^t4][^t6]. OpenObserve's patterns and RCA agent are Enterprise [^o2][^o4]; Coroot's AI RCA is Enterprise, or the Community Edition through Coroot Cloud [^c2]; Grafana's Sift and Assistant need Grafana Cloud [^g5].
 
 ## Where another product is the better choice
@@ -58,7 +58,10 @@ Tayga can also sit next to one of them: it takes OTLP from the same Collector, a
 
 These were left out of the matrix or marked "not stated":
 
-- Datadog, Dynatrace and New Relic: whether analysis runs at ingest or at query time, outside log patterns.
+- Datadog, Dynatrace and New Relic: whether analysis runs at ingest or at query time, outside log patterns and Datadog's Watchdog Log Anomaly Detection.
+- New Relic: when log patterns are assigned (the docs say a pattern is "enriched onto the existing log message" as `newrelic.logPattern`, but not when), and whether any alert fires on a pattern's first appearance (the docs point to a "Logs with no pattern" tab for logs "appearing for the first time").
+- Dynatrace: its log alerts use event matchers, log metrics or DQL queries that you define [^y9]; the sources fetched do not describe an alert on Patterns (Preview) results.
+- Datadog: whether Watchdog Log Anomaly Detection covers logs other than warning and error status, or alerts when a pattern goes silent.
 - Datadog Watchdog RCA and Grafana Sift: whether they use an LLM.
 - Datadog: the price of Bits AI.
 - Datadog and New Relic: an explicit statement that no self-hosted edition exists; only its absence from the pricing pages was checked.
@@ -112,7 +115,7 @@ All web sources were accessed on 2026-10-07. Repository sources are files of the
 [^c5]: Coroot installation options: https://docs.coroot.com/installation/architecture/
 [^c6]: Coroot license: https://github.com/coroot/coroot, https://github.com/coroot/coroot-node-agent (GitHub API and `LICENSE`)
 [^c7]: Coroot pricing: https://coroot.com/pricing/, https://coroot.com/editions
-[^c8]: Coroot eBPF and OTLP: https://docs.coroot.com/tracing/ebpf-based-tracing/, https://docs.coroot.com/configuration/coroot-node-agent/
+[^c8]: Coroot eBPF and OTLP: https://docs.coroot.com/tracing/ebpf-based-tracing/, https://docs.coroot.com/configuration/coroot-node-agent/, https://docs.coroot.com/tracing/opentelemetry-go/
 [^o1]: OpenObserve SQL and PromQL: https://openobserve.ai/docs/
 [^o2]: OpenObserve SRE Agent (Enterprise): https://openobserve.ai/docs/enterprise-setup/enterprise-features/
 [^o3]: OpenObserve LLM providers: https://openobserve.ai/ai-sre/
@@ -129,7 +132,7 @@ All web sources were accessed on 2026-10-07. Repository sources are files of the
 [^k6]: HyperDX, ClickHouse and ClickStack licenses: https://github.com/hyperdxio/hyperdx, https://github.com/ClickHouse/ClickHouse, https://github.com/ClickHouse/ClickStack (GitHub API)
 [^k7]: ClickStack managed pricing: https://clickhouse.com/pricing
 [^k8]: ClickStack OTel Collector: https://clickhouse.com/docs/use-cases/observability/clickstack/overview
-[^d1]: Datadog analysis timing: not stated in the Datadog sources below.
+[^d1]: Datadog analysis timing: Watchdog Log Anomaly Detection analyses logs "at the intake level" [^d9]; for everything else, not stated in the Datadog sources below.
 [^d2]: Watchdog RCA and Bits: https://docs.datadoghq.com/watchdog/rca/, https://docs.datadoghq.com/bits_ai/bits_ai_sre/
 [^d3]: Bits is "an autonomous AI agent": https://docs.datadoghq.com/bits_ai/bits_ai_sre/; Watchdog's method is not stated: https://docs.datadoghq.com/watchdog/rca/
 [^d4]: Datadog Log Patterns: https://docs.datadoghq.com/logs/explorer/analytics/patterns/
@@ -137,6 +140,7 @@ All web sources were accessed on 2026-10-07. Repository sources are files of the
 [^d6]: Datadog license: no open-source license stated on https://www.datadoghq.com/pricing/list/
 [^d7]: Datadog list prices: https://www.datadoghq.com/pricing/list/
 [^d8]: Datadog OTel options: https://docs.datadoghq.com/opentelemetry/
+[^d9]: Watchdog Log Anomaly Detection, "analyzed at the intake level", "an emergence of logs with a warning or error status", "a sudden increase", alerts through "a Watchdog logs monitor": https://docs.datadoghq.com/logs/explorer/watchdog_insights/; anomaly types "new log patterns and increases in existing log patterns": https://docs.datadoghq.com/watchdog/alerts/
 [^y1]: Dynatrace analysis timing: not stated in the Dynatrace sources below.
 [^y2]: Dynatrace RCA: https://docs.dynatrace.com/docs/dynatrace-intelligence/root-cause-analysis
 [^y3]: Dynatrace RCA page and the GenAI page: https://docs.dynatrace.com/docs/dynatrace-intelligence/root-cause-analysis, https://docs.dynatrace.com/docs/dynatrace-intelligence/agentic-and-generative-ai/agentic-and-generative-ai-getting-started
@@ -145,10 +149,11 @@ All web sources were accessed on 2026-10-07. Repository sources are files of the
 [^y6]: Dynatrace license: no open-source license stated on https://www.dynatrace.com/pricing/
 [^y7]: Dynatrace pricing: https://www.dynatrace.com/pricing/
 [^y8]: Dynatrace OTLP and OneAgent: https://docs.dynatrace.com/docs/ingest-from/opentelemetry
+[^y9]: Dynatrace log alerts (events extracted from logs, metrics based on logs, DQL in custom alerts): https://docs.dynatrace.com/docs/analyze-explore-automate/logs/alerting-on-logs
 [^n1]: New Relic analysis timing: not stated in the New Relic sources below.
 [^n2]: New Relic Autopilot: https://docs.newrelic.com/docs/agentic-ai/sre-agent/overview/
 [^n3]: "Subject to the Generative AI Service Specific Terms": https://docs.newrelic.com/docs/agentic-ai/sre-agent/overview/
-[^n4]: New Relic log patterns: https://docs.newrelic.com/docs/logs/ui-data/find-unusual-logs-log-patterns/
+[^n4]: New Relic log patterns, "Create alerts for patterns by adding NRQL alerts" and "Use anomaly alert conditions to detect anomalies in known log patterns": https://docs.newrelic.com/docs/logs/ui-data/find-unusual-logs-log-patterns/
 [^n5]: New Relic self-hosting: no such option on https://newrelic.com/pricing
 [^n6]: New Relic license: no open-source license stated on https://newrelic.com/pricing
 [^n7]: New Relic pricing: https://newrelic.com/pricing
