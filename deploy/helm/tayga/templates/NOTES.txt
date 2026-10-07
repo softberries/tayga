@@ -1,0 +1,46 @@
+{{- $fullname := include "tayga.fullname" . -}}
+Tayga {{ .Chart.AppVersion }} is installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+{{- if .Values.clickhouse.enabled }}
+
+The schema migration runs as Job {{ printf "%s-migrate-%d" $fullname .Release.Revision | trunc 63 | trimSuffix "-" }}; the Tayga pods
+wait for it in their init container, so the first start takes a minute or two.
+{{- end }}
+
+Watch the rollout:
+  kubectl --namespace {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }} -w
+
+1. Open the web app:
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}/
+{{- end }}
+{{- else }}
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ $fullname }}-api {{ .Values.api.service.port }}:{{ .Values.api.service.port }}
+  then http://localhost:{{ .Values.api.service.port }}
+{{- end }}
+
+2. Send OTLP traces and logs to tayga-ingest:
+  gRPC:  {{ $fullname }}-ingest.{{ .Release.Namespace }}.svc:{{ .Values.ingest.service.grpcPort }}
+  HTTP:  http://{{ $fullname }}-ingest.{{ .Release.Namespace }}.svc:{{ .Values.ingest.service.httpPort }}  (/v1/traces, /v1/logs)
+
+  OpenTelemetry Collector exporter (add it to your traces and logs pipelines):
+    exporters:
+      otlp_grpc/tayga:
+        endpoint: {{ $fullname }}-ingest.{{ .Release.Namespace }}.svc:{{ .Values.ingest.service.grpcPort }}
+        tls:
+          insecure: true
+
+{{- if and .Values.clickhouse.enabled .Values.redpanda.enabled }}
+
+ClickHouse and Redpanda run bundled, single node, for evaluation. For
+production set clickhouse.enabled=false, redpanda.enabled=false and the
+external.* values.
+{{- end }}
+{{- if not .Values.api.auth.enabled }}
+
+Authentication is off: anyone who reaches the API can read every trace and
+log. Set api.auth.* before exposing it. Make the password hash with the
+tayga-devtools binary in the image:
+  kubectl --namespace {{ .Release.Namespace }} exec -it deploy/{{ $fullname }}-api -- tayga-devtools hash-password
+{{- end }}

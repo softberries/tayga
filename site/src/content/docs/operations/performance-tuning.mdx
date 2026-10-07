@@ -1,0 +1,80 @@
+---
+title: "Performance tuning"
+description: "The fingerprinter setting, ClickHouse query timeouts and the other settings that change how Tayga uses CPU and memory."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Tayga's own services are light: on the OpenTelemetry demo stack the measured services (ingest, writer, assembler, logminer, api) used between 0.2 % and 1.8 % of one core each, while ClickHouse used 21 % ([Performance](/tayga/performance/#live-load), 2026-10-06). Most tuning is therefore about ClickHouse and the buffers, not about Tayga's CPU. This page lists the knobs and what they trade.
+
+## The fingerprinter
+
+`logminer.fingerprinter` (`TAYGA__LOGMINER__FINGERPRINTER`) selects the backend of the [fingerprint cache](/tayga/concepts/log-templates/#the-fingerprint-cache) in front of Drain:
+
+| Value | What it does | When to use it |
+|---|---|---|
+| `scalar` (default) | Fingerprints the bodies of one Kafka record on the calling thread. | Always, unless you measured otherwise. |
+| `parallel` | Spreads a batch over rayon's thread pool from 512 bodies; smaller batches run like `scalar`. | Only if the logminer mines batches of hundreds of bodies. |
+| `gpu` | wgpu compute shader from 2,048 bodies; `scalar` below that and on any GPU error. Needs a build with the `gpu` feature. | Not recommended (below). |
+| `off` | No cache: every line goes through Drain. | The kill switch, if you suspect the cache. |
+
+**Why `scalar` is the default.** The logminer's batch is one Kafka record of `tayga.logs`, about 5 log lines on the demo (5.2 measured). At 5 bodies all three backends run on the calling thread and measure the same: 2.44, 2.44 and 2.43 µs per batch. `parallel` starts to pay at 512 bodies (2.02× faster than one thread) and reaches 8.54× at 50,000, a batch the logminer never forms.
+
+**Why `gpu` is not recommended.** On an Apple M3 Max through Metal, the GPU backend was slower than `parallel` at every measured size (5.0× slower at 2,048 bodies, 1.6× at 50,000), and passed one CPU thread only from about 5,000 bodies. A fixed dispatch cost of about 279 µs per batch dominates small batches. The Docker images are built without the feature: with `fingerprinter = "gpu"` such a build refuses to start (`logminer.fingerprinter = "gpu" needs a build with the gpu feature`); a build with the feature but no usable adapter logs a warning and runs `scalar`.
+
+<Aside type="caution">
+`parallel` and `gpu` run inside the logminer's consume loop and block it while a batch is processed (the GPU path waits up to 5 s for its result before falling back to `scalar`).
+</Aside>
+
+To switch it off and on without editing files:
+
+```sh
+LOGMINER_FINGERPRINTER=off make up      # next to the OTel demo
+LOGMINER_FINGERPRINTER=off              # in the standalone .env, then docker compose up -d
+```
+
+The startup line `tayga-logminer consuming` names the backend in use (`"fingerprinter":"scalar"`), and the gauge `tayga_logminer_fingerprinter{backend}` reports it. An unknown value stops the logminer at startup. On the live stack the cache hit 99.70 % of lines and mining took 8.0 µs per record, against 34.8 µs with `off`; either way mining was a negligible share of a core at 40 lines per second.
+
+## ClickHouse load
+
+ClickHouse is the largest consumer of CPU in a Tayga stack. What drives it:
+
+| Source | What to know |
+|---|---|
+| **Open app tabs** | Live mode refreshes every 10 s per tab. The service map's 24-hour health baseline is computed once a minute and shared by all tabs, so extra tabs cost mostly the cheap window query (25 ms of CPU each on the demo). |
+| **Trace search** | Reads the window's trace summaries plus a lookup by trace id: about 146 ms of CPU and 103 MiB per default request on the demo. It runs only while the Traces page is used. |
+| **⌘K search** | Lists services with `SELECT DISTINCT service_name FROM spans` over 24 hours (429 ms on average on the demo). It runs only while the palette is used. |
+| **Baselines** | The assembler's two baseline queries run once a minute: 15 and 31 CPU s per hour on the demo. |
+| **The recorder** | One small insert every `record_secs` (15 s). |
+
+### Query timeouts
+
+Every ClickHouse read of the API carries `max_execution_time = query_timeout_secs` (15 by default, `TAYGA__QUERY_TIMEOUT_SECS`). A read stopped that way, and an `/api/` request still running 5 s after the limit (a ClickHouse that accepts the connection and never answers), are answered **504** `{"error":"storage timeout"}`. `0` turns both off. Lower it to protect ClickHouse from long windows; raise it if wide 7-day windows time out on a large dataset.
+
+## Buffers and batches
+
+| Setting | Default | Trade-off |
+|---|---|---|
+| `assembler.gap_ms` | `10000` | How long the assembler waits for more spans. Lower means faster stories but more traces closed before late spans arrive. |
+| `assembler.max_age_ms` | `60000` | The longest a trace stays open. |
+| `assembler.max_buffer_bytes` | 512 MiB | Memory cap of the open traces; past it the oldest are closed early, flagged `truncated`. |
+| `writer.max_rows`, `writer.max_age_ms` | `10000`, `1000` | Larger batches mean fewer, bigger ClickHouse parts. |
+| `logminer.max_batch`, `logminer.flush_ms` | `5000`, `1000` | The same for hits and templates. |
+| `record_secs` | `15` | Below 5 creates many small parts. |
+
+## Where to look when something is slow
+
+1. **The Pipeline page.** Consumer lag that keeps growing shows which stage cannot keep up. "Writer batch latency" and "Logminer batch time" show the cost per batch.
+2. **`tayga_logminer_data_lag_seconds`.** A logminer that falls behind logs a warning past 10 minutes.
+3. **ClickHouse's query log.** The heaviest queries of the last hour:
+
+   ```sql
+   SELECT normalized_query_hash, any(query) AS q, count() AS runs,
+          round(avg(query_duration_ms)) AS avg_ms,
+          round(sum(ProfileEvents['OSCPUVirtualTimeMicroseconds']) / 1e6, 1) AS cpu_s
+   FROM system.query_log
+   WHERE type = 'QueryFinish' AND event_time > now() - INTERVAL 1 HOUR
+   GROUP BY normalized_query_hash ORDER BY cpu_s DESC LIMIT 15
+   ```
+
+4. **`docker stats`** for the CPU and memory of each container.

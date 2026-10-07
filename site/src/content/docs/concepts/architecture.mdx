@@ -1,0 +1,103 @@
+---
+title: Architecture
+description: How Tayga's services, Redpanda topics and ClickHouse tables fit together, from OTLP ingest to error stories, log alerts and the web app.
+---
+
+import PipelineDiagram from '../../../components/PipelineDiagram.astro';
+import { Aside } from '@astrojs/starlight/components';
+
+Tayga is a streaming pipeline. Telemetry enters through one OTLP endpoint, travels on Redpanda topics, and is analysed by independent services while it streams. Each service is a separate Rust binary from one workspace; they exchange data only through the bus and ClickHouse (the API also scrapes their metrics), so each can be restarted, upgraded or scaled on its own.
+
+<PipelineDiagram />
+
+## The flow
+
+1. **Ingest.** An OpenTelemetry Collector (or any OTLP sender) exports traces and logs to `tayga-ingest`, over gRPC or HTTP. For each export request, ingest publishes one record per trace id to the topic `tayga.signals`, keyed by trace id, so every span of a trace lands on the same partition (a record is split further if it would pass 900,000 bytes; items without a valid trace id are keyed by service). It also publishes each log batch to `tayga.logs`, keyed by service, one record per request and service.
+2. **Store.** `tayga-writer` reads `tayga.signals` and writes the raw spans and logs to ClickHouse.
+3. **Assemble and analyse.** `tayga-assembler` reads the same topic, buffers spans per trace, and closes a trace when it goes quiet. For each closed trace it builds the span tree, writes a trace summary, counts service-to-service calls, and, when the request failed or was unusually slow, writes an error story to ClickHouse and publishes it to `tayga.stories`.
+4. **Mine the logs.** `tayga-logminer` reads `tayga.logs`, mines templates per service with Drain, and every 60 seconds checks for new, spiking and silent templates. Alerts go to ClickHouse and to the topic `tayga.alerts`.
+5. **Deliver.** `tayga-notifier` reads `tayga.alerts` and delivers each alert to webhook and Slack targets.
+6. **Serve.** `tayga-api` serves the web app and the JSON API from ClickHouse, records the services' metrics for the Pipeline page, and reads consumer lag from Kafka.
+
+## Services
+
+| Service | Reads | Writes | Role |
+|---|---|---|---|
+| `tayga-ingest` | OTLP gRPC and HTTP | `tayga.signals`, `tayga.logs` | Accepts traces and logs, splits them by trace id and by service |
+| `tayga-writer` | `tayga.signals` | ClickHouse `spans`, `logs` | Stores raw telemetry; also runs the schema migrations (`tayga-writer migrate`) |
+| `tayga-assembler` | `tayga.signals` | `trace_summaries`, `service_edges`, `error_stories`; `tayga.stories` | Closes traces, analyses them and writes stories |
+| `tayga-logminer` | `tayga.logs` | `log_templates`, `log_template_hits`, `log_alerts`; `tayga.alerts` | Mines log templates and raises log alerts; can run as several replicas |
+| `tayga-notifier` | `tayga.alerts` | `notifier_deliveries`; webhook and Slack targets | Delivers alerts once per target, with retries |
+| `tayga-api` | ClickHouse, Kafka consumer lag, the services' `/metrics` | `metric_samples`, `log_template_silence` | Web app, JSON API, metric recorder |
+
+The web app is a React single-page app built into the `tayga-api` binary, so one port serves both the app and the API.
+
+## Topics
+
+| Topic | Key | Partitions | Producer | Consumers |
+|---|---|---|---|---|
+| `tayga.signals` | trace id | 12 | ingest | writer, assembler |
+| `tayga.logs` | service | 12 | ingest | logminer |
+| `tayga.stories` | story fingerprint | 3 | assembler | none in Tayga; for other consumers |
+| `tayga.alerts` | template id | 3 | logminer | notifier |
+
+Partition counts apply when a topic is created; see [Replicas and partitioning](/tayga/concepts/replicas/). Every log is written to Kafka twice, once per topic; spans are not duplicated. Topics that Tayga creates get a retention of 24 hours by default.
+
+## Closing a trace
+
+The assembler keeps the open traces of each partition in memory and closes a trace on the first of these conditions, checked every second:
+
+| Condition | Default | Effect |
+|---|---|---|
+| No new span for | 10 s (processing time) | closed normally |
+| Open for longer than | 60 s | closed normally |
+| Span count above | 10,000 | closed, flagged `truncated` |
+| All buffered traces above | 512 MB | the oldest are closed, flagged `truncated` |
+
+Inactivity uses processing time because clock skew between services makes event-time watermarks unreliable; the analysis itself uses the spans' own timestamps. Spans that arrive after their trace closed are counted and stored raw, but not re-analysed.
+
+## Analysis
+
+The analysis code (`tayga-analysis`) is pure functions over a trace and the endpoint's baseline, with no I/O:
+
+- **Span tree.** Built from parent span ids; logs attach to their span, or to the root when they carry only a trace id. The endpoint is the root service and the root span's name, with a normalised path added when the name has none.
+- **Root cause.** The error span among those with no failing descendant that ended first, with a one-sentence explanation. See [Root cause and critical path](/tayga/concepts/root-cause-critical-path/).
+- **Critical path.** A backward walk from the root span's end, with the top three contributors by self-time.
+- **Baseline diff.** Per endpoint, refreshed every 60 seconds from the last 60 minutes of non-error traces. See [Baselines](/tayga/concepts/baselines/).
+- **Story and fingerprint.** `error` when any span failed, `slow` when the duration exceeded the slow-trace rule on a trusted baseline. The fingerprint groups stories into [story groups](/tayga/concepts/story-groups/).
+
+## Storage
+
+| Table | Written by | Keeps |
+|---|---|---|
+| `spans`, `logs` | writer | 3 days |
+| `trace_summaries` | assembler | 2 days |
+| `error_stories`, `service_edges` | assembler | 7 days |
+| `log_template_hits` | logminer | 3 days |
+| `log_templates` | logminer | 30 days after the template was last seen |
+| `log_alerts` | logminer | 7 days |
+| `notifier_deliveries` | notifier | 30 days |
+| `metric_samples` | api | 7 days |
+
+## Delivery and replays
+
+Offsets are committed only after the data they cover is stored, so a crash means re-reading, never losing. Re-reads are safe by design:
+
+- stories use the trace id as their id, and stories and trace summaries are stored in `ReplacingMergeTree` tables, so a replayed trace collapses into one row;
+- log hits are deduplicated by log id, and template ids are hashes of service and template;
+- alert ids are deterministic, and the notifier records each delivery per alert and target, so a re-published alert is not sent twice.
+
+<Aside type="note">
+Service-to-service call counts (`service_edges`) are summed (`SummingMergeTree`), so a crash replay of the assembler can count some calls twice in the service map's edges. Stories are not affected.
+</Aside>
+
+## Workspace
+
+| Crate | Kind |
+|---|---|
+| `tayga-ingest`, `tayga-writer`, `tayga-assembler`, `tayga-logminer`, `tayga-notifier`, `tayga-api` | services |
+| `tayga-analysis` | the story analysis, no I/O |
+| `tayga-drain` | Drain mining and alert rules, no I/O |
+| `tayga-model`, `tayga-kafka`, `tayga-store`, `tayga-common` | shared libraries |
+| `tayga-devtools` | CLI: flags, capture, emit-log, hash-password, remine and more |
+| `tayga-e2e` | end-to-end tests against a live stack |

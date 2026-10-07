@@ -1,0 +1,137 @@
+---
+title: "Service map"
+description: "The service map: service cards and call edges, search, the infrastructure toggle and the service drawer."
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Screenshot from '../../../components/Screenshot.astro';
+
+The Service map answers **"which services are unhealthy, and who calls them?"** It draws every service seen in the time range as a card coloured by health, and every call between services as a line sized by traffic and coloured by errors. Select a service to see its rate, errors and latency over time, the stories whose root cause is there, its log alerts, and its callers and callees.
+
+The map is at `/map`. The **Service map** icon in the rail, <kbd>g</kbd> then <kbd>m</kbd>, the mini map on the Stories page, and a service in the [command palette](/tayga/guide/command-palette/) all open it.
+
+<Screenshot name="map-overview" eager caption="The service map over the last hour, infrastructure hidden." />
+
+## Toolbar
+
+<Screenshot name="map-toolbar" caption="The toolbar above the map." />
+
+- **Summary** (1): the number of services, how many are degraded and how many calls are failing, for example `17 services · 2 degraded · 1 failing call`, plus `1 infra hidden` when infrastructure services are hidden.
+- **Find a service** (2): highlights the services whose name contains the text and dims the rest. The status beside it says `2 matches · Enter to zoom`; press <kbd>Enter</kbd> to zoom the map to them. "No match" means no service matches. If the only match is a hidden infrastructure service, it says so and offers **Show infrastructure**.
+- **Show infrastructure** (3): draws the infrastructure services, see [below](#infrastructure-services).
+- **Open in Grafana**: opens Tayga's service map dashboard in Grafana in a new tab. It appears only when the API is configured with a Grafana URL (see [Metrics and Grafana](/tayga/operations/metrics-grafana/)).
+
+<Screenshot name="map-search-empty" caption="A search that matches no service." />
+
+## Reading the map
+
+The map is laid out from left to right in call order: entry services on the left, the services they call to their right. Drag the background to pan and scroll or pinch to zoom.
+
+### Service cards
+
+<Screenshot name="map-node" caption="A service card." />
+
+Each card shows:
+
+- a **health ring**: grey when healthy and amber when slow. When some calls failed, a red arc on the ring shows their share;
+- the **service name**;
+- the **call rate** per second and the **error ratio**, for example `16.8/s · 0.4 % err`;
+- the **p99** latency over the range.
+
+A degraded card has a red or amber border and a pulsing dot in its corner. A service that only calls others, with no server spans of its own (a load generator, for example), says "caller only · no server spans".
+
+Tayga marks a service:
+
+- **errors** when 5 % or more of its calls failed in the range;
+- **slow** when its p99 is more than twice its p99 over the last 24 hours;
+- **healthy** otherwise.
+
+When you zoom out, the cards switch to a compact form: a larger name, and for a degraded service the one number that explains it (the error ratio or the p99).
+
+### Calls
+
+<Screenshot name="map-edge-hover" caption="Hovering over a call." />
+
+Each line is a call from one service to another.
+
+- Its **width** grows with the calls per minute.
+- Its **colour** gives the errors: grey with none, a muted red with some errors (under 1 % of calls), and a dashed, moving red line for failing calls (1 % or more). The dashes stay still if your system asks for reduced motion.
+- Hover over a line to see the caller and callee, the number of calls, calls per minute, the error ratio and the average latency. Click the line to keep that label open; click the background to close it.
+
+### Legend, zoom controls and minimap
+
+<Screenshot name="map-legend" caption="The legend." />
+
+The legend in the lower left repeats these rules. In the lower right are the zoom controls (zoom in, zoom out, fit the whole map) and, on wide screens, a minimap of the whole graph: drag or scroll in it to move around.
+
+## The service drawer
+
+<Steps>
+
+1. Click a service card, or focus it with <kbd>Tab</kbd> and press <kbd>Enter</kbd>. The drawer opens on the right and the URL gains `service=<name>`.
+
+2. Read the drawer, follow its links, or select another card: the drawer switches to that service.
+
+3. Close it with the **×** button or <kbd>Esc</kbd>. Focus returns to the card.
+
+</Steps>
+
+<Screenshot name="map-service-selected" caption="The map with checkout selected." />
+
+<Screenshot name="map-drawer" caption="The service drawer." />
+
+The drawer's title is the service with its health ring. Under it a line explains the health: "Failing: N % of calls failed", "Slow: p99 … vs … over 24 h", "Healthy", "Caller only: no server spans of its own", or "Not on the map in the last 1h" when the service has no calls in the range. Drag its left edge to resize it.
+
+- **Open `<service>` traces**: the [Traces](/tayga/guide/traces/) explorer filtered to traces that touch this service anywhere.
+- **RED**: three tiles, **Rate** (calls per second), **Errors** (error ratio) and **p99**, each with its current value and a chart across the range. "No spans for `<service>` in the last 1h." when there is nothing to chart.
+- **Stories with root cause here**: up to five story groups whose root cause is in this service, most stories first, with the count, the endpoint and when the last one happened. Select one to open the [Stories](/tayga/guide/stories/) page filtered to the service with that group selected.
+- **Log signals**: up to five log templates of this service with an alert in the range (active ones first), or flagged as alerting. Each shows the kind, a red dot while active, a detail such as `11 vs 1.6 / window`, and the template. Select one to open the [template page](/tayga/guide/logs/#template-detail).
+- **Callers** and **Callees**: the services that call this one and the services it calls, busiest first, with calls, error ratio and average latency. Failing calls are red. Select one to move the drawer to that service.
+
+## Infrastructure services
+
+Some services, such as a feature-flag service every other service polls, call or are called by almost everything and clutter the map. Tayga hides the services listed as infrastructure (by default `flagd`; see [Configuration](/tayga/operations/configuration/)).
+
+While they are hidden, the calls into them are summarised on each caller's card as a badge, for example `+1 infra`. The badge is red when a call into a hidden service is failing, amber otherwise. Hover over the badge, or focus the card with the keyboard, to see the hidden services with their calls per minute and error ratio.
+
+<Screenshot name="map-infra" caption="The map with infrastructure shown." />
+
+Turn on **Show infrastructure** to draw them as ordinary cards. The map is laid out again. The switch is kept in the URL as `infra=1`. A service whose drawer is open stays on the map even if it is infrastructure.
+
+## Empty, loading and error states
+
+- While the map loads or is laid out, a placeholder says "Loading the service map" or "Laying out N services".
+- "No service calls in this window" means Tayga saw no spans in the range; for a range ending now it suggests a longer range.
+- "Could not lay out the map" with **Try again** if the layout step fails, and the usual error panel if the data cannot be loaded.
+
+## On a phone
+
+<Screenshot name="mobile-map" caption="The service map on a phone." />
+
+On a phone the map starts zoomed to the degraded services when there are any, and the minimap is hidden. The drawer covers the map; close it to go back.
+
+## URL parameters
+
+| Parameter | Values | Meaning |
+|---|---|---|
+| `service` | a service name | The service whose drawer is open. |
+| `q` | text, up to 100 characters | The service search. |
+| `infra` | `1` | Show infrastructure services. |
+| `since`, `until` | see [Time range](/tayga/guide/time-range/#url-parameters) | The time range. |
+
+For example, `/map?service=payment&since=15m` opens the payment service's drawer over the last 15 minutes. The **services degraded** badge in the header links to `/map?since=15m`.
+
+## Tips
+
+- A card turns red only at 5 % failed calls, but a call line turns red at 1 %. Look for red lines into healthy-looking cards: the problem may still be small.
+- Use the drawer's **Stories with root cause here** to go from "this service is red" to the exact failing requests.
+- If a card shows a red `+1 infra` badge, turn on **Show infrastructure**: the failing call may be into the hidden service.
+
+## Related
+
+- [Service map (concept)](/tayga/concepts/service-map/)
+- [Error stories](/tayga/concepts/error-stories/)
+- [Root cause and critical path](/tayga/concepts/root-cause-critical-path/)
+- [Baselines](/tayga/concepts/baselines/)
+- [Log templates](/tayga/concepts/log-templates/)
+- [Log alerts](/tayga/concepts/log-alerts/)

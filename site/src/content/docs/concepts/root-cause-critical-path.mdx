@@ -1,0 +1,112 @@
+---
+title: "Root cause and critical path"
+description: "How Tayga picks the root-cause span, explains it in one sentence, and computes the critical path."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import RefShot from '../../../components/RefShot.astro';
+
+Both are fixed rules over the span tree, implemented as pure functions in the `tayga-analysis` crate with no I/O and no model. The same trace always gives the same root cause and the same critical path.
+
+## The root cause of an error story
+
+<RefShot
+	name="story-waterfall"
+	alt="The story waterfall: span rows indented by depth with bars on a time axis; the root-cause row is marked."
+	caption="The waterfall marks the root-cause span; the critical-path filter shows the spans that set the duration."
+/>
+
+### Which spans failed
+
+A span is an **error span** when any of these holds:
+
+- its status is `error`;
+- it has an event named `exception`;
+- a log attached to it has severity ERROR or higher (severity number 17 or more).
+
+Logs attach to the span whose id they carry. A log with only a trace id (or an unknown span id) attaches to the root span.
+
+### Which one is the root cause
+
+An **error leaf** is an error span with no error span anywhere below it. Failures propagate upwards (a client span fails because the server it called failed), so the leaves are where errors started.
+
+The root cause is the error leaf that **ended first** (ties go to the one that started first). The other error leaves are listed as `also_failed`, earliest end first. The **path** is the chain of spans from the top-level span down to the root cause.
+
+### The message
+
+The root cause's message is the first of these that exists:
+
+1. the span's status message;
+2. the `exception.message` attribute of its `exception` event;
+3. the body of the first ERROR-or-worse log attached to it;
+4. the word `error`.
+
+The exception type comes from `exception.type` on the `exception` event.
+
+### The one-sentence explanation
+
+| Root-cause span | Sentence | Example from the OpenTelemetry demo |
+|---|---|---|
+| A **client** span with no children (the call never reached a server that reported back) | `<service> could not reach <peer> (<operation>): <message>` | `checkout could not reach oteldemo.PaymentService (oteldemo.PaymentService/Charge): name resolver error: produced zero addresses` |
+| Any other span | `<service> <span name> failed: <message>` | `payment charge failed: Payment request failed. Invalid token. demo.user_context.loyalty_level=gold` |
+
+The **peer** is the first of these span attributes that is set: `peer.service`, `rpc.service`, the service part of `rpc.method`, `server.address`, or the host of `url.full` or `http.url`. Without any of them it reads `an unknown peer`. The **operation** is `rpc.method`, else `http.route`, else the span name.
+
+## The critical path
+
+The critical path answers "what was the request waiting for?". It is the chain of spans that determined when the root span finished, cut into segments that together cover the root span exactly, from its start to its end.
+
+### How it is computed
+
+The walk starts at the root span's end and goes backwards in time:
+
+1. Among the current span's children, take the one that ended **latest** (within the part of the span still to be explained).
+2. The time between that child's end and the current position is the parent's own work: a segment credited to the parent.
+3. Descend into the child and explain its window the same way. When the child is done, continue in the parent from the child's start.
+4. A child that overlaps a sibling already on the path is skipped: the two calls ran concurrently and the later one dominated.
+5. When no child is left, the rest of the window back to the span's start is the span's own time.
+
+Each span's **self time** on the path is the sum of its segments. The story keeps all the segments and the **top three spans by self time** (`top_contributors`, shown as `top` in the API).
+
+The walk is iterative, so traces thousands of spans deep do not overflow the stack.
+
+### Clock skew and asynchronous children
+
+Spans from different hosts carry independently read clocks. Two tolerances of **5 ms** handle that:
+
+- A child may end up to 5 ms after its parent and still count as part of the parent's work (in the demo a server span was seen ending 57 µs after its client span). Its end is clipped to the parent's.
+- A child that overlaps the next sibling on the path by up to 5 ms is clipped rather than skipped.
+
+A child that ends **more than 5 ms after its parent** is treated as asynchronous (fire-and-forget work, such as a message published to Kafka and consumed later) and is not on the critical path.
+
+### Example
+
+On a live `load-generator user_checkout_multi` error story (2026-10-07, 140 spans, 81.7 ms), the critical path had 186 segments, and its top contributors were:
+
+| Span | Self time on the critical path |
+|---|---|
+| `product-catalog oteldemo.ProductCatalogService/GetProduct` | 4.63 ms |
+| `product-catalog astronomy-db` | 3.07 ms |
+| `product-catalog oteldemo.ProductCatalogService/GetProduct` (another call) | 2.47 ms |
+
+The full response is in the [API reference](/tayga/reference/api/#get-apiv1storiesstory_id).
+
+## The root cause of a slow story
+
+A slow story has no failing span. Its root cause is the span with the most self time on the critical path, and its summary names it:
+
+```text
+load-generator user_checkout_multi took 5082.0 ms (p99 127.1 ms); most time in shipping POST /ship-order (5002.1 ms on the critical path)
+```
+
+That story came from the demo's `intlShippingSlowdown` flag, which delays international shipping responses (its `5sec` variant here).
+
+<Aside type="note" title="What the rules do not do">
+The root cause is always a span in the trace. Tayga does not look at infrastructure signals (CPU, memory, node events), so a failure caused by, say, a full disk shows up as the span that saw the error, not as the disk.
+</Aside>
+
+## Related
+
+- [Error stories](/tayga/concepts/error-stories/)
+- [Baselines](/tayga/concepts/baselines/)
+- [Story detail in the app](/tayga/guide/story-detail/)

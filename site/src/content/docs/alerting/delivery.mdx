@@ -1,0 +1,74 @@
+---
+title: "Delivery semantics"
+description: "Once per alert and target: retries, Retry-After, the circuit breaker, max_age_secs, republication, and the cases where an alert can arrive twice."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The short version: **each alert is delivered to each target once**, when the notifier first sees it, with retries on temporary failures. Receivers should still deduplicate on `alert_id`, because in a few documented cases an alert can arrive twice.
+
+## Once per alert and target
+
+The logminer publishes an alert to `tayga.alerts` every time it updates it (a spike that grows, a silence that goes on), and republishes unmarked alerts after failures. The notifier records the state of every `(alert_id, target)` pair in the ClickHouse table `notifier_deliveries` (a `ReplacingMergeTree`, kept 30 days), with a `status` of `pending`, `delivered` or `failed`, the number of attempts and the last error.
+
+- Once a target has a `delivered` or `failed` row for an alert, a re-published or re-read copy sends nothing and is counted as `result="duplicate"`.
+- **Later updates are not sent.** A spike that keeps growing, or a silence that gets longer, is delivered once, with the values it had when the notifier first saw it.
+- A `pending` row keeps its attempt count across a restart.
+- The Kafka offset is committed only once every target is `delivered` or `failed`.
+
+## Which alerts are sent
+
+For each record the notifier decides, in order:
+
+| Condition | What happens |
+|---|---|
+| No targets configured | Nothing is sent; the offset is committed. |
+| The kind is not in `kinds` | Skipped and committed. |
+| `last_at` is more than `max_age_secs` (3600) old | Skipped and committed, counted as `stale`. |
+| Otherwise | Delivered to every target. |
+
+`max_age_secs` keeps a first start with targets, or a notifier that was down for over an hour, from delivering a backlog of old alerts. It is judged when the record is read.
+
+## Retries
+
+| Response | Outcome |
+|---|---|
+| 2xx | Delivered. |
+| 429, 5xx, a network error or a timeout | Retried. |
+| Any other status, including other 4xx and 3xx | Failed at once; the status is recorded as `last_error`. |
+
+The wait after the n-th failed attempt is the larger of `1 s × 2^(n−1)` and the response's `Retry-After` (seconds or an HTTP date), capped at 300 seconds. After `max_attempts` (8) attempts the delivery is marked `failed`.
+
+Records are handled one at a time, and each waits for all its targets. With the defaults and no `Retry-After`, a target that keeps failing costs about 2 minutes of backoff (1 + 2 + … + 64 s) plus up to 8 request timeouts before it gives up. The consumer's `max.poll.interval.ms` is 40 minutes, so even waits at the `Retry-After` cap (about 35 minutes for 8 attempts) do not cause a rebalance.
+
+## The circuit breaker
+
+Paying that ladder on every alert would let one dead target hold everything back: at 127 to 207 seconds per alert, the backlog would pass `max_age_secs` after roughly 17 to 28 alerts, and the live demo stack has seen over 100 alerts in an hour. Every later record would then be skipped as stale for every target, healthy ones included. Each target therefore has a breaker:
+
+- When a target gives up on a retryable error, its breaker **opens** for `breaker_cooldown_secs` (300 seconds).
+- While it is open, each new alert gets **exactly one attempt** to that target, without backoff. A 2xx closes the breaker. A retryable failure marks the alert `failed` for that target and keeps the breaker open for another cooldown.
+- A permanent error (4xx) neither opens nor closes it.
+- When the cooldown passes with no new alert, the breaker closes, and the next alert gets the full ladder again.
+- The state is in memory, so a restart starts every target closed.
+
+After its first ladder a dead target costs each record one attempt: almost nothing for a fast 5xx, at most `timeout_secs` (10 seconds) for a host that does not answer. Healthy targets keep pace. The price: an alert sent while a target's breaker is open is not retried to that target later.
+
+## Republication after failures
+
+If the logminer stores an alert but fails to publish it, it republishes it after a later detection pass (alerts stored in the last 24 hours with no publication mark, at most 1,000 per pass). The notifier's `max_age_secs` still applies, so in practice recovery reaches the targets only after an outage shorter than about an hour. Longer outages store and count the alert without delivering it. The 24-hour republish window stays because other consumers of `tayga.alerts` can use those alerts.
+
+## Stopping
+
+On SIGTERM an attempt that is in flight is not cancelled: it finishes within `timeout_secs`, and its row is written (each write times out after 5 seconds and is retried for up to 10 seconds more). Compose gives the container 40 seconds to stop (`stop_grace_period`).
+
+## When an alert can arrive twice
+
+Receivers should deduplicate on `alert_id`. An alert is sent a second time when:
+
+- the process is hard-killed (SIGKILL, out of memory, or a stop that outlasts the grace period) between a 2xx and the row write: the alert is sent once more after the restart;
+- ClickHouse is down for the whole grace period, so the final row is lost; the offset is still committed, and the next re-publish of that alert is sent again;
+- a `notifier_deliveries` row expires after 30 days: a re-publish of the same alert after that, for example a silence lasting more than 30 days, is delivered again.
+
+<Aside type="note" title="Verified">
+In `make e2e-notifier` on 2026-10-06 the mock received alert `fe0492738da0b683` exactly once; after `docker restart tayga-notifier` and 150 seconds in which the logminer re-published it twice, it still had exactly one delivery, and `notifier_deliveries` held one `delivered` row with 1 attempt. The retry, `Retry-After` and breaker paths are covered by unit and integration tests, not by a live failing target. See [Verified claims](/tayga/verified/).
+</Aside>

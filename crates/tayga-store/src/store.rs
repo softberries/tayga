@@ -115,7 +115,7 @@ pub struct EndpointCaps {
 /// `latest` is the newest version of every trace of the window: `argMax` by `span_count`, the
 /// `ReplacingMergeTree` version, over the rows the `ts` filter keeps. `FINAL` read the whole
 /// table instead (`ORDER BY trace_id`, so the filter prunes nothing): 8.8 M rows and 478 MiB per
-/// `endpoint_stats` against 0.39 M rows and 21 MiB (sub-project 4 spec §2.7). `with_ops`
+/// `endpoint_stats` against 0.39 M rows and 21 MiB (`docs/perf/sp4-performance.md`, ClickHouse). `with_ops`
 /// carries `op_durations`, which only `op_stats` reads.
 ///
 /// Two edges differ from `FINAL` (spec §3.8):

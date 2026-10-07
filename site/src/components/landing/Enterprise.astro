@@ -1,0 +1,166 @@
+---
+import Icon from './Icon.astro';
+import { COMPANY_URL, CONTACT_EMAIL, href } from '../../lib/links';
+
+const items = [
+	'SSO / SAML, SCIM, fine-grained RBAC and audit logs',
+	'Multi-tenancy and multi-cluster federation',
+	'High availability, scale-out deployment and upgrade tooling',
+	'PII redaction policies and data-residency controls',
+	'Long-term baselines: compare a release with previous deploys',
+	'ServiceNow, Jira and PagerDuty integrations',
+	'LLM incident summaries with your own model',
+	'Support with an SLA, onboarding and training',
+];
+---
+
+<section class="tg-ent" aria-labelledby="enterprise">
+	<div class="tg-ent__copy">
+		<p class="tg-ent__eyebrow">
+			<Icon name="shield" size={16} />
+			Tayga Enterprise · available on request
+		</p>
+		<h2 id="enterprise">Running Tayga across teams and clusters?</h2>
+		<p class="tg-ent__lede">
+			The enterprise edition adds identity, isolation, scale and support on top of the open-source core, under a
+			commercial license. It is priced per cluster or node, not per GB ingested.
+		</p>
+		<div class="tg-ent__actions">
+			<a class="tg-btn tg-btn--primary" href={`mailto:${CONTACT_EMAIL}`}>
+				<Icon name="mail" size={18} />
+				{CONTACT_EMAIL}
+			</a>
+			<a class="tg-btn tg-btn--secondary" href={COMPANY_URL}>
+				softberries.dev
+				<Icon name="external" size={16} />
+			</a>
+		</div>
+		<p class="tg-ent__more">
+			<a href={href('enterprise/')}>What the enterprise edition includes <span aria-hidden="true">→</span></a>
+		</p>
+	</div>
+	<ul class="tg-ent__list" aria-label="Enterprise features">
+		{
+			items.map((i) => (
+				<li>
+					<Icon name="check" size={16} />
+					<span>{i}</span>
+				</li>
+			))
+		}
+	</ul>
+</section>
+
+<style>
+	.tg-ent {
+		position: relative;
+		display: grid;
+		grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+		gap: clamp(2rem, 4vw, 3.5rem);
+		align-items: center;
+		margin-top: clamp(3.5rem, 8vw, 6rem);
+		padding: clamp(1.75rem, 4vw, 3.25rem);
+		border-radius: 22px;
+		color: #e6eefb;
+		background:
+			radial-gradient(40rem 22rem at 0% 0%, rgba(124, 196, 255, 0.22), transparent 70%),
+			radial-gradient(30rem 20rem at 100% 100%, rgba(43, 108, 176, 0.45), transparent 70%),
+			linear-gradient(135deg, #0c1a33 0%, #0a1020 100%);
+		border: 1px solid rgba(124, 196, 255, 0.22);
+		box-shadow: 0 30px 70px -30px rgba(10, 30, 70, 0.6);
+		overflow: hidden;
+	}
+	.tg-ent__eyebrow {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5rem;
+		margin: 0;
+		padding: 0.35rem 0.8rem;
+		border-radius: 999px;
+		background: rgba(124, 196, 255, 0.12);
+		border: 1px solid rgba(124, 196, 255, 0.28);
+		color: #a9d8ff;
+		font-size: 0.78rem;
+		font-weight: 600;
+	}
+	h2 {
+		margin: 1.1rem 0 0.9rem;
+		font-size: clamp(1.6rem, 1.15rem + 1.8vw, 2.3rem);
+		line-height: 1.15;
+		letter-spacing: -0.03em;
+		font-weight: 700;
+		color: #f2f6fc;
+		text-wrap: balance;
+	}
+	.tg-ent__lede {
+		margin: 0;
+		font-size: 1rem;
+		line-height: 1.7;
+		color: #c3cfe2;
+	}
+	.tg-ent__actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.75rem;
+		margin-top: 1.6rem;
+	}
+	.tg-ent .tg-btn--secondary {
+		background: rgba(255, 255, 255, 0.06);
+		border-color: rgba(255, 255, 255, 0.16);
+		color: #f2f6fc;
+		box-shadow: none;
+	}
+	.tg-ent .tg-btn--secondary:hover {
+		border-color: #7cc4ff;
+	}
+	.tg-ent__more {
+		margin: 1.25rem 0 0;
+		font-size: 0.9rem;
+	}
+	.tg-ent__more a {
+		color: #a9d8ff;
+		font-weight: 600;
+		text-decoration: none;
+	}
+	.tg-ent__more a:hover {
+		text-decoration: underline;
+		text-underline-offset: 0.2em;
+	}
+	.tg-ent :focus-visible {
+		outline-color: #a9d8ff;
+	}
+	.tg-ent__list {
+		display: grid;
+		gap: 0.65rem;
+		margin: 0;
+		padding: 1.4rem;
+		list-style: none;
+		border-radius: var(--tg-radius-card);
+		background: rgba(8, 13, 26, 0.55);
+		border: 1px solid rgba(124, 196, 255, 0.14);
+	}
+	.tg-ent__list li {
+		display: grid;
+		grid-template-columns: auto 1fr;
+		gap: 0.7rem;
+		align-items: start;
+		margin: 0;
+		font-size: 0.9rem;
+		line-height: 1.5;
+		color: #d8e1f0;
+	}
+	.tg-ent__list :global(svg) {
+		margin-top: 0.15rem;
+		color: #7fd1a8;
+	}
+	@media (max-width: 52rem) {
+		.tg-ent {
+			grid-template-columns: 1fr;
+		}
+	}
+	@media (max-width: 30rem) {
+		.tg-ent__actions .tg-btn {
+			width: 100%;
+		}
+	}
+</style>

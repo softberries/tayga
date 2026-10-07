@@ -1,0 +1,287 @@
+---
+title: "Helm and Kubernetes"
+description: "Install Tayga on Kubernetes with the Helm chart: bundled or external ClickHouse and Kafka, ingress, replicas, authentication and notifier secrets, and how upgrades run the schema migration."
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+The chart installs Tayga's six services, the ClickHouse schema migration and, for evaluation, a bundled single-node ClickHouse and Redpanda. For production you point it at ClickHouse and Kafka you run yourself. It is published as an OCI artifact at `oci://ghcr.io/softberries/charts/tayga`; the source is `deploy/helm/tayga` in the repository.
+
+| Workload | Kind | Notes |
+|---|---|---|
+| `tayga-ingest` | Deployment, `ingest.replicas` | OTLP receiver. Service ports 4317 (gRPC) and 4318 (HTTP). Stateless; scale freely. |
+| `tayga-writer` | Deployment, 1 replica | Raw spans and logs to ClickHouse |
+| `tayga-assembler` | Deployment, 1 replica | Error stories, trace summaries, service edges |
+| `tayga-logminer` | Deployment, `logminer.replicas` | Log templates and alerts. Its Service is headless, so the API's recorder scrapes every replica. |
+| `tayga-api` | Deployment, `api.replicas` | Web app and JSON API on 8090; optional Ingress |
+| `tayga-notifier` | Deployment, 1 replica, `notifier.enabled` | Delivers log alerts to webhook and Slack targets |
+| `tayga-migrate[-<revision>]` | Job | `tayga-writer migrate`; see [Upgrades and the schema version](#upgrades-and-the-schema-version) |
+| `tayga-clickhouse` | StatefulSet, `clickhouse.enabled` | One ClickHouse node, 20 Gi volume |
+| `tayga-redpanda` | StatefulSet, `redpanda.enabled` | One Redpanda broker in `dev-container` mode, 10 Gi volume |
+
+The names are for the release name `tayga`; any other release name `<r>` gives `<r>-tayga-api` and so on. Every Tayga pod runs as uid 10001 with a read-only root filesystem, no capabilities and the `RuntimeDefault` seccomp profile, mounts no service-account token, and waits in an init container until Kafka accepts connections. The chart needs Kubernetes 1.27 or newer.
+
+## Install
+
+<Steps>
+
+1. **Install the chart** into its own namespace:
+
+   ```sh
+   helm install tayga oci://ghcr.io/softberries/charts/tayga --version 0.1.0 \
+     --namespace tayga --create-namespace --wait
+   ```
+
+   With the bundled ClickHouse, the migration Job runs alongside the pods, which wait for the schema in their init container; the first start takes a minute or two. The release notes print the next steps.
+
+2. **Watch the pods** come up:
+
+   ```sh
+   kubectl --namespace tayga get pods -l app.kubernetes.io/instance=tayga -w
+   ```
+
+3. **Open the app** through a port-forward (or an [Ingress](#ingress)):
+
+   ```sh
+   kubectl --namespace tayga port-forward svc/tayga-api 8090:8090
+   ```
+
+   Then open `http://localhost:8090`.
+
+4. **Send telemetry** to the ingest Service, `tayga-ingest.tayga.svc:4317` (gRPC) or `http://tayga-ingest.tayga.svc:4318` (HTTP). From a Collector in the cluster:
+
+   ```yaml title="otel-collector.yaml"
+   exporters:
+     otlp_grpc/tayga:
+       endpoint: tayga-ingest.tayga.svc:4317
+       tls:
+         insecure: true
+       compression: gzip
+       timeout: 30s
+   ```
+
+   Add it to the `traces` and `logs` pipelines; see [Connect your Collector](/tayga/install/collector/).
+
+</Steps>
+
+<Aside type="note" title="How the chart was tested">
+`helm lint --strict`, `helm template` and kubeconform (Kubernetes 1.35, 38 resources valid) for the default and the external-backend values, and a real install on a local kind cluster with a locally built image: every pod running, the migration Job complete, telemetrygen traces and logs turned into a story group and a log template through the API, consumer lag 0, then a `helm upgrade` to two logminer replicas and `helm uninstall`. 2026-10-07, Helm 4.2.2, kind 0.31.0.
+</Aside>
+
+### From a checkout
+
+To try the chart before a release, or with your own image, build the image, load it into the cluster and install from the source directory. This is how the chart was tested on kind:
+
+```sh
+docker build -f docker/Dockerfile -t tayga:local .
+kind create cluster --name tayga-test
+kind load docker-image tayga:local --name tayga-test
+helm install tayga deploy/helm/tayga --namespace tayga --create-namespace \
+  --set image.repository=tayga --set image.tag=local --set image.pullPolicy=Never --wait
+```
+
+## Bundled or external backends
+
+<Tabs syncKey="helm-backends">
+<TabItem label="Bundled (evaluation)">
+
+The default. `clickhouse.enabled` and `redpanda.enabled` are `true`: one ClickHouse node (`clickhouse.persistence.size`, 20 Gi) and one Redpanda broker in `dev-container` mode (`redpanda.persistence.size`, 10 Gi, `redpanda.memory` 1G). They are single instances with no replication, meant for trying Tayga out.
+
+```yaml title="values.yaml"
+clickhouse:
+  persistence:
+    size: 50Gi
+    storageClass: fast-ssd   # empty: the cluster's default StorageClass
+redpanda:
+  memory: 1G                 # keep resources.limits.memory above it
+  persistence:
+    size: 20Gi
+```
+
+</TabItem>
+<TabItem label="External (production)">
+
+Run ClickHouse and Kafka (or Redpanda) yourself, or as managed services, and point Tayga at them:
+
+```yaml title="values.yaml"
+clickhouse:
+  enabled: false
+redpanda:
+  enabled: false
+external:
+  clickhouse:
+    url: http://clickhouse.data.svc:8123
+  kafka:
+    brokers: kafka-0.kafka.data.svc:9092,kafka-1.kafka.data.svc:9092
+```
+
+The chart refuses to render without `external.clickhouse.url` when the bundled ClickHouse is off. Tayga creates its topics (`tayga.signals`, `tayga.logs`, `tayga.stories`, `tayga.alerts`) and the ClickHouse database (`database`, default `tayga`) itself.
+
+</TabItem>
+</Tabs>
+
+<Aside type="caution" title="What Tayga supports in external backends today">
+ClickHouse over HTTP as the `default` user without a password, and Kafka over PLAINTEXT without SASL or TLS. Keep both reachable only from Tayga's namespace, for example with NetworkPolicies.
+</Aside>
+
+## Values that matter first
+
+The full list, with defaults, is in the chart's `values.yaml`, and `values.schema.json` validates every value: an unknown key or a wrong enum fails the install with a message naming the key.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `image.repository`, `image.tag`, `image.pullPolicy` | `ghcr.io/softberries/tayga`, the chart's `appVersion`, `IfNotPresent` | The one image with every Tayga binary |
+| `ingest.replicas` | `1` | OTLP receivers; stateless |
+| `logminer.replicas` | `1` | `tayga.logs` has 12 partitions, so replicas beyond 12 idle. See [Scaling logminer replicas](/tayga/operations/scaling-logminer/). |
+| `logminer.fingerprinter` | `scalar` | `scalar`, `parallel` or `off`; see [Performance tuning](/tayga/operations/performance-tuning/#the-fingerprinter) |
+| `api.replicas` | `1` | With authentication on, more than one replica needs `api.auth.sessionKey` (the chart refuses otherwise) |
+| `api.jaegerUrl`, `api.grafanaUrl` | empty | Optional "Open in Jaeger" and "Open in Grafana" links in the app |
+| `api.infraServices` | `["flagd"]` | Services the map hides unless "Show infrastructure" is on |
+| `api.auth.*` | off | [Authentication](#authentication) |
+| `notifier.enabled`, `.publicUrl`, `.kinds`, `.targets`, `.existingSecret` | on, `http://localhost:8090`, all kinds, none | [Alert delivery](#alert-delivery) |
+| `ingress.*` | off | [Ingress](#ingress) |
+| `<service>.resources`, `<service>.extraEnv` | see `values.yaml` | Per service: `ingest`, `writer`, `assembler`, `logminer`, `api`, `notifier` |
+| `extraEnv` | `[]` | Extra environment for every Tayga container |
+| `logLevel` | `info` | `RUST_LOG` of every Tayga service |
+| `migrate.backoffLimit`, `.activeDeadlineSeconds` | `6`, `900` | The migration Job |
+| `podAnnotations`, `podLabels`, `nodeSelector`, `tolerations`, `affinity`, `imagePullSecrets` | empty | Standard, applied to Tayga pods |
+
+Any Tayga setting not covered by a value goes in `extraEnv` or a service's `extraEnv` as a `TAYGA__SECTION__KEY` variable; the [Configuration reference](/tayga/operations/configuration/) lists them.
+
+```yaml title="values.yaml"
+assembler:
+  extraEnv:
+    - name: TAYGA__ASSEMBLER__GAP_MS
+      value: "15000"
+extraEnv:
+  - name: TAYGA__KAFKA__RETENTION_MS
+    value: "172800000"   # 48 h, applied when Tayga creates the topics
+```
+
+### Replicas
+
+- **ingest** is stateless: scale it with the OTLP load.
+- **logminer** scales by partitions of `tayga.logs` (12); each replica mines a disjoint set of services.
+- **api** can run several replicas; with authentication on they must share `api.auth.sessionKey`, or each would sign its own sessions.
+- **writer**, **assembler** and **notifier** run one replica each, and roll with "one consumer at a time": a new pod starts only after the old one stopped.
+
+## Ingress
+
+The Ingress points at the API Service. TLS terminates at the ingress controller, so set `api.auth.secureCookie=true` when it serves HTTPS:
+
+```yaml title="values.yaml"
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+  hosts:
+    - host: tayga.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: tayga-tls
+      hosts:
+        - tayga.example.com
+api:
+  auth:
+    secureCookie: true
+notifier:
+  publicUrl: https://tayga.example.com
+```
+
+The ingest Service is not exposed by the chart. Send OTLP from inside the cluster, or set `ingest.service.type` (for example `LoadBalancer`) knowing that the OTLP ports have no authentication and no TLS.
+
+## Authentication
+
+Off by default; the release notes remind you while it is. Turn it on before you expose the API.
+
+<Steps>
+
+1. **Make a password hash** with `tayga-devtools`, which ships in the image. It asks for the password twice without echo:
+
+   ```sh
+   kubectl --namespace tayga exec -it deploy/tayga-api -- tayga-devtools hash-password
+   ```
+
+2. **Put the hash and a session key in a Secret**, so they stay out of the release's values:
+
+   ```sh
+   kubectl --namespace tayga create secret generic tayga-auth \
+     --from-literal=TAYGA__AUTH__USERNAME=admin \
+     --from-literal=TAYGA__AUTH__PASSWORD_HASH='$argon2id$v=19$m=19456,t=2,p=1$...' \
+     --from-literal=TAYGA__AUTH__SESSION_KEY="$(openssl rand -base64 32)"
+   ```
+
+3. **Point the chart at it:**
+
+   ```yaml title="values.yaml"
+   api:
+     auth:
+       enabled: true
+       existingSecret: tayga-auth
+   ```
+
+</Steps>
+
+Alternatively set `api.auth.username`, `api.auth.passwordHash` and `api.auth.sessionKey` directly (use `--set-string` for the hash, which contains `$`); the chart stores them in a Secret, but they also stay in the release's values (`helm get values`). How sign-in, sessions and the rate limit work is in [Authentication](/tayga/operations/authentication/).
+
+## Alert delivery
+
+The notifier is on by default and, with no targets, idles and logs `delivery disabled: no targets`. Webhook and Slack URLs are credentials. `notifier.targets` renders them into a Secret, but they also stay in the release's values, so for real targets create the Secret yourself from a complete `notifier.toml`:
+
+```toml title="notifier.toml"
+[notifier]
+public_url = "https://tayga.example.com"
+kinds = ["new", "spike", "silence"]
+
+[[notifier.targets]]
+name = "ops-slack"
+kind = "slack"        # or "webhook"
+url = "https://hooks.slack.com/services/..."
+```
+
+```sh
+kubectl --namespace tayga create secret generic tayga-notifier-config --from-file=notifier.toml
+```
+
+```yaml title="values.yaml"
+notifier:
+  existingSecret: tayga-notifier-config
+```
+
+For a quick test, `notifier.targets` takes the same fields: `[{name, kind: webhook|slack, url}]`. The message formats and the retry rules are in [Alerting](/tayga/alerting/notifier/).
+
+## Upgrades and the schema version
+
+```sh
+helm upgrade tayga oci://ghcr.io/softberries/charts/tayga --version <new version> \
+  --namespace tayga --reset-then-reuse-values --wait
+```
+
+`--reset-then-reuse-values` keeps your settings and takes the new chart's defaults for keys it adds; plain `--reuse-values` does not. Better still, keep your values in a file and pass it with `-f` on every install and upgrade.
+
+The ClickHouse schema always moves first, in one of two ways:
+
+- **External ClickHouse:** the migration Job (`tayga-migrate`) is a `pre-install` and `pre-upgrade` hook. Helm runs it to completion before any Tayga pod is created or replaced.
+- **Bundled ClickHouse:** the database belongs to the same release and does not exist yet when pre-install hooks run, so the Job is an ordinary resource, named per revision (`tayga-migrate-<revision>`). Every Tayga pod except ingest waits in its init container until `schema_migrations` reaches the version the chart expects (12 for this chart), logging `waiting for ClickHouse schema version 12 (at 0)`. On an upgrade, the new pods wait for the new schema while the old ones keep serving.
+
+Migrations are forward-only. Reload browser tabs opened before an upgrade; see [Upgrading](/tayga/install/upgrading/) for the version notes.
+
+## Uninstall
+
+```sh
+helm uninstall tayga --namespace tayga
+```
+
+The bundled StatefulSets' PersistentVolumeClaims are kept, as Kubernetes does for every StatefulSet. [Uninstalling](/tayga/install/uninstalling/) shows how to delete them, and the data with them.
+
+## Next
+
+<CardGrid>
+	<LinkCard title="Connect your Collector" description="Exporter config for gRPC and HTTP." href="/tayga/install/collector/" />
+	<LinkCard title="Scaling logminer replicas" description="Partitions, rebalancing and metrics across replicas." href="/tayga/operations/scaling-logminer/" />
+	<LinkCard title="Metrics and Grafana" description="Each service's /metrics and the built-in recorder." href="/tayga/operations/metrics-grafana/" />
+	<LinkCard title="Troubleshooting" description="When stories or logs do not show up." href="/tayga/operations/troubleshooting/" />
+</CardGrid>

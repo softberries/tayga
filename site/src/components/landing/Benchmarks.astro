@@ -1,0 +1,126 @@
+---
+import Section from './Section.astro';
+import { href } from '../../lib/links';
+
+/* Every number comes from docs/perf/sp4-performance.md (measured, dated, hardware stated). */
+const stats = [
+	{
+		value: '2.8',
+		unit: 'µs',
+		label: 'per log line through Drain',
+		note: 'drain_add over a 50,000-line corpus from the stack, one thread',
+	},
+	{
+		value: '6.98',
+		unit: '×',
+		label: 'faster mining with the fingerprint cache',
+		note: 'cached/add vs add_fingerprinted, same corpus',
+	},
+	{
+		value: '99.70',
+		unit: '%',
+		label: 'cache hits on the live stack',
+		note: '69,359 of 69,569 lines, first 30 minutes after deploy',
+	},
+	{
+		value: '1.07',
+		unit: '%',
+		label: 'of one core for the logminer',
+		note: 'live demo load, about 40 log lines per second',
+	},
+];
+---
+
+<Section
+	id="benchmarks"
+	eyebrow="Benchmarks"
+	title="Measured, dated, sourced"
+	lede="Numbers from the performance report, each with its method and source. Nothing is extrapolated."
+>
+	<ul class="tg-stats">
+		{
+			stats.map((s) => (
+				<li>
+					<p class="tg-stats__value">
+						{s.value}
+						<span>{s.unit}</span>
+					</p>
+					<p class="tg-stats__label">{s.label}</p>
+					<p class="tg-stats__note">{s.note}</p>
+				</li>
+			))
+		}
+	</ul>
+	<p class="tg-stats__foot">
+		Criterion micro-benchmarks in a release build on an Apple M3 Max (14 cores); live figures from the OpenTelemetry demo stack on 6 and 7 October 2026.{' '}
+		<a href={href('performance/')}>Method and full results <span aria-hidden="true">→</span></a>
+	</p>
+</Section>
+
+<style>
+	.tg-stats {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		border-radius: var(--tg-radius-panel);
+		border: 1px solid var(--sl-color-hairline-light);
+		background: var(--tg-panel);
+		box-shadow: var(--tg-shadow);
+		overflow: hidden;
+	}
+	.tg-stats li {
+		margin: 0;
+		padding: 1.6rem 1.5rem 1.5rem;
+		border-inline-end: 1px solid var(--sl-color-hairline-light);
+		border-bottom: 1px solid var(--sl-color-hairline-light);
+		margin-inline-end: -1px;
+		margin-bottom: -1px;
+	}
+	.tg-stats__value {
+		margin: 0;
+		font-family: var(--__sl-font-mono);
+		font-size: clamp(2.2rem, 1.8rem + 1.5vw, 2.8rem);
+		font-weight: 500;
+		line-height: 1;
+		letter-spacing: -0.04em;
+		background: linear-gradient(100deg, var(--sl-color-white) 20%, var(--sl-color-text-accent));
+		-webkit-background-clip: text;
+		background-clip: text;
+		color: transparent;
+	}
+	.tg-stats__value span {
+		font-size: 0.55em;
+		margin-inline-start: 0.1em;
+	}
+	.tg-stats__label {
+		margin: 0.75rem 0 0;
+		font-weight: 600;
+		color: var(--sl-color-white);
+		font-size: 0.95rem;
+	}
+	.tg-stats__note {
+		margin: 0.35rem 0 0;
+		font-size: 0.8rem;
+		line-height: 1.55;
+		color: var(--sl-color-gray-3);
+	}
+	.tg-stats__foot {
+		margin: 1.1rem auto 0;
+		max-width: 48rem;
+		text-align: center;
+		font-size: 0.82rem;
+		line-height: 1.6;
+		color: var(--sl-color-gray-3);
+	}
+	.tg-stats__foot a {
+		color: var(--sl-color-text-accent);
+		font-weight: 600;
+		text-decoration: none;
+		white-space: nowrap;
+	}
+	.tg-stats__foot a:hover {
+		text-decoration: underline;
+	}
+</style>

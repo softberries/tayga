@@ -1,0 +1,136 @@
+---
+title: "Traces"
+description: "The trace explorer (filters, the duration scatter and its selection, the results table) and the trace view."
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Screenshot from '../../../components/Screenshot.astro';
+
+The Traces page answers **"which requests looked like this, and how long did they take?"** You filter the traces in the time range by service, endpoint, duration and errors, see them as dots on a duration-over-time chart, select a region of the chart, and open any trace as a waterfall. Traces that became stories are marked and linked.
+
+It has two views: the explorer at `/traces`, and the [trace view](#trace-view) at `/traces/<trace id>`.
+
+<Screenshot name="traces-service-full" eager caption="The explorer filtered to traces that touch the checkout service." />
+
+## Filters
+
+<Screenshot name="traces-filters" caption="The filter bar." />
+
+- **Service** (1): pick a service from a searchable list; **any** clears it. Once a service is picked, a toggle appears beside it:
+  - **Anywhere in trace** (the default): traces in which any span belongs to the service;
+  - **As endpoint**: only traces that entered through the service.
+- **Endpoint** (2): the endpoints present in the current results, most frequent first, with a count each. Changing the service clears the endpoint.
+- **Duration** (3): a lower and an upper bound in whole milliseconds. Type a value and press <kbd>Enter</kbd> or leave the field to apply it. "Durations are whole milliseconds." and "Min must not exceed max." flag a bound that cannot be applied.
+- **Errors only** (4): only traces with an error. The button turns red while it is on.
+- **Clear filters** appears when any filter is set and removes them all.
+- **Paste a trace id** (5): paste a 32-character hex trace id to open it at once, or type one and press <kbd>Enter</kbd> or the arrow button. Anything else shows "Not a trace id: expected 32 hex characters."
+
+Every filter goes into the URL. Changing a filter clears a [selection](#selecting-traces-on-the-chart) on the chart.
+
+## Duration over time
+
+<Screenshot name="traces-scatter" caption="Each dot is a trace: its start time across, its duration up." />
+
+Each dot is one trace, placed by its start time and its duration.
+
+- **Legend** (1): **Other traces** (accent), **Slow stories** (amber) and **Errors and error stories** (red), with the number of each. A trace that failed, or that has an error story, counts as red.
+- **Linear** or **Log** (2): the scale of the duration axis. Log spreads out traces when a few slow ones would squash the rest at the bottom.
+- Hover over a dot to see its endpoint, duration, span count, whether it failed or has a story, and its start time.
+- Click a dot to open the trace. On a phone, tap it.
+
+The chart covers the whole time range. The API returns at most the 500 newest traces that match; when that limit is reached the chart says "Showing the newest 500; narrow the filters to reach older traces." and the chart's time axis covers just those traces.
+
+### Selecting traces on the chart
+
+<Steps>
+
+1. Drag a rectangle across the chart. The dots outside it fade, and the table below lists only the traces inside it: `12 of 500 selected`.
+
+2. To change it, drag a new rectangle. To remove it, select **Clear selection** above the chart.
+
+</Steps>
+
+The selection is kept in the URL (`sel`), so you can share "these slow traces between 14:02 and 14:05".
+
+## Traces table
+
+<Screenshot name="traces-table" caption="The results table." />
+
+- **Start**: the start time, with milliseconds for ranges up to an hour that end now, and with the date otherwise. Hover over it to see the full date and time.
+- **Endpoint**: the service and operation the trace entered through. Select it to open the trace.
+- **Duration**: a bar on the same scale as the chart (linear or log), coloured like the dot, and the duration.
+- **Spans**: the number of spans.
+- **Error**: an **error** badge when the trace failed.
+- **Story**: **error story** or **slow story** when Tayga built a story for the trace; select it to open the story.
+
+Sort by **Start**, **Endpoint**, **Duration** or **Spans** by selecting the column header, and select it again to reverse. The default is newest first. With the table focused, <kbd>PageUp</kbd>, <kbd>PageDown</kbd>, <kbd>Home</kbd> and <kbd>End</kbd> scroll it. On a phone, Spans is hidden and each row takes two lines.
+
+<Screenshot name="traces-errors-full" caption="Errors only: failing traces and their stories." />
+
+## Empty states
+
+- "No traces match" when the filters find nothing. It suggests **Clear filters**. If you filtered by a service **As endpoint**, it explains that the service may still take part in other traces and offers **Match `<service>` anywhere in the trace**.
+- With no filters, "No traces in the last 1h." suggests a longer range.
+- "No traces in the selection" when the rectangle holds no dots, with **Clear selection**.
+- When the search fails, a red banner, "Could not load traces.", with **Try again**.
+
+## Trace view
+
+<Screenshot name="trace-view-full" caption="A trace that has an error story." />
+
+The trace view shows one trace in full: every span on the waterfall, with the span drawer. Open it from a dot or row in the explorer, **Open trace** on a story, a hit on a log template page, or the command palette (paste a trace id).
+
+### Header
+
+<Screenshot name="trace-header" caption="The trace header." />
+
+The header shows the trace id and the root span (service and name), and **Open in Jaeger** when a Jaeger URL is configured. Below them: **Root span** duration, **Trace window** (from the first span's start to the last span's end), **Spans**, **Services**, **Errors** (red when there are any), **Logs** and **Started**.
+
+### Story banner
+
+<Screenshot name="trace-story-link" caption="The link from a trace to its story." />
+
+When Tayga built a story for the trace, a banner shows its kind and summary, with **Open story**. The waterfall then uses the story's critical path and marks its root cause. For a trace without a story, Tayga computes the critical path from the spans, and no root cause is marked.
+
+### Waterfall and span drawer
+
+The waterfall and the span drawer work as on the story page: search, the **All spans**, **Errors** and **Critical path** filters, the trace overview, expand and collapse, and the keyboard. See [Story detail: Waterfall](/tayga/guide/story-detail/#waterfall). The trace's logs are in each span's **Logs** tab in the drawer.
+
+When the trace window is more than five times longer than the root span (for example long-lived streams that share the trace id), the waterfall opens zoomed to the root request and says "Showing the root request". **Reset zoom** shows the whole window.
+
+### Trace not found
+
+<Screenshot name="trace-not-found" caption="A trace id with no stored spans or logs." />
+
+"Trace not found" means no spans or logs are stored for that id: it has expired, or has not been ingested yet. Traces close after a short quiet period, so a trace from the last few seconds may not be there yet.
+
+## URL parameters
+
+Explorer (`/traces`):
+
+| Parameter | Values | Meaning |
+|---|---|---|
+| `service` | a service name | Service filter. |
+| `touched` | `1` | Match the service anywhere in the trace (only with `service`). Absent: as endpoint. |
+| `endpoint` | an endpoint name | Endpoint filter. |
+| `min_ms`, `max_ms` | whole milliseconds, up to 86,400,000 | Duration bounds. A `max_ms` below `min_ms` is ignored. |
+| `errors` | `1` | Errors only. |
+| `log` | `1` | Log scale on the chart. |
+| `sel` | `t0_t1_d0_d1` | The chart selection: start and end time (Unix ms), lowest and highest duration (ms). |
+| `since`, `until` | see [Time range](/tayga/guide/time-range/#url-parameters) | The time range. |
+
+Trace view (`/traces/<trace id>`): `span` (the open span), `q` (the waterfall search) and `only` (`errors` or `critical`), as on the [story page](/tayga/guide/story-detail/#url-parameters).
+
+## Tips
+
+- To find the slowest requests of an endpoint, pick the endpoint, switch to **Log**, and drag a rectangle around the top of the chart.
+- A band of red dots at one moment usually means one incident; select it and look at the **Story** column to see which story groups it produced.
+- The service drawer on the [Service map](/tayga/guide/service-map/) has **Open `<service>` traces**, which opens this page filtered to that service.
+
+## Related
+
+- [Error stories](/tayga/concepts/error-stories/)
+- [Root cause and critical path](/tayga/concepts/root-cause-critical-path/)
+- [Baselines](/tayga/concepts/baselines/)
+- [Log templates](/tayga/concepts/log-templates/)
+- [Log alerts](/tayga/concepts/log-alerts/)

@@ -1,0 +1,57 @@
+# Sample OpenTelemetry Collector config that forwards traces and logs to Tayga.
+# Tested with otel/opentelemetry-collector-contrib:0.162.0.
+#
+# Tayga ingests OTLP traces and logs (not metrics) on tayga-ingest: 4317 (gRPC)
+# and 4318 (HTTP). Set TAYGA_OTLP_ENDPOINT to the gRPC address your collector
+# uses to reach it (host:port, no scheme):
+#   - a collector container on the standalone stack's network: tayga-ingest:4317 (the default);
+#   - a collector on the Docker host: localhost:4317 (or your TAYGA_OTLP_GRPC_PORT);
+#   - Kubernetes (Helm chart): <release>-tayga-ingest.<namespace>.svc:4317.
+#
+# To add Tayga to an existing collector, copy the otlp_grpc/tayga exporter and
+# append it to the exporters of your traces and logs pipelines.
+#
+# To run this file next to the standalone stack (project "tayga"), receiving on
+# 127.0.0.1:5317 (gRPC) and 127.0.0.1:5318 (HTTP):
+#   docker run -d --name tayga-otelcol --network tayga_default \
+#     -p 127.0.0.1:5317:4317 -p 127.0.0.1:5318:4318 \
+#     -v "$PWD/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro" \
+#     otel/opentelemetry-collector-contrib:0.162.0
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  otlp_grpc/tayga:
+    endpoint: ${env:TAYGA_OTLP_ENDPOINT:-tayga-ingest:4317}
+    tls:
+      # tayga-ingest serves plain gRPC. Put TLS in front of it if the traffic
+      # crosses an untrusted network.
+      insecure: true
+    compression: gzip
+    # Above tayga-ingest's 25 s Kafka delivery timeout, so ingest answers first.
+    timeout: 30s
+    sending_queue:
+      enabled: true
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 300s
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_grpc/tayga]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_grpc/tayga]

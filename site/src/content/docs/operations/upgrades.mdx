@@ -1,0 +1,57 @@
+---
+title: "Upgrades and migrations"
+description: "How schema migrations run, the order services must restart in, and the notes for upgrades that change behaviour."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The step-by-step upgrade for each install method is in [Upgrading](/tayga/install/upgrading/). This page explains what happens underneath: the schema migrations, the order of restarts, and the upgrades that need attention.
+
+## Schema migrations
+
+The ClickHouse schema is changed only by `tayga-writer migrate`, a one-shot command that applies the numbered migrations in order and exits. It records each applied version in `schema_migrations`, so running it again does nothing. It runs from exactly one place because ClickHouse has no DDL locking.
+
+In both bundled Compose stacks it is the `tayga-migrate` service, and every Tayga service that reads or writes ClickHouse waits for it to finish successfully (`depends_on: condition: service_completed_successfully`). `docker compose up -d` (or `make up`) therefore migrates first and then starts the rest. Ingest does not wait: it only talks to Kafka.
+
+| Version | Adds |
+|---|---|
+| 0001 | `spans`, `logs` |
+| 0002, 0003 | `trace_summaries`, `service_edges`, `error_stories`; replay-safe engines |
+| 0004 | `log_templates`, `log_template_hits`, `log_alerts` |
+| 0005 | `metric_samples` |
+| 0006 | `logminer_state` |
+| 0007 | `log_template_minutes` and its materialized view |
+| 0008 | `baseline_day`, `baseline_week` on `log_alerts` |
+| 0009 | A one-time back-fill of `log_template_minutes` from the last 3 days of hits |
+| 0010 | `log_template_silence` and the `silence` alert kind |
+| 0011 | `notifier_deliveries` |
+| 0012 | `log_alert_publications`; marks every existing alert as published |
+
+## Restart order
+
+**Migrations must run before `tayga-api`, `tayga-logminer` or `tayga-notifier` restart on a new version.** The services read and write the new tables and alert kinds: 0010 is read by the API and written by the logminer, 0011 by the notifier, 0012 by the logminer. The bundled Compose files take care of this. If you restart one service by hand after an upgrade, run the migration first:
+
+```sh
+docker compose run --rm tayga-migrate
+```
+
+## After an upgrade
+
+- **Reload open browser tabs.** A tab opened before the upgrade runs the old app bundle, which can reject new fields: for example, an old bundle shows an error on alert views once `silence` alerts exist, and on the Pipeline page's consumer lag once its rows carry a `topic` field.
+- **Topic settings do not change.** Tayga never alters an existing topic; a stack created before the 24-hour default keeps 7-day retention. See [Retention and disk](/tayga/operations/retention/#changing-retention-on-an-existing-stack).
+- **Masking changes start a new epoch.** An upgrade that changes how log lines are masked (and so changes `masking_version`) starts a new masking epoch: no `new` alerts for 15 minutes for templates first seen in that time. See [The masking epoch](/tayga/concepts/log-templates/#the-masking-epoch).
+
+## Upgrades with notes
+
+| Change | What to know |
+|---|---|
+| Logminer reads `tayga.logs` (logminer replicas) | On its first start the new logminer reads `tayga.logs` from the beginning, and the topic holds only logs from the upgraded ingest on. Logs still unmined on `tayga.signals` when the old logminer stopped are not mined. To avoid that gap, stop ingest until the old logminer has caught up, or accept it. On the 2026-10-06 upgrade of the demo stack the gap was 0 logs. |
+| `log_alert_publications` (migration 0012) | Every alert stored before the migration is marked as published, so the upgrade republishes nothing. |
+| `notifier_deliveries` (migration 0011) | The notifier starts with no delivery history: with targets configured, alerts younger than `max_age_secs` that are still on `tayga.alerts` can be delivered once. |
+| `log_template_minutes` back-fill (migration 0009) | The seasonal mode's one-day comparator works at once; the one-week comparator needs a week. |
+| `GET /api/v1/service-map` returns an object | Older versions returned a plain array of edges. A client that read the array must read `edges`. |
+| HTTP status codes in templates (masking version 3) | Access-log lines with a status code start new templates next to the older `<*>` ones; no re-mine is needed. A `new` alert is suppressed when the template is only a status-code split of an older one. |
+
+## Downgrades
+
+There is no tested downgrade path, and migrations are not reversed: 0003 renamed the first analysis tables to `*_v1` and created replay-safe ones, and 0010 widened the alert `kind` enum. Keep a backup of the ClickHouse volume if you may need to roll back.

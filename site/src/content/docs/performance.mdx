@@ -1,0 +1,191 @@
+---
+title: "Performance"
+description: "Benchmarks and live measurements of Tayga: Drain log mining, the fingerprint cache, CPU and GPU backends, ClickHouse query costs, with method, hardware and dates."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every number on this page comes from the performance report in the repository, `docs/perf/sp4-performance.md`. Each one says how it was measured and when. Micro-benchmarks are criterion runs of a release build; live numbers come from the OpenTelemetry demo stack running on the same machine. They describe one machine and one workload, not a guarantee.
+
+## Summary
+
+| Measure | Result | Source |
+|---|---|---|
+| Drain, per log line | **2.818 µs** | `stages/drain_add`, 50,000-line corpus, one thread |
+| Fingerprint cache vs Drain alone | **6.98×** faster (144.29 ms → 20.678 ms for 50,000 lines) | `cached` benches |
+| Cache hits on the live stack | **99.70 %** (69,359 of 69,569 lines) | first 30 minutes after deploy, 2026-10-07 |
+| Logminer CPU at live load | **1.07 %** of one core at about 40 lines/s | `docker stats`, 2026-10-06 |
+| Service map, ClickHouse CPU per refresh | **291.5 → 40.0 ms** (7.3×) | live `system.query_log`, 2026-10-07 |
+| Baseline queries, bytes read per run | **27.7×** and **17.0×** less | live `system.query_log`, 2026-10-07 |
+| GPU fingerprinting | **slower than CPU `parallel` at every size** | criterion, 2026-10-07 |
+
+## Hardware and software
+
+| Item | Value |
+|---|---|
+| Host | Apple M3 Max, 14 cores, 96 GiB |
+| Docker Desktop VM | 14 CPUs, 31.5 GiB |
+| Rust | 1.98.1 |
+| ClickHouse | 26.8.15.10 |
+| GPU | Apple M3 Max, wgpu 30.0.1, Metal backend, integrated |
+
+**The corpus** (`fixtures/log_corpus.jsonl.gz`) is the oldest 50,000 log rows of one hour of the demo stack (22 minutes, 17 services), exported read-only from ClickHouse on 2026-10-06 and scanned for credentials (no matches). The export command is in the report, so the corpus can be rebuilt from any stack.
+
+## Live load
+
+A 60-second sample of the demo stack on 2026-10-06, between 18:30 and 19:00 UTC:
+
+| Measure | Value |
+|---|---|
+| Logs mined | 2,456 in 61 s: **40 lines/s** |
+| `tayga.logs` records | 473 in 61 s: **5.2 logs per record**, the logminer's real batch size |
+| CPU, % of one core (mean of 30 `docker stats` samples) | ClickHouse 21.1, ingest 1.81, assembler 1.55, **logminer 1.07**, writer 0.75, api 0.21 |
+| Drain's share of the logminer | 40 lines/s × 2.818 µs = 0.113 ms/s, about **1 %** of the logminer's own CPU |
+
+The logminer's CPU is mostly fixed overhead (Kafka polling, a 200 ms receive loop, the 60-second detection pass), and ClickHouse is the largest consumer in the stack.
+
+## Benchmarks
+
+Criterion, release build, one thread. Times and throughputs are criterion's point estimates (the middle of the confidence interval).
+
+| Bench | Elements | Time | Throughput |
+|---|---|---|---|
+| `stages/split` | 50,000 lines | 26.972 ms | 1.85 M/s |
+| `stages/tokens` | 50,000 lines | 122.88 ms | 407 k/s |
+| `stages/drain_add` | 50,000 lines | 140.89 ms | 355 k/s |
+| `convert/trace_records` (ingest) | about 3,267 spans | 6.2875 ms | 520 k/s |
+| `flatten/rows_from_envelope` (writer) | about 2,217 envelopes | 8.0848 ms | 274 k/s |
+| `assemble/ingest_close_process` (assembler) | about 2,217 envelopes | 4.4374 ms | 500 k/s |
+
+The `convert`, `flatten` and `assemble` element counts are derived (time × throughput), not printed by criterion.
+
+### Where Drain spends its time
+
+| Part | µs per line | Share |
+|---|---|---|
+| `drain_add` (whole) | 2.818 | 100 % |
+| tokens (split, mask, normalise) | 2.458 | 87.2 % |
+| of which split and allocation | 0.539 | 19.1 % |
+| masking | 1.919 | 68.1 % |
+| tree walk | 0.360 | 12.8 % |
+
+Masking dominates, which is why the fingerprint cache, which skips masking for known shapes, pays off.
+
+## The fingerprint cache
+
+The corpus through Drain alone and through the cache, each iteration starting from an empty Drain (so every shape's first sighting is a miss):
+
+| Bench | Time for 50,000 lines | Throughput |
+|---|---|---|
+| `cached/add` (Drain alone) | 144.29 ms | 347 k lines/s |
+| `cached/add_fingerprinted` (cache) | 20.678 ms | 2.42 M lines/s |
+
+**6.98×** faster. The results are identical: a differential test feeds the corpus through both paths and requires the same template for every line, under five Drain configurations, with at least 95 % hits (measured 99.43 % to 99.49 %).
+
+### Live, after the deploy (2026-10-07)
+
+| Measure | Value |
+|---|---|
+| Lines mined in the first 30 minutes | 69,569: 69,359 hits, 210 misses, **99.70 %** hits |
+| Collisions, cache resets | 0 |
+| Templates created | 0 (also 0 in the control window before the deploy) |
+| Mean mining time per Kafka record, cache on (`scalar`) | **8.0 µs** (5.16 logs per record) |
+| Mean mining time per Kafka record, cache off | **34.8 µs** |
+
+The live 4.4× is a mean over two different short windows, not a controlled benchmark. Either way, mining stays a negligible share of a core at 40 lines per second.
+
+## CPU and GPU backends
+
+The fingerprinting can run on one thread (`scalar`), on rayon's thread pool (`parallel`, 14 threads here) or on the GPU (`gpu`, wgpu through Metal). One criterion run on 2026-10-07:
+
+| Batch (bodies) | scalar | parallel | gpu | parallel vs scalar | gpu vs scalar |
+|---|---|---|---|---|---|
+| 5 | 2.44 µs | 2.44 µs | 2.43 µs (CPU path) | 1.00× | 1.00× |
+| 64 | 21.0 µs | 20.9 µs | 21.1 µs (CPU path) | 1.00× | 0.99× |
+| 512 | 184 µs | 90.8 µs | 182 µs (CPU path) | 2.02× | 1.01× |
+| 2,048 | 694 µs | 144 µs | 725 µs | 4.80× | **0.96×** |
+| 5,000 | 1.69 ms | 252 µs | 924 µs | 6.71× | 1.83× |
+| 50,000 | 16.6 ms | 1.95 ms | 3.10 ms | 8.54× | 5.37× |
+
+<Aside type="caution" title="The GPU result">
+**The GPU backend was slower than `parallel` at every measured size**: 5.0× slower at 2,048 bodies, 3.7× at 5,000 and 1.6× at 50,000. Against a single thread it was 4 % slower at 2,048 and faster only from about 5,000 bodies. A fixed dispatch cost of **279 µs** per batch (buffer creation, upload, dispatch, readback) dominates small batches. The logminer's real batch is about 5 bodies, where every backend runs on the calling thread.
+
+So the GPU backend is kept behind a build feature, is not in the Docker images, and is not recommended. Two of its fallbacks (the 5 s poll timeout and the no-adapter path) are untested, because they cannot be forced on this machine.
+</Aside>
+
+The early prototype measured `parallel` at 23.4 M bodies/s at 5,000 bodies; the shipped code reached 19.84 M (6.71× scalar). The ratio is the comparable figure, since scalar itself varied by about 21 % between runs.
+
+**Decision:** `scalar` is the default, because at 5 bodies per batch neither alternative earns it. See [Performance tuning](/tayga/operations/performance-tuning/#the-fingerprinter).
+
+## ClickHouse
+
+ClickHouse used the most CPU in the stack, so the work went there. On 2026-10-06 (old code, real UI tabs), the top query shapes of one hour by CPU were:
+
+| Rank | Query | Runs/h | Avg ms | CPU s/h | Read per run |
+|---|---|---|---|---|---|
+| 1 | Service map (24 h scan of `spans`) | 1,006 | 449 | 558 | 10.0 M rows, 162 MiB |
+| 2 | Trace search (`trace_summaries FINAL`) | 172 | 521 | 147 | 4.3 M rows, 226 MiB |
+| 3 | `op_stats` (baselines) | 60 | 354 | 97 | 8.6 M rows, 1.22 GiB |
+| 4 | `endpoint_stats` (baselines) | 60 | 300 | 70 | 8.6 M rows, 468 MiB |
+| 5 | Service list for search (`DISTINCT` over 24 h) | 171 | 429 | 47 | 10.5 M rows |
+
+The cause of ranks 2 to 4 was `FINAL` on `trace_summaries`: the table is ordered by trace id, so under `FINAL` the time filter pruned nothing and every run read the whole table.
+
+### The service map
+
+The map's 24-hour health baseline became its own query, computed once a minute and shared by every request in that minute (a single-flight cache). Measured live on 2026-10-07 with three map requests every 10 seconds, as three tabs refreshing together:
+
+| | Old code | New code |
+|---|---|---|
+| CPU per refresh | 291.5 ms | **40.0 ms (7.3×)** |
+| CPU per hour | 315 s (at 1,080 runs/h) | 43.4 s |
+| Baseline runs per hour | every request | 60, one per minute |
+
+With staggered requests (three loops offset by 3.3 s) it measured 41.1 ms per refresh, 7.1×. A first version without the single-flight measured only 4.1×, because three requests arriving together at a minute rollover each computed the baseline.
+
+### Baseline queries
+
+`endpoint_stats` and `op_stats` deduplicate the window's rows with `argMax(…, span_count) GROUP BY trace_id` instead of `FINAL`. Live, 60 runs an hour each:
+
+| Query | Read per run, old → new | CPU per hour, old → new |
+|---|---|---|
+| `endpoint_stats` | 505.7 MiB → 18.3 MiB (**27.7×**) | 70.9 → 15.2 s (4.7×) |
+| `op_stats` | 1.32 GiB → 79.3 MiB (**17.0×**) | 98.5 → 31.2 s (3.2×) |
+
+Equivalence was checked on live data against the old queries (same endpoints, operations and counts once sampling quantiles are made exact) and is pinned by an integration test over deliberate duplicates.
+
+### Trace search
+
+The trace search also dropped `FINAL`: it reads only rows within 600 s of the window, deduplicates them, and then looks up the highest span count of each returned trace by its primary key, so a stale fragment of a long trace is not shown. Isolated runs on 2026-10-07, default request (`1h`, 100 rows):
+
+| | Old | New |
+|---|---|---|
+| CPU | 477 ms | 146 ms (3.3×) |
+| Bytes read | 251.0 MiB | 103.0 MiB (2.4×): 18.7 main query + 84.3 lookup |
+
+The target was 4× fewer bytes; the main query alone reads 13.4× less, but the lookup reads most of the trace-id column. That was accepted because correctness came first; ideas to close the gap are open. Every request returned the same rows as the old query.
+
+## Web app
+
+Measured once on 2026-10-05 on the development machine against the live stack, medians of 5 cold-cache runs, with the Playwright `perf` project:
+
+| Measure | Result | Budget |
+|---|---|---|
+| Initial JavaScript (gzip) | 185.2 KB | 350 KB |
+| Home page first render with data | 146 ms | 1,000 ms |
+| Waterfall of a 105-span trace / 5,000 synthetic spans | 25 ms / 32 ms | 200 ms |
+| Service map layout, live / 60 synthetic nodes | 143 ms / 181 ms | 300 ms |
+| Requests while the tab is hidden (13 s) | 0 | 0 |
+
+## Reproducing
+
+```sh
+cargo bench -p tayga-drain --bench mining                 # stages, fingerprint, cached
+cargo bench -p tayga-drain --bench mining --features gpu -- fingerprint   # with the GPU rows
+cargo bench -p tayga-ingest --bench convert
+cargo bench -p tayga-store --bench flatten
+cargo bench -p tayga-assembler --bench close
+TAYGA_CORPUS=<file> cargo test -p tayga-drain --release --test differential --test fingerprint
+```
+
+The last line runs the cache-versus-Drain differential on another corpus, for example a fresh export from your own stack. The live measurements need a running stack; their queries are in the report.

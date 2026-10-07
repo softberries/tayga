@@ -1,0 +1,264 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Tayga chart values",
+  "type": "object",
+  "definitions": {
+    "resources": {
+      "type": "object",
+      "properties": {
+        "requests": {"type": "object"},
+        "limits": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "envList": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {"name": {"type": "string", "minLength": 1}}
+      }
+    },
+    "serviceType": {"type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"]},
+    "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+    "pullPolicy": {"type": "string", "enum": ["Always", "IfNotPresent", "Never"]},
+    "upstreamImage": {
+      "type": "object",
+      "required": ["repository", "tag"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string", "minLength": 1},
+        "pullPolicy": {"$ref": "#/definitions/pullPolicy"}
+      },
+      "additionalProperties": false
+    },
+    "persistence": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "size": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|K|M|G|T)?$"},
+        "storageClass": {"type": "string"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "properties": {
+    "image": {
+      "type": "object",
+      "required": ["repository"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string"},
+        "pullPolicy": {"$ref": "#/definitions/pullPolicy"}
+      },
+      "additionalProperties": false
+    },
+    "imagePullSecrets": {"type": "array"},
+    "nameOverride": {"type": "string"},
+    "fullnameOverride": {"type": "string"},
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": {"type": "boolean"},
+        "name": {"type": "string"},
+        "annotations": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "podSecurityContext": {"type": "object"},
+    "securityContext": {"type": "object"},
+    "podAnnotations": {"type": "object"},
+    "podLabels": {"type": "object"},
+    "nodeSelector": {"type": "object"},
+    "tolerations": {"type": "array"},
+    "affinity": {"type": "object"},
+    "logLevel": {"type": "string", "minLength": 1},
+    "extraEnv": {"$ref": "#/definitions/envList"},
+    "ingest": {
+      "type": "object",
+      "properties": {
+        "replicas": {"type": "integer", "minimum": 0},
+        "service": {
+          "type": "object",
+          "properties": {
+            "type": {"$ref": "#/definitions/serviceType"},
+            "grpcPort": {"$ref": "#/definitions/port"},
+            "httpPort": {"$ref": "#/definitions/port"},
+            "annotations": {"type": "object"}
+          },
+          "additionalProperties": false
+        },
+        "resources": {"$ref": "#/definitions/resources"},
+        "extraEnv": {"$ref": "#/definitions/envList"}
+      },
+      "additionalProperties": false
+    },
+    "writer": {
+      "type": "object",
+      "properties": {
+        "resources": {"$ref": "#/definitions/resources"},
+        "extraEnv": {"$ref": "#/definitions/envList"}
+      },
+      "additionalProperties": false
+    },
+    "assembler": {
+      "type": "object",
+      "properties": {
+        "resources": {"$ref": "#/definitions/resources"},
+        "extraEnv": {"$ref": "#/definitions/envList"}
+      },
+      "additionalProperties": false
+    },
+    "logminer": {
+      "type": "object",
+      "properties": {
+        "replicas": {"type": "integer", "minimum": 0},
+        "fingerprinter": {"type": "string", "enum": ["scalar", "parallel", "off"]},
+        "resources": {"$ref": "#/definitions/resources"},
+        "extraEnv": {"$ref": "#/definitions/envList"}
+      },
+      "additionalProperties": false
+    },
+    "api": {
+      "type": "object",
+      "properties": {
+        "replicas": {"type": "integer", "minimum": 0},
+        "service": {
+          "type": "object",
+          "properties": {
+            "type": {"$ref": "#/definitions/serviceType"},
+            "port": {"$ref": "#/definitions/port"},
+            "annotations": {"type": "object"}
+          },
+          "additionalProperties": false
+        },
+        "jaegerUrl": {"type": "string"},
+        "grafanaUrl": {"type": "string"},
+        "infraServices": {"type": "array", "items": {"type": "string"}},
+        "auth": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "username": {"type": "string", "pattern": "^[^|:]*$"},
+            "passwordHash": {"type": "string", "pattern": "^($|\\$argon2id\\$)"},
+            "sessionKey": {"type": "string"},
+            "secureCookie": {"type": "boolean"},
+            "existingSecret": {"type": "string"}
+          },
+          "additionalProperties": false
+        },
+        "resources": {"$ref": "#/definitions/resources"},
+        "extraEnv": {"$ref": "#/definitions/envList"}
+      },
+      "additionalProperties": false
+    },
+    "notifier": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "publicUrl": {"type": "string"},
+        "kinds": {
+          "type": "array",
+          "items": {"type": "string", "enum": ["new", "spike", "silence"]},
+          "uniqueItems": true
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "kind", "url"],
+            "properties": {
+              "name": {"type": "string", "minLength": 1},
+              "kind": {"type": "string", "enum": ["webhook", "slack"]},
+              "url": {"type": "string", "pattern": "^https?://"}
+            },
+            "additionalProperties": false
+          }
+        },
+        "existingSecret": {"type": "string"},
+        "resources": {"$ref": "#/definitions/resources"},
+        "extraEnv": {"$ref": "#/definitions/envList"}
+      },
+      "additionalProperties": false
+    },
+    "migrate": {
+      "type": "object",
+      "properties": {
+        "backoffLimit": {"type": "integer", "minimum": 0},
+        "activeDeadlineSeconds": {"type": "integer", "minimum": 1},
+        "resources": {"$ref": "#/definitions/resources"}
+      },
+      "additionalProperties": false
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "className": {"type": "string"},
+        "annotations": {"type": "object"},
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["host", "paths"],
+            "properties": {
+              "host": {"type": "string"},
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["path", "pathType"],
+                  "properties": {
+                    "path": {"type": "string"},
+                    "pathType": {"type": "string", "enum": ["Prefix", "Exact", "ImplementationSpecific"]}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "tls": {"type": "array"}
+      },
+      "additionalProperties": false
+    },
+    "clickhouse": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "image": {"$ref": "#/definitions/upstreamImage"},
+        "persistence": {"$ref": "#/definitions/persistence"},
+        "resources": {"$ref": "#/definitions/resources"}
+      },
+      "additionalProperties": false
+    },
+    "redpanda": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "image": {"$ref": "#/definitions/upstreamImage"},
+        "memory": {"type": "string", "pattern": "^[0-9]+[KMGT]?$"},
+        "persistence": {"$ref": "#/definitions/persistence"},
+        "resources": {"$ref": "#/definitions/resources"}
+      },
+      "additionalProperties": false
+    },
+    "external": {
+      "type": "object",
+      "properties": {
+        "clickhouse": {
+          "type": "object",
+          "properties": {"url": {"type": "string", "pattern": "^($|https?://)"}},
+          "additionalProperties": false
+        },
+        "kafka": {
+          "type": "object",
+          "properties": {"brokers": {"type": "string"}},
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "database": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}
+  },
+  "additionalProperties": false
+}

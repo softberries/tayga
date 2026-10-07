@@ -1,0 +1,138 @@
+---
+title: "Log alerts"
+description: "New-template, rate-spike and silence alerts on log templates: the rules, their defaults and seasonal mode."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import RefShot from '../../../components/RefShot.astro';
+
+Every 60 seconds (`logminer.detect_secs`) the logminer checks the [log templates](/tayga/concepts/log-templates/) of the services it owns and raises three kinds of alert:
+
+| Kind | Fires when | On by default |
+|---|---|---|
+| `new` | a template appears for the first time in a service that already had templates | yes |
+| `spike` | a template's count in the last 5 minutes is at least 10 and at least 5 × its baseline | yes |
+| `silence` | a template has had no log for N minutes while its service still logs | no, opt-in per template |
+
+Alerts are stored in ClickHouse `log_alerts` (7 days) and published as JSON to the topic `tayga.alerts`, from which the [notifier](/tayga/alerting/notifier/) delivers them. Each alert carries up to 5 example trace ids, newest first, which link to the error story of that trace when one exists, else to the trace.
+
+<RefShot
+	name="alerts-card-spike"
+	alt="A spike alert in the app: the window count, the peak and the baseline, with example traces linked to stories."
+	caption="A spike alert on the Alerts page."
+/>
+
+## New templates
+
+A `new` alert fires once per template, ever, when all of these hold:
+
+- the template's first log falls after the previous detection pass, judged **in log time** by the [data clock](/tayga/concepts/data-clock/);
+- its service had a template at least `new_template_warmup_min` (15 minutes) before that first log, so a fresh install or a new service does not flood;
+- the first log is at least 15 minutes after the start of the [masking epoch](/tayga/concepts/log-templates/#the-masking-epoch), and it is not a status-code split of a template from before the epoch;
+- it is not the `<overflow>` template.
+
+Because the rule runs in log time, a template that appeared while the logminer was down or behind is still announced when it catches up. On 2026-10-04 a probe template emitted while the logminer had been stopped for 12 minutes was alerted on the first pass after the restart.
+
+<RefShot
+	name="alerts-card-new"
+	alt="A new-template alert: a template that first appeared after its service was established."
+	caption="A new-template alert."
+/>
+
+## Spikes
+
+A template **spikes** when, over the last `spike_window_min` (5) minutes, its count is
+
+- at least `spike_min_count` (10), **and**
+- at least `spike_factor` (5) times its baseline: the mean count per 5-minute window over the preceding `baseline_window_min` (60) minutes, floored at 1.
+
+Spike windows use the wall clock.
+
+### Baseline coverage
+
+An outage of the logminer or of ingest leaves minutes with no data. Counting them would shrink the baseline and turn every template into a spike when logs resume. The baseline therefore counts only **covered minutes**: minutes in which any template of any service had at least one log. Per template:
+
+- only covered minutes since the template's first log count;
+- the baseline per window is the baseline total divided by `max(covered minutes / 5, 1)`, floored at 1;
+- a template whose covered minutes are under **half** of the minutes it could have been seen in is not judged at all, counted in `tayga_logminer_spike_skipped_total{reason="coverage"}`.
+
+### Young templates
+
+A template older than 10 minutes can spike. If it is younger than 65 minutes (baseline plus window), its baseline uses only the minutes it existed before the spike window, at least 5 of them, scaled to a 5-minute window.
+
+### Seasonal mode
+
+With `logminer.baseline_mode = "seasonal"` (opt-in; the default is `flat`), a template that passes the rule above must also reach 5 × the count of the **same 5-minute window one day earlier and one week earlier** (each floored at 1). A comparator is used only when that past window has data for any template; with neither, seasonal behaves like flat. If the lookup fails, the pass falls back to flat and counts `tayga_logminer_seasonal_failures_total`.
+
+The counts come from `log_template_minutes` (8 days). The one-day comparator works right after the upgrade that added it (migration 0009 back-fills 3 days of minutes); the one-week comparator needs a week of history. Alerts carry the comparator values as `baseline_day` and `baseline_week`; the API passes them through and the app does not show them.
+
+<Aside type="caution">
+Seasonal mode is tested with unit and store tests against ClickHouse, but it has not been run on a live stack.
+</Aside>
+
+### When a spike is active
+
+A spike alert is **active** while it was last confirmed within the last `alert_active_min` (10) minutes. A pass that still fires updates the same alert (its count, peak and `last_at`); once it lapses, a later spike starts a new alert.
+
+The API judges "active" with its own constant, `ALERT_ACTIVE_MIN = 10` in `crates/tayga-api/src/repo.rs`, not with the logminer setting. If you change `TAYGA__LOGMINER__ALERT_ACTIVE_MIN`, change that constant too, or the app and the logminer disagree on which alerts are active.
+
+## Silence
+
+A silence alert answers "this log line should keep coming, and it stopped". Turn it on per template, with a number of minutes from 1 to 1440, on the template page or with [`PUT /api/v1/log-templates/{id}/silence`](/tayga/reference/api/#put-apiv1log-templatesidsilence).
+
+<RefShot
+	name="alerts-card-silence"
+	alt="A silence alert: a watched template that has not been seen for its set minutes."
+	caption="A silence alert."
+/>
+
+On every pass, for each template with silence on:
+
+- `t_last` is the template's newest hit within the 3-day hits TTL (past that, its `last_seen`, else its `first_seen`);
+- `s_last` is the newest hit of any template of the same service, counted only up to the logminer's per-partition data clock;
+- the template is silent when `s_last − t_last ≥ minutes`.
+
+Both are log timestamps, so a pipeline outage where no logs arrive at all does not make a template silent, and logs still waiting in a lagging partition cannot either. A service with no hits in the last 3 days is not judged.
+
+The alert:
+
+- `started_at` is the template's last hit, and `last_at` is refreshed on every pass while it stays silent;
+- the quiet time shown ("silent N min" in the app, Slack and the webhook summary) is `last_at − started_at`. `last_at` is the logminer's wall clock and `started_at` a log timestamp, so pipeline lag or clock skew is included: a logminer 10 minutes behind reports a silence 10 minutes longer. Whether the template is silent at all is judged in log time only;
+- one quiet period is one alert, across restarts too;
+- `window_count` and `baseline_per_window` are 0, and there are no example traces;
+- silence alerts do not set a template's `alerting` flag and are not shown as badges on story logs. `tayga_logminer_silence_alerts` is a gauge of the templates silent right now.
+
+A silence ends when the template logs again or silence is switched off for it: the alert stops being refreshed and turns inactive 10 minutes after its last `last_at`. A later quiet period gets a new alert.
+
+## Alert ids
+
+Alert ids are deterministic hashes:
+
+| Kind | Hash of |
+|---|---|
+| `new` | the kind and the template id |
+| `spike` | the kind, the template id and the start minute |
+| `silence` | the kind, the template id and the template's last hit |
+
+`log_alerts` is a `ReplacingMergeTree` by `alert_id`, so two logminer replicas that both raise the same alert during a hand-over store one row, and the notifier delivers it once. Receivers should still deduplicate on `alert_id`; see [Delivery semantics](/tayga/alerting/delivery/).
+
+## Settings
+
+| Setting | Environment variable | Default |
+|---|---|---|
+| `logminer.detect_secs` | `TAYGA__LOGMINER__DETECT_SECS` | `60` |
+| `logminer.spike_window_min` | `TAYGA__LOGMINER__SPIKE_WINDOW_MIN` | `5` |
+| `logminer.baseline_window_min` | `TAYGA__LOGMINER__BASELINE_WINDOW_MIN` | `60` |
+| `logminer.spike_factor` | `TAYGA__LOGMINER__SPIKE_FACTOR` | `5.0` |
+| `logminer.spike_min_count` | `TAYGA__LOGMINER__SPIKE_MIN_COUNT` | `10` |
+| `logminer.new_template_warmup_min` | `TAYGA__LOGMINER__NEW_TEMPLATE_WARMUP_MIN` | `15` |
+| `logminer.alert_active_min` | `TAYGA__LOGMINER__ALERT_ACTIVE_MIN` | `10` |
+| `logminer.baseline_mode` | `TAYGA__LOGMINER__BASELINE_MODE` | `flat` (or `seasonal`) |
+
+The 10-minute "recent" threshold (minimum template age for a spike, the start offset of the data clock on a fresh install, the lag warning) is not configurable.
+
+## Limits
+
+- A spike during a gap in which the logminer was behind is not reported: spike windows use the wall clock.
+- A template that disappears raises an alert only if silence is on for it.
+- After a crash (not a clean stop), a template first seen after the last detection pass is announced only if its service logs again within about one detection tick.

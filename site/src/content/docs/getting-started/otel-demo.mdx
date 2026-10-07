@@ -1,0 +1,188 @@
+---
+title: "Demo with the OpenTelemetry demo"
+description: "Run Tayga next to the OpenTelemetry demo, switch on a failure with a feature flag, and watch it become an error story, a red node on the service map and a log alert."
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Screenshot from '../../../components/Screenshot.astro';
+
+The [OpenTelemetry demo](https://github.com/open-telemetry/opentelemetry-demo) is a microservice shop (checkout, payment, shipping, ad, product catalog and more) with a load generator that keeps buying things. Its services carry feature flags that inject failures. The Tayga repository vendors it as a git submodule, pinned to **3.1.0**, and runs Tayga next to it: the demo's Collector forwards every trace and log to Tayga as well as to the demo's own backends.
+
+This is the quickest way to see what Tayga is for. Plan on about 10 minutes from clone to your first injected failure as a story, plus the time of the first image build.
+
+## What you need
+
+- **Docker** with the Compose v2 plugin, **git** and **make**.
+- **Memory.** The demo is large. On 2026-10-07 the running stack (the demo plus Tayga, 36 containers) used **8.9 GiB** of memory by `docker stats`, ClickHouse 2.9 GiB of it, on Docker Desktop with 14 CPUs and 31.5 GiB. Give Docker comfortably more than that.
+- **Disk.** Tayga keeps raw spans and logs for 3 days and its Redpanda topics for 24 hours; on the demo, `tayga.signals` held 7.4 GB at 24-hour retention. See [Retention and disk](/tayga/operations/retention/).
+- **Optional: a Rust toolchain** (1.98 or newer) for `make flag` and `make e2e`, which run the `tayga-devtools` CLI with Cargo. Without Rust, flip flags in the demo's own flag page instead (step 4).
+
+## Run it
+
+<Steps>
+
+1. **Clone with the submodule.**
+
+   ```sh
+   git clone --recurse-submodules https://github.com/softberries/tayga.git
+   cd tayga
+   ```
+
+   `make up` also runs `git submodule update --init`, so a clone without `--recurse-submodules` works too.
+
+2. **Start everything.**
+
+   ```sh
+   make up
+   ```
+
+   It initialises the submodule, builds the `tayga:dev` image (the web app is built inside it, so no Node is needed on the host), and starts the demo and Tayga together. The first build takes several minutes. `tayga-migrate` creates the ClickHouse schema first; the other Tayga services wait for it.
+
+   Check that the API is up; it reads `healthy` once it serves:
+
+   ```sh
+   docker inspect -f '{{.State.Health.Status}}' tayga-api
+   ```
+
+3. **Open the two apps.**
+
+   | What | Where |
+   |---|---|
+   | Tayga | `http://localhost:8090` |
+   | The demo shop | `http://localhost:8080` |
+   | The demo's flag page | `http://localhost:8080/feature` |
+   | The demo's Jaeger (Tayga's "Open in Jaeger" links go here) | `http://localhost:8080/jaeger/ui` |
+
+   The load generator starts at once, so traces and the service map fill as soon as the first traces close. Slow stories need a baseline first: an endpoint is judged against its own p99 of the last hour.
+
+4. **Inject a failure.** Make every payment fail:
+
+   <Tabs syncKey="flag-tool">
+   <TabItem label="make flag (Rust)">
+
+   ```sh
+   make flag NAME=paymentFailure VARIANT=100%
+   ```
+
+   It sets the flag's default variant in `deploy/flagd/demo.flagd.json`, the file the demo's `flagd` reads. The first run compiles `tayga-devtools`.
+
+   </TabItem>
+   <TabItem label="Demo flag page (no Rust)">
+
+   Open `http://localhost:8080/feature`, set the default variant of **paymentFailure** to **100%**. The page edits the same `deploy/flagd/demo.flagd.json`.
+
+   </TabItem>
+   </Tabs>
+
+5. **Watch it become a story.** On **Stories** (keep the time range at 1h and **Live** on), a new group appears whose summary starts `payment charge failed: Payment request failed. Invalid token.` In our end-to-end runs the first matching stories arrived 55 to 125 seconds after the flip (single runs, not a guarantee). The endpoint is part of the fingerprint, so you will see **one group per calling endpoint**, such as `load-generator user_checkout_single` and `user_checkout_multi`.
+
+   <Screenshot name="stories-group-selected" caption="Stories on the demo stack with paymentFailure on: the two “payment charge failed” groups at the top, one per calling endpoint. The inspector on the right shows the selected group's sample story (here a product-catalog failure)." />
+
+6. **Open the story.** Select the group's sample story. The root-cause card names `payment` and its `charge` span, with the path through `checkout`; the waterfall marks the failing chain and the critical path; the logs below are the request's own, with the `Payment request failed` error first.
+
+   <Screenshot name="story-detail" maxHeight="34rem" caption="A paymentFailure story: root cause, request path, group trend, comparison with normal, waterfall and logs." />
+
+7. **Look at the service map.** Press <kbd>g</kbd> then <kbd>m</kbd>. `checkout` and `payment` turn red with their error ratio, and the call between them is drawn dashed as failing. Click `payment` for its rate, errors and p99, and its recent stories.
+
+   <Screenshot name="map-overview" caption="The service map while payments fail: checkout and payment are degraded, and the failing call is dashed." />
+
+8. **Wait for the log alert.** The failing payments log the same error again and again, so its log template **spikes**. Detection runs every 60 seconds over a 5-minute window, so the alert takes a few minutes: 175 to 291 seconds in our runs. Open **Logs → Alerts** (<kbd>g</kbd> then <kbd>l</kbd>). Each alert links example traces to their stories. With a [notifier target](/tayga/alerting/notifier/) set, it would also go to a webhook or Slack.
+
+   <Screenshot name="alerts-card-spike" caption="A spike alert: the count in the window against the baseline, and example traces linked to their stories. Here the demo's proxy logged the failing checkouts." />
+
+9. **Put the flags back.**
+
+   ```sh
+   make flags-reset
+   ```
+
+   It copies the demo's default flag file over `deploy/flagd/demo.flagd.json`, which turns every injected failure off. The group stops growing, its trend line flattens, and the alert stops being active about 10 minutes after the last spike.
+
+</Steps>
+
+## Other failures to try
+
+Each flag below is one of the demo's own. Tayga's end-to-end tests flip the same flags and check the outcome against the API; the times are from single runs between 2026-10-04 and 2026-10-06, not guarantees.
+
+| Flag and variant | What Tayga shows | First stories after |
+|---|---|---|
+| `paymentFailure` `100%` (also `10%` to `90%`) | Error stories blaming `payment`'s charge span, one group per calling endpoint; later a spike alert on the payment error template | 55–125 s; alert 175–291 s |
+| `paymentUnreachable` `on` | Error stories whose root cause is `checkout`'s client span: "checkout could not reach oteldemo.PaymentService" | 50–80 s |
+| `productCatalogFailure` `on` | Error stories in `product-catalog`: "Product Catalog Fail Feature Flag Enabled" | 25 s |
+| `adFailure` `on` | `GetAds failed` stories in `ad`, one group per calling endpoint. The flag hits about one request in ten, so it is slower to show | 75–85 s |
+| `intlShippingSlowdown` `5sec` | A **slow** story blaming `shipping`, with the delay on the critical path. Only international orders are delayed, and they are rare in the load generator's traffic; the end-to-end test places its own. It also needs a clean baseline: an hour without earlier slowdown runs | 40–160 s when it passed |
+
+```sh
+make flag NAME=paymentUnreachable VARIANT=on
+make flags-reset
+```
+
+<Aside type="tip" title="One flag at a time">
+Two failures at once make two sets of stories, which is fine, but a single flag makes it easier to see which change caused what. Run `make flags-reset` between flags.
+</Aside>
+
+## Run the end-to-end tests
+
+The same scenarios run as tests against the live stack. They take the flags one at a time and reset them before they start; full runs took 8 to 16 minutes.
+
+```sh
+make e2e
+```
+
+Details of each scenario and its timeouts are in [From source](/tayga/install/from-source/#developer-commands).
+
+## Grafana and Prometheus (optional)
+
+Tayga needs neither: its own [Pipeline](/tayga/guide/pipeline/) page records the services' metrics. To add Tayga's Grafana dashboards and a Prometheus next to the demo:
+
+```sh
+make up-extras
+```
+
+Grafana is then at `http://localhost:3001` (anonymous Viewer access; the admin password is `admin`) and Prometheus at `http://localhost:19090`, and the service map gains an "Open in Grafana" link. See [Metrics and Grafana](/tayga/operations/metrics-grafana/).
+
+## Ports
+
+Tayga's own published ports bind to 127.0.0.1:
+
+| Port | Service |
+|---|---|
+| 8090 | `tayga-api`: web app, JSON API, `/healthz`, `/metrics` |
+| 14318 | `tayga-ingest` OTLP/HTTP (container port 4318), used by `tayga-devtools emit-log` |
+| 18123 | ClickHouse HTTP (container port 8123) |
+| 19092 | Redpanda Kafka API (external listener) |
+| 3001, 19090 | Grafana and Prometheus, only after `make up-extras` |
+| 8080 | The demo's frontend proxy: the shop, `/feature`, `/jaeger/ui` (published by the demo) |
+
+<Aside type="caution" title="The demo's ports are open to your network">
+The upstream demo publishes 8080 (frontend proxy), 9090 (its Prometheus), 10000 (Envoy admin) and 26 other container ports (on ephemeral host ports, counted on demo 3.1.0) on **all interfaces**. Run the demo only on a trusted network, or firewall those ports. Tayga's own ports are not affected.
+</Aside>
+
+## What Tayga changes in the demo
+
+The demo itself is not edited; Tayga's Compose file (`deploy/compose.tayga.yaml`) layers a few changes on top of it:
+
+- **The Collector** loads `deploy/otelcol-config-tayga.yml` last, which adds the `otlp_grpc/tayga` exporter to the traces and logs pipelines next to the demo's own exporters.
+- **The flag file** is `deploy/flagd/demo.flagd.json`, mounted into `flagd` and its UI, so `make flag` and `make flags-reset` can change it.
+- **The load generator** skips its `ask_agent` task. It calls an `agent` service that only exists in the demo's `compose.agent.yaml`, which the Makefile does not include, so every call failed and showed up as noise. A small locustfile, `deploy/locust/tayga_locustfile.py`, imports the demo's own and removes that task.
+- **Memory limits** of demo services that ran at their caps during long sessions are raised: `checkout` and `product-catalog` 20M to 64M, `ad` and `fraud-detection` 300M to 512M, `accounting` 160M to 320M, `kafka` 620M to 1G, `opensearch` 1G to 1.5G, the demo's `grafana` 175M to 256M, and `load-generator` to 2G.
+
+## Day to day
+
+```sh
+make ps                        # status of every container
+make logs SERVICE=tayga-api    # follow one service's logs
+LOGMINER_REPLICAS=2 make up    # rescale the logminer
+make down                      # stop and remove the containers; the data volumes stay
+```
+
+`make up` again after `git pull` rebuilds the image and migrates the schema before the services restart. If the demo misbehaves (every checkout failing for hours, say), [Troubleshooting](/tayga/operations/troubleshooting/#the-demo-itself-misbehaves) has what we have seen and how it was fixed.
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="Tour of the app" description="Every page of the web app, with what each part means." href="/tayga/guide/tour/" />
+	<LinkCard title="Error stories" description="How a failing trace becomes a story, and how stories are grouped." href="/tayga/concepts/error-stories/" />
+	<LinkCard title="Install for real" description="Docker Compose for one host, without the demo." href="/tayga/install/docker-compose/" />
+	<LinkCard title="Connect your Collector" description="Send your own services' traces and logs." href="/tayga/install/collector/" />
+</CardGrid>

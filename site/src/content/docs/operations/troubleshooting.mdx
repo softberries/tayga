@@ -1,0 +1,110 @@
+---
+title: "Troubleshooting"
+description: "Real failure modes seen while building and running Tayga, how to recognise them and what to do."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import RefShot from '../../../components/RefShot.astro';
+
+Start with the **Pipeline** page: it shows which component is down, which consumer group is behind, and whether the logminer's data clock lags. Every problem below was met on a real stack while Tayga was built and tested; the symptoms quoted are the actual messages.
+
+<RefShot
+	name="pipeline-status"
+	alt="The Pipeline status strip: each job and when it was last scraped."
+	caption="The status strip: a job that is down shows here first."
+/>
+
+## No stories appear
+
+Work along the pipeline:
+
+1. **Is telemetry arriving?** On the Stories page, the "spans per second" tile should be above zero. If not, check the collector's exporter: it must send OTLP to `tayga-ingest` on 4317 (gRPC) or 4318 (HTTP), traces **and** logs pipelines. `tayga_ingest_records_published_total` should grow, `tayga_ingest_publish_failures_total` (Kafka down) and `tayga_ingest_rejected_requests_total` (undecodable requests) should not.
+2. **Is the assembler keeping up?** On the Pipeline page, the `tayga-assembler` lag on `tayga.signals` should stay small. A story appears about 10 seconds after a trace's last span.
+3. **Did anything fail?** Error stories need an error span: status `error`, an `exception` event, or an ERROR log on the span. A service that records failures only as span attributes produces no error stories.
+4. **Slow stories need a trusted baseline**: at least 50 non-error requests of the endpoint in the last 60 minutes. A low-traffic endpoint never gets one.
+
+### Slow stories stop appearing during a slowdown
+
+A slowdown that lasts more than two baseline windows (120 minutes) becomes the endpoint's new normal. Earlier slowdowns can also raise the endpoint's p99 so far that a new delay stays under the limit: on 2026-10-04 the demo's checkout path ran about 100 times slower after a Docker restart, its p99 rose to 10–15 s, and a 5-second delay no longer counted as slow. Restarting the demo's `checkout` and `load-generator` containers fixed it. See [Baselines](/tayga/concepts/baselines/#long-slowdowns).
+
+## The disk fills up, or Redpanda stops
+
+**Symptom:** Redpanda exits with code 133 and a `vassert` backtrace in its log, and nothing is ingested until it restarts. On 2026-10-06 the Docker disk had reached 99 %, with Redpanda's volume at 28 GB.
+
+**Cause:** topics created before Tayga set a 24-hour retention keep the broker default of 7 days.
+
+**Fix:** set the topics to 24 hours (see [Retention and disk](/tayga/operations/retention/#changing-retention-on-an-existing-stack)) and restart Redpanda. On that stack it freed about 20 GB.
+
+## The demo itself misbehaves
+
+Next to the OpenTelemetry demo, some failures are the demo's, not Tayga's:
+
+- **Every checkout fails or takes minutes.** On 2026-10-05 the demo's Kafka sat at its 620 MiB memory limit, `checkout`'s `publish orders` span took a median 91.5 s, and every checkout trace failed for six hours. Restarting the demo's `kafka` and `checkout` containers fixed it; Tayga's Compose file now raises those memory limits.
+- **Stories about an `agent` service.** The demo's load generator calls an `agent` service that is defined only in the demo's optional `compose.agent.yaml`. Tayga's Compose file replaces the load generator's script with one that drops that task.
+
+## API errors
+
+| Response | Meaning | What to do |
+|---|---|---|
+| 503 `{"error":"storage unavailable"}` | A ClickHouse query failed (counted in `tayga_api_repo_errors_total`). | Check that ClickHouse is up and reachable at `clickhouse.url`. |
+| 504 `{"error":"storage timeout"}` | A read ran past `query_timeout_secs` (15 s), or an `/api/` request was still running 5 s after it. | Use a shorter window, or raise `TAYGA__QUERY_TIMEOUT_SECS`. |
+| 503 `{"error":"kafka unavailable"}` | `GET /api/v1/pipeline/lag` could not read consumer lag (`tayga_api_lag_errors_total`). | Check Redpanda and `kafka.brokers` of the API. |
+| 400 with a message | A bad parameter, for example `since must be between 1s and 7d (got 8d)` or `the window must start within the last 7 days`. | Fix the parameter. |
+| 401 `{"error":"unauthorized"}` | Authentication is on and the request has no valid session or Basic credentials. | Sign in, or use `curl -u`. |
+| 429 `{"error":"too many attempts"}` | 5 failed password checks from this IP in 5 minutes. Behind a reverse proxy, all users share one limit. | Wait for `Retry-After`. |
+
+The app shows these errors in place, and a custom time range older than 7 days offers a "Show last 1h" button.
+
+## A service does not start
+
+| Log message | Cause |
+|---|---|
+| `invalid type: string "…", expected a sequence for key …` | A list setting given as an environment variable. Set it in the config file. |
+| `auth.password_hash is not a valid PHC string: …` | The `$` signs of the hash were mangled by Compose. Write `$$` in compose files, or quote the value in `.env`. See [Authentication](/tayga/operations/authentication/). |
+| `bind metrics server on <addr>` | The metrics port is taken. |
+| `logminer.fingerprinter = "gpu" needs a build with the gpu feature` | The Docker images do not include the GPU backend. Use `scalar`. |
+| `kafka.retention_ms must be -1 (unlimited) or positive` | `TAYGA__KAFKA__RETENTION_MS` is 0 or below −1. |
+| `logminer.baseline_mode: …` | Only `flat` and `seasonal` are accepted. |
+
+## Logs and alerts
+
+- **No `new` alert for a template you just created.** A `new` alert needs the service to have had a template at least 15 minutes before; a brand-new service warms up first. After a masking change or a re-mine there are also 15 minutes without `new` alerts.
+- **A spike was missed while the logminer was behind.** Spike windows use the wall clock; only `new` and `silence` alerts are judged in log time. Watch `tayga_logminer_data_lag_seconds`; the logminer logs a warning past 10 minutes.
+- **A burst of spikes after an outage.** Fixed since detection counts only covered minutes; if you see one, check `tayga_logminer_spike_skipped_total{reason="coverage"}` and the version.
+- **The app and the logminer disagree on which alerts are active.** `TAYGA__LOGMINER__ALERT_ACTIVE_MIN` was changed; the API uses its own constant of 10 minutes.
+- **`rpk group describe tayga-logminer` shows a huge lag.** It also counts the group's stale offsets on `tayga.signals` from before the logminer moved to `tayga.logs`. The Pipeline page reads the right topic. `rpk group offset-delete` removes them.
+
+## Alerts are not delivered
+
+1. The notifier log says `delivery disabled: no targets`: add a target and restart it.
+2. `tayga_notifier_deliveries_total{result="stale"}` grows: the alerts were older than `max_age_secs` (1 hour) when the notifier read them, for example after an outage.
+3. `result="failed"` with `tayga_notifier_breaker_open{target}` at 1: the target keeps failing, and each new alert gets one attempt. `last_error` in `notifier_deliveries` has the status.
+4. `public_url` is still `http://localhost:8090`: messages arrive, but their links only work on the Tayga host.
+
+See [Delivery semantics](/tayga/alerting/delivery/).
+
+## The Pipeline page shows jobs as down
+
+- **A Tayga API running on your host** (for development) records `up = 0` for every container target it cannot reach, in the same ClickHouse. Run it with `TAYGA__RECORD_SECS=0`.
+- **An open tab from before an upgrade** can show errors on the consumer lag; reload it.
+
+## Querying ClickHouse by hand
+
+- Span `status_code` is a lowercase enum: `status_code = 'error'` matches, `status_code = 'ERROR'` silently counts 0.
+- Several tables are `ReplacingMergeTree`s (`error_stories`, `trace_summaries`, `log_templates`, `log_alerts`); add `FINAL` to see one row per key.
+- Spans and logs with a timestamp older than 3 days, or 0, are dropped as soon as they are written.
+
+## Collecting information for a bug report
+
+```sh
+docker compose ps
+docker compose logs --since 30m tayga-ingest tayga-writer tayga-assembler tayga-logminer tayga-notifier tayga-api > tayga-logs.txt
+curl -s localhost:8090/api/v1/pipeline/lag
+curl -s localhost:8090/metrics
+```
+
+The services log in JSON (`RUST_LOG=debug` for more detail). Include the version or image tag, how you run Tayga (standalone Compose, next to the demo, from source), and what the Pipeline page shows.
+
+<Aside type="caution">
+Logs and traces can contain personal data and credentials. Read what you attach.
+</Aside>

@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Tayga tour: deployment</title>
+<link rel="stylesheet" href="base.css" />
+<style>
+	header { position: absolute; left: 110px; top: 64px; }
+	header h1 { margin: 12px 0 0; font-size: 52px; font-weight: 700; letter-spacing: -0.02em; }
+	.term { position: absolute; border: 1px solid var(--panel-line); border-radius: 18px; background: #070c18; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45); overflow: hidden; opacity: 0.6; transform: translateY(10px); transition: opacity 0.5s, transform 0.5s, border-color 0.5s; }
+	.term.live { opacity: 1; transform: none; border-color: #2e4266; }
+	.bar { height: 46px; display: flex; align-items: center; gap: 10px; padding: 0 18px; background: var(--panel); border-bottom: 1px solid var(--panel-line); }
+	.bar i { width: 13px; height: 13px; border-radius: 50%; background: #26324d; }
+	.term.live .bar i:nth-child(1) { background: #ff6b6b; }
+	.term.live .bar i:nth-child(2) { background: #f4b740; }
+	.term.live .bar i:nth-child(3) { background: #7fd1a8; }
+	.bar span { margin-left: 12px; font-size: 19px; color: var(--muted); font-weight: 600; }
+	pre { margin: 0; padding: 22px 26px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 20px; line-height: 1.45; color: var(--ink-2); white-space: pre-wrap; word-break: break-all; }
+	.p { color: var(--ok); }
+	.c { color: var(--ink); }
+	.o { color: var(--muted); }
+	.h { color: var(--accent); font-weight: 500; }
+	.caret { display: inline-block; width: 11px; height: 23px; background: var(--accent); vertical-align: -4px; animation: blink 1s steps(1) infinite; }
+	@keyframes blink { 50% { opacity: 0; } }
+	#t0 { left: 110px; top: 185px; width: 1700px; height: 530px; }
+	#t1 { left: 110px; top: 740px; width: 1020px; height: 290px; }
+	#t2 { left: 1160px; top: 740px; width: 650px; height: 290px; }
+</style>
+</head>
+<body>
+<div class="grid-bg"></div>
+<header>
+	<div class="eyebrow">Deploy</div>
+	<h1>One line, a Helm chart, or the <span class="brand">OpenTelemetry demo</span></h1>
+</header>
+<div class="term" id="t0"><div class="bar"><i></i><i></i><i></i><span>Docker Compose · one-line installer (output abridged)</span></div><pre></pre></div>
+<div class="term" id="t1"><div class="bar"><i></i><i></i><i></i><span>Kubernetes · Helm</span></div><pre></pre></div>
+<div class="term" id="t2"><div class="bar"><i></i><i></i><i></i><span>Next to the OpenTelemetry demo</span></div><pre></pre></div>
+<script>
+	// Each terminal: a list of [kind, text]; kind 'c' is typed after a prompt, 'o' and 'h' print.
+	const scripts = [
+		[
+			['c', 'curl -fsSL https://raw.githubusercontent.com/softberries/tayga/master/scripts/install.sh | sh'],
+			['o', 'Waiting for tayga-api to become healthy (up to 300s)...'],
+			['h', '\nTayga is running.\n'],
+			['o', '  Web app and API:  http://localhost:8090\n  OTLP gRPC:        localhost:4317\n  OTLP HTTP:        http://localhost:4318  (/v1/traces, /v1/logs)\n'],
+			['o', '  exporters:\n    otlp_grpc/tayga:\n      endpoint: localhost:4317\n      tls:\n        insecure: true'],
+		],
+		[
+			['c', 'helm install tayga oci://ghcr.io/softberries/charts/tayga --version 0.1.0 \\\n    --namespace tayga --create-namespace --wait'],
+			['c', 'kubectl -n tayga port-forward svc/tayga-api 8090:8090'],
+		],
+		[
+			['c', 'make up'],
+			['c', 'make flag NAME=paymentFailure VARIANT=100%'],
+			['c', 'make flags-reset'],
+		],
+	];
+	// Every terminal starts at a prompt, so no window is ever empty.
+	for (const t of document.querySelectorAll('.term pre')) t.innerHTML = '<span class="p">$</span> <span class="caret"></span>';
+	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+	const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+	// play(i, ms): types terminal i's commands within about ms milliseconds.
+	window.play = async (i, ms = 4000) => {
+		const term = document.getElementById(`t${i}`);
+		const pre = term.querySelector('pre');
+		term.classList.add('live');
+		const steps = scripts[i];
+		const typed = steps.filter(([k]) => k === 'c').reduce((n, [, t]) => n + t.length, 0);
+		const printed = steps.length - steps.filter(([k]) => k === 'c').length;
+		const perChar = Math.max(8, Math.min(45, (ms * 0.6) / typed));
+		const pause = printed ? (ms * 0.4) / printed : 300;
+		let html = '';
+		for (const [k, t] of steps) {
+			if (k === 'c') {
+				const head = `${html}<span class="p">$</span> `;
+				for (let n = 1; n <= t.length; n++) {
+					pre.innerHTML = `${head}<span class="c">${esc(t.slice(0, n))}</span><span class="caret"></span>`;
+					await sleep(perChar);
+				}
+				html = `${head}<span class="c">${esc(t)}</span>\n`;
+				pre.innerHTML = html;
+				await sleep(250);
+			} else {
+				html += `<span class="${k}">${esc(t)}</span>\n`;
+				pre.innerHTML = html;
+				await sleep(pause);
+			}
+		}
+		pre.innerHTML = `${html}<span class="p">$</span> <span class="caret"></span>`;
+	};
+</script>
+</body>
+</html>

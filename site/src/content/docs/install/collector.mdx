@@ -1,0 +1,130 @@
+---
+title: "Connect your OpenTelemetry Collector"
+description: "Add Tayga as an OTLP exporter to an existing OpenTelemetry Collector, over gRPC or HTTP, next to the backends you already send to."
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Tayga ingests OTLP **traces and logs**, over gRPC and over HTTP. It does not ingest metrics. Any OpenTelemetry Collector can send to it: add one exporter and list it in the `traces` and `logs` pipelines, next to the exporters you already have. Your other backends keep getting the same data.
+
+## Where to send
+
+| Install | gRPC | HTTP |
+|---|---|---|
+| [Docker Compose](/tayga/install/docker-compose/), Collector on the host | `localhost:4317` | `http://localhost:4318` |
+| Docker Compose, Collector in a container on `tayga_default` | `tayga-ingest:4317` | `http://tayga-ingest:4318` |
+| [Helm](/tayga/install/helm/), release `tayga` in namespace `tayga` | `tayga-ingest.tayga.svc:4317` | `http://tayga-ingest.tayga.svc:4318` |
+| [The OTel demo](/tayga/getting-started/otel-demo/) | already wired: the demo's Collector sends to `tayga-ingest:4317` | |
+
+The host ports follow `TAYGA_OTLP_GRPC_PORT` and `TAYGA_OTLP_HTTP_PORT` (or `--ports`) in the Compose install.
+
+## The exporter
+
+<Tabs syncKey="otlp-protocol">
+<TabItem label="gRPC">
+
+```yaml title="otel-collector.yaml"
+exporters:
+  otlp_grpc/tayga:
+    endpoint: localhost:4317        # host:port, no scheme
+    tls:
+      insecure: true                # tayga-ingest serves plain gRPC
+    compression: gzip
+    timeout: 30s                    # above ingest's 25 s Kafka delivery timeout
+    sending_queue:
+      enabled: true
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 300s
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_grpc/tayga]  # keep your other exporters in the list
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_grpc/tayga]
+```
+
+</TabItem>
+<TabItem label="HTTP">
+
+```yaml title="otel-collector.yaml"
+exporters:
+  otlp_http/tayga:
+    endpoint: http://localhost:4318   # the exporter appends /v1/traces and /v1/logs
+    compression: gzip
+    timeout: 30s
+    sending_queue:
+      enabled: true
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 300s
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_http/tayga]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_http/tayga]
+```
+
+</TabItem>
+</Tabs>
+
+Both configs were checked with `otelcol-contrib validate` (Collector contrib 0.162.0). The bundle's `otel-collector.yaml` is the gRPC one, complete with an OTLP receiver.
+
+<Aside type="note" title="Exporter names">
+Recent Collector releases name the OTLP exporters `otlp_grpc` and `otlp_http`. Older releases call them `otlp` and `otlphttp`; 0.162.0 accepts both spellings. Use the one your Collector's documentation shows.
+</Aside>
+
+Collector config merging **replaces** lists. If you add Tayga through an extra config file (as the demo does with `deploy/otelcol-config-tayga.yml`), repeat every existing exporter in the `exporters` list of each pipeline, or they stop receiving data.
+
+## gRPC or HTTP
+
+Both carry the same data and land in the same place. Choose by what fits your network:
+
+| | gRPC (4317) | HTTP (4318) |
+|---|---|---|
+| Paths | the OTLP trace and log services | `POST /v1/traces`, `POST /v1/logs` |
+| Encoding | protobuf; gzip accepted | protobuf or JSON; gzip accepted |
+| Message size | up to 64 MiB per message | up to 64 MiB per body |
+| Good for | Collector to Tayga inside one network: the default | proxies and load balancers that only speak HTTP/1.1, and SDKs in browsers or serverless runtimes |
+
+Tayga's ingest also serves `/metrics` on the HTTP port.
+
+## Steps to connect
+
+<Steps>
+
+1. **Add the exporter** above to your Collector config, with the endpoint from [Where to send](#where-to-send).
+
+2. **Append it** to the `exporters` of your `traces` and `logs` pipelines. Leave metrics pipelines alone; Tayga does not ingest metrics.
+
+3. **Restart the Collector**, then check that data arrives: Tayga's **Pipeline** page shows ingest records per second rising, and the **Traces** page lists the new traces within seconds. The Collector's own logs show export errors if it cannot reach Tayga.
+
+</Steps>
+
+## Network and security
+
+- **No authentication, no TLS on the OTLP ports.** `tayga-ingest` accepts data from anyone who reaches it. Keep it on a trusted network: the Compose install binds to 127.0.0.1, and the Helm chart's ingest Service is a ClusterIP by default. If the traffic crosses an untrusted network, put a TLS-terminating proxy or a Collector in front.
+- **A Collector in front is the safer shape.** Your services send to a Collector you control, and only that Collector talks to Tayga. It also batches, compresses, and retries through a short Tayga restart.
+- **Sampling.** Tayga builds stories from the traces it receives. Tail sampling that drops successful traces would skew the baselines that slow stories are measured against; head sampling that drops a failing trace means no story for it.
+
+## Sending without a Collector
+
+SDKs can send to Tayga directly with the standard OTLP variables:
+
+```sh
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf    # or grpc, with port 4317
+```
+
+Each SDK then sends traces and logs (if its log signal is enabled) to Tayga only. To send to Tayga and an existing backend at once, use a Collector.

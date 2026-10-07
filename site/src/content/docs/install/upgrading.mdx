@@ -1,0 +1,86 @@
+---
+title: "Upgrading"
+description: "Upgrade Tayga with the installer, Docker Compose, Helm or from source. The schema migration always runs before the services restart."
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Every install method upgrades the same way underneath: the ClickHouse schema migration (`tayga-writer migrate`) runs first, and the services that read or write the new tables start only after it succeeded. Your data stays. Read the release notes in the [Changelog](/tayga/changelog/) before you upgrade, and the [version notes](/tayga/operations/upgrades/#upgrades-with-notes) for changes that need attention.
+
+<Tabs syncKey="upgrade-method">
+<TabItem label="Installer">
+
+Run the installer again with the new version and the same directory:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/softberries/tayga/master/scripts/install.sh | sh -s -- --version <new version> --dir ~/tayga
+```
+
+It sets `TAYGA_VERSION` in `.env`, replaces `compose.yaml`, keeps your `.env` settings, `notifier.toml` and `otel-collector.yaml` (new copies of those two go next to them as `*.new`, to compare), runs `docker compose up -d`, and waits for health.
+
+</TabItem>
+<TabItem label="Docker Compose">
+
+<Steps>
+
+1. In the install directory, set the new release in `.env`:
+
+   ```sh title=".env"
+   TAYGA_VERSION=<new version>
+   ```
+
+2. Pull and recreate:
+
+   ```sh
+   docker compose pull
+   docker compose up -d
+   ```
+
+   `tayga-migrate` runs first; the writer, assembler, logminer, notifier and API wait for it to finish successfully. Ingest does not wait: it only talks to Kafka.
+
+</Steps>
+
+If the new release changes `compose.yaml` itself, take the new file from the release bundle, or use the installer.
+
+</TabItem>
+<TabItem label="Helm">
+
+```sh
+helm upgrade tayga oci://ghcr.io/softberries/charts/tayga --version <new version> \
+  --namespace tayga --reset-then-reuse-values --wait
+```
+
+With external ClickHouse, the migration Job is a `pre-upgrade` hook that finishes before any pod is replaced. With the bundled ClickHouse it runs as `tayga-migrate-<revision>`, and the new pods wait for the new schema version while the old ones keep serving. Details: [Upgrades and the schema version](/tayga/install/helm/#upgrades-and-the-schema-version).
+
+</TabItem>
+<TabItem label="Demo stack (make up)">
+
+```sh
+git pull
+git submodule update --init
+make up
+```
+
+`make up` rebuilds `tayga:dev` and recreates the changed containers; `tayga-migrate` runs before the others.
+
+</TabItem>
+</Tabs>
+
+## After the upgrade
+
+- **Reload open browser tabs.** A tab opened before the upgrade runs the old web app, which can reject fields the new API sends.
+- **Check the Pipeline page.** Every job should be up and the consumer lag should go back to near 0.
+- **Restarting one service by hand?** Run the migration first, or the service may meet a schema it does not know:
+
+  ```sh
+  docker compose run --rm tayga-migrate
+  ```
+
+<Aside type="caution" title="No downgrades">
+Migrations are forward-only, and there is no tested downgrade path. Keep a backup of the ClickHouse volume (or PersistentVolume) if you may need to go back.
+</Aside>
+
+## Settings that an upgrade does not change
+
+- **Topic settings.** Tayga never alters an existing Kafka topic. A topic created by an older version keeps its retention and partitions; see [Changing retention on an existing stack](/tayga/operations/retention/#changing-retention-on-an-existing-stack).
+- **Log templates.** An upgrade that changes log masking starts a new masking epoch (15 minutes without `new` alerts for templates first seen then) and new templates appear next to the older ones. To rebuild the templates from stored logs with the new rules, see [Re-mining templates](/tayga/operations/remine/).

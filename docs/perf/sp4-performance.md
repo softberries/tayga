@@ -22,7 +22,9 @@ The export was scanned for `password|passwd|authorization|bearer |secret|api[_-]
 
 ## Live load
 
-The hardware table above and the Live load and ClickHouse sections are copied from spec §2.1, §2.6 and §2.7 (`docs/superpowers/specs/2026-10-06-tayga-sp4-performance-design.md`), observed on 2026-10-06, and cannot be reproduced from the benches; the spec has the queries and commands.
+The hardware table above and the Live load and ClickHouse sections were observed on the live stack on 2026-10-06, before the changes below; each table's Source column or lead-in names the command. They cannot be reproduced from the benches.
+
+"The spike" below is the prototype measured on 2026-10-06 before the changes were designed, on a corpus of 132,746 lines (2026-10-06 17:59–18:59 UTC, 17 services, exported with the command above at `LIMIT 200000`). Its numbers are quoted for comparison only.
 
 Sample of 2026-10-06, between 18:30 and 19:00 UTC, 60 s.
 
@@ -58,12 +60,12 @@ Isolated re-runs on the same data (read-only, `use_query_cache=0`, best of 3, CP
 | `trace_summaries FINAL WHERE ts > now() - 60 min` (count only) | 95 | 770 | 4.27 M | 964 MiB |
 | same without `FINAL` | 16 | 17 | 0.17 M | 27 MiB |
 | `endpoint_stats` as deployed | 114 | 999 | 8.79 M | 478 MiB |
-| `endpoint_stats` with `argMax(…, span_count) GROUP BY trace_id` over the ts-filtered rows, without `op_durations` (§3.8) | 70 | 265 | 0.39 M | 21 MiB |
+| `endpoint_stats` with `argMax(…, span_count) GROUP BY trace_id` over the ts-filtered rows, without `op_durations` (the shipped fix) | 70 | 265 | 0.39 M | 21 MiB |
 | same, carrying `op_durations` (the `op_stats` shape) | 141 | 538 | 0.38 M | 91 MiB |
 | service map as deployed (15 min window + 24 h baseline) | 31 | 269 | 9.81 M | 163 MiB |
 | service map, window part only | 8 | 12 | 0.19 M | 3.3 MiB |
 
-- **`indexOf` is not the 7a M2 cost.** `transform` changes nothing. The cost is `FINAL` on `trace_summaries`. That table is `ORDER BY trace_id`, so under `FINAL` the `ts` filter prunes nothing and every column is read for all 3.6 M rows.
+- **`indexOf` is not the cost of the baseline caps (added in plan 7a).** `transform` changes nothing. The cost is `FINAL` on `trace_summaries`. That table is `ORDER BY trace_id`, so under `FINAL` the `ts` filter prunes nothing and every column is read for all 3.6 M rows.
 - **Equivalence of the rewrite.** The `argMax` rewrite of `endpoint_stats` returned the same 61 endpoints with identical `seen`, `kept` and `excluded` counts, run back to back with the deployed query.
 - **Quantile differences are noise.** Quantiles differed in 2 rows. Two runs of the deployed query differed in 14 rows: `quantile` is sampling-based.
 
@@ -105,7 +107,7 @@ From `stages` (50,000 lines per iteration).
 
 `tokens − split` also includes the per-token allocation difference between the two benches.
 
-Spike (spec §2.3): masking 70 %, tree 11 %. Masking dominates, as in the spike.
+Spike: masking 70 %, tree 11 %. Masking dominates, as in the spike.
 
 ## Fingerprint backends
 
@@ -121,10 +123,10 @@ Spike (spec §2.3): masking 70 %, tree 11 %. Masking dominates, as in the spike.
 Criterion's point estimate of `cargo bench -p tayga-drain --bench mining --features gpu -- fingerprint`, all three backends from one run on 2026-10-07 (this run replaces the earlier scalar/parallel-only table; its scalar times were within 3 % of it). `gpu` is `GpuFingerprinter` on the M3 Max through Metal (wgpu 30.0.1).
 
 - **`parallel` uses rayon's global pool**, which by default has one thread per logical CPU: 14 on this host (`hw.ncpu` 14).
-- **The spike's parallel numbers were not reproduced.** The spike (spec §2.5) measured 23.4 M elem/s at 5,000 bodies and 36.7 M at 50,000, and the Task 4 brief estimated parallel above 10× scalar from 5,000 bodies. Measured: 19.44 M (6.52×) at 5,000 and 28.76 M (9.60×) at 50,000 in the Task 4 run (`cb51bf4`, scalar and parallel only), and 19.84 M (6.71×) and 25.66 M (8.54×) in the table above. The ratio is the comparable figure: the Task 4 run's scalar was about 21 % slower than the first scalar-only run, so its absolute times are not.
+- **The spike's parallel numbers were not reproduced.** The spike measured 23.4 M elem/s at 5,000 bodies and 36.7 M at 50,000, which suggested parallel above 10× scalar from 5,000 bodies. Measured: 19.44 M (6.52×) at 5,000 and 28.76 M (9.60×) at 50,000 in an earlier run (`cb51bf4`, scalar and parallel only), and 19.84 M (6.71×) and 25.66 M (8.54×) in the table above. The ratio is the comparable figure: that run's scalar was about 21 % slower than the first scalar-only run, so its absolute times are not.
 - **Below `GPU_MIN_BATCH` (2,048) the GPU backend runs scalar**, so 5, 64 and 512 equal scalar. Batches under 512 run on the calling thread for `parallel` too (`PAR_MIN_BATCH`).
 - **The GPU is slower than `parallel` at every size**: 5.0× slower at 2,048, 3.7× at 5,000, 1.6× at 50,000.
-- **Against one thread** the GPU is 4 % slower at 2,048 (its first GPU size), 1.83× faster at 5,000 and 5.37× faster at 50,000. The spike (spec §2.5) measured 5.6 and 15.6 M elem/s at 5,000 and 50,000; this run measured 5.41 and 16.14.
+- **Against one thread** the GPU is 4 % slower at 2,048 (its first GPU size), 1.83× faster at 5,000 and 5.37× faster at 50,000. The spike measured 5.6 and 15.6 M elem/s at 5,000 and 50,000; this run measured 5.41 and 16.14.
 - **Fixed dispatch cost: 279 µs** (criterion point estimate; interval 276–284 µs), from `fingerprint_gpu_dispatch`: 2,048 empty bodies, so the kernel does almost nothing and buffer creation, upload, dispatch and readback dominate. That is 40 % of the 725 µs at 2,048. A line through the 5,000 and 50,000 points has an intercept of about 680 µs, so the per-body cost is not linear at small batches; the 279 µs is the direct measurement.
 
 Correctness: `parallel` and `gpu` equal `ScalarFingerprinter` on the corpus (50,000 bodies), on NUL, non-ASCII and empty edge cases either side of their thresholds (for `gpu` also 2,048 + 1, + 63, + 64, + 65, which end inside, at and past a 64-invocation workgroup), and on random batches (`tests/backends.rs`; the GPU proptest has 32 cases of up to 3,000 bodies). `gpu::tests::the_kernel_equals_fingerprint_body_on_small_batches` runs the kernel itself, without the CPU threshold, on batches of 1, 2, 63, 64, 65 and 129 bodies; it fails when the kernel's NUL rule is removed (checked by mutation, then reverted). Every ASCII body equals `reference_fingerprint` (`tests/fingerprint.rs`); NUL and non-ASCII bodies take the Drain path.
@@ -144,7 +146,7 @@ The corpus through `Drain::add` and through `Drain::add_fingerprinted` with `fin
 | `cached/add` | 50,000 lines | 144.29 ms | 346.52 Kelem/s |
 | `cached/add_fingerprinted` | 50,000 lines | 20.678 ms | 2.4180 Melem/s |
 
-The cache makes mining **6.98×** faster (144.29 / 20.678). The spike measured 8.4× with the prototype crate on its main corpus (spec §2.5: 2.94 M against 352 k lines/s).
+The cache makes mining **6.98×** faster (144.29 / 20.678). The spike measured 8.4× with the prototype crate on its corpus (2.94 M against 352 k lines/s).
 
 **Hit rate.** `tests/differential.rs` asserts at least 95 % hits on the corpus under each of five Drain configurations. Measured: 49,716 of 50,000 lines (99.43 %) for the default, `max_clusters_per_service = 20` and `max_children = 2`; 49,715 (99.43 %) for `sim_threshold = 0.75`; 49,746 (99.49 %) for `keep_http_status = false`.
 
@@ -158,7 +160,7 @@ The cache makes mining **6.98×** faster (144.29 / 20.678). The spike measured 8
 
 Reproduce: `cargo bench -p tayga-drain --bench mining -- cached` and `cargo test -p tayga-drain --test differential`.
 
-### The cache live (Task 7, 2026-10-07)
+### The cache live (2026-10-07)
 
 Deploy at 04:30:52 UTC with the default `scalar` backend; readings of the logminer's `/metrics`:
 
@@ -177,14 +179,14 @@ Real-data differential: the last hour of `logs` exported at 04:31:37 UTC (130,37
 
 ## Hotspots before and after
 
-The fixes are spec §3.8:
+The fixes:
 - the service map's 24 h baseline is its own query, ending at the window end's minute floor and cached for that minute (up to 60 s stale);
 - `endpoint_stats` and `op_stats` deduplicate with `argMax(…, span_count) GROUP BY trace_id` over the `ts`-filtered rows instead of `trace_summaries FINAL`.
 
 Each figure below is labelled by its source, and comparisons are made only within one source:
-- **live 10-06**: the 2026-10-06 `system.query_log` hour of spec §2.7 (old code, real UI tabs: 1,006 map runs/h, about 3 tabs);
-- **isolated**: Task 6's back-to-back runs of the old and new SQL on 2026-10-07 around 02:20 UTC (best of 3, `use_query_cache=0`), multiplied by the spec §2.7 run rates (1,006 map runs/h, 60 baseline runs/h). These are estimates;
-- **live 10-07**: Task 7's `system.query_log` on the running stack, old code before the deploy at 04:30:52 UTC and new code after it, with the same synthetic map load.
+- **live 10-06**: the 2026-10-06 `system.query_log` hour of the ClickHouse section above (old code, real UI tabs: 1,006 map runs/h, about 3 tabs);
+- **isolated**: back-to-back runs of the old and new SQL on 2026-10-07 around 02:20 UTC (best of 3, `use_query_cache=0`), multiplied by the run rates of the ClickHouse section above (1,006 map runs/h, 60 baseline runs/h). These are estimates;
+- **live 10-07**: `system.query_log` on the running stack, old code before the deploy at 04:30:52 UTC and new code after it, with the same synthetic map load.
 
 **Like for like, isolated (estimates).**
 
@@ -196,7 +198,7 @@ Each figure below is labelled by its source, and comparisons are made only withi
 
 The live 10-06 figures (558, 70 and 97 CPU s/h) are higher than the isolated "before" estimates. The isolated figures are best of 3, while live runs share ClickHouse with ingest and the other queries; that is the likely cause, not investigated. Comparing live 10-06 with isolated "after" (558 against 23) would overstate the gain.
 
-**Like for like, live 10-07 (measured).** The service map ran only when requested, and no UI tab was open, so Task 7 generated the map load itself: `GET /api/v1/service-map` (default window) from a script on the host.
+**Like for like, live 10-07 (measured).** The service map ran only when requested, and no UI tab was open, so the map load was generated by `GET /api/v1/service-map` (default window) from a script on the host.
 - **Synchronised load:** 3 requests at once every 10 s, as three tabs refreshing in step. Old code 04:19:42–04:29:42; new code over the hour to 05:31:03.
 - **Staggered load:** three loops each every 10 s, offset by 0, 3.3 and 6.6 s, as three tabs opened at different times. New code 05:38–05:52 (the old code's cost per refresh does not depend on timing: it has no cache).
 
@@ -208,11 +210,11 @@ The live 10-06 figures (558, 70 and 97 CPU s/h) are higher than the isolated "be
 | `endpoint_stats` | 60 runs/h, 70.9 CPU s/h, 505.7 MiB per run (hour to 04:19:15) | 60 runs/h, 15.2 CPU s/h, 18.3 MiB and 0.34 M rows per run (hour to 05:31:03) | CPU 4.7×, read **27.7×** |
 | `op_stats` | 60 runs/h, 98.5 CPU s/h, 1.32 GiB per run | 60 runs/h, 31.2 CPU s/h, 79.3 MiB and 0.34 M rows per run | CPU 3.2×, read **17.0×** |
 
-- **Why the synchronised load first missed 5×, and the fix.** Before the final-review fix the baseline ran 177 times in the hour, not about 60: three requests that arrived together at a minute rollover all missed the one-entry cache and each computed the baseline, as there was no single-flight (Task 6 concern 3). The fix (`2e09ac2`) puts a `tokio::sync::OnceCell` in the cache slot, so concurrent requests for the same minute share one query. Re-measured with the same load (deployed 06:36:34, hour 06:41:25–07:41:25): 60 baseline runs, exactly one in each minute; 43.4 CPU s/h, 40.0 ms per refresh, **7.3×** against the live old code (291.5 ms) and 5.9× against the isolated "before" (235 ms per refresh; 236 against 43.4 CPU s/h is 5.4× at the two different run rates). The 5× target is met. Staggered requests before the fix gave 7.1×.
+- **Why the synchronised load first missed 5×, and the fix.** Before the final-review fix the baseline ran 177 times in the hour, not about 60: three requests that arrived together at a minute rollover all missed the one-entry cache and each computed the baseline, as there was no single-flight. The fix (`2e09ac2`) puts a `tokio::sync::OnceCell` in the cache slot, so concurrent requests for the same minute share one query. Re-measured with the same load (deployed 06:36:34, hour 06:41:25–07:41:25): 60 baseline runs, exactly one in each minute; 43.4 CPU s/h, 40.0 ms per refresh, **7.3×** against the live old code (291.5 ms) and 5.9× against the isolated "before" (235 ms per refresh; 236 against 43.4 CPU s/h is 5.4× at the two different run rates). The 5× target is met. Staggered requests before the fix gave 7.1×.
 - **The window query costs more live than isolated**: 23.6–24.9 CPU ms per run against 9.8 ms, with 8.3–8.7 MiB read against 2.7 MiB.
 - **`endpoint_stats` and `op_stats` read 17–28× fewer bytes per run**, past the 4× target. Their CPU falls less (4.7× and 3.2×), close to the isolated 6.4× and 3.5×.
 
-Isolated variants before the fix (spec §2.7, read-only, `use_query_cache=0`, best of 3, on 2026-10-06):
+Isolated variants before the fix (the 2026-10-06 data of the ClickHouse section above, read-only, `use_query_cache=0`, best of 3, on 2026-10-06):
 
 | Variant | ms | CPU ms | Rows read | Bytes read |
 |---|---|---|---|---|
@@ -223,7 +225,7 @@ Isolated variants before the fix (spec §2.7, read-only, `use_query_cache=0`, be
 | service map as deployed (15 min window + 24 h baseline) | 31 | 269 | 9.81 M | 163 MiB |
 | service map, window part only | 8 | 12 | 0.19 M | 3.3 MiB |
 
-### Task 6: the shipped queries on live data
+### The shipped queries on live data
 
 Re-run on 2026-10-07 around 02:20 UTC against the live `tayga` database. The settings were `readonly=2` and `use_query_cache=0`, with no caps (`[]`, the bootstrap path). Each query ran 3 times. The figures come from `system.query_log` (`QueryFinish`): best wall ms, best and mean `ProfileEvents['OSCPUVirtualTimeMicroseconds']`, then `read_rows` and `read_bytes`. "Before" is the pre-Task-6 SQL; "after" is the SQL of this commit.
 
@@ -237,7 +239,7 @@ Re-run on 2026-10-07 around 02:20 UTC against the live `tayga` database. The set
 | service map after: window query, every request | 7 | 9.8 (11) | 0.16 M | 2.7 MiB | 17 |
 | service map after: baseline query, once per minute | 28 | 216 (225) | 10.60 M | 165.9 MiB | 17 |
 
-- **The cost moves out of the per-refresh path (isolated estimate).** At spec §2.7's rate of 1,006 map runs/h and one baseline a minute, the estimate is 1,006 × 9.8 ms + 60 × 216 ms, about **23 CPU s/h**, against 236 for the old query at the same rate and from the same isolated runs (the live 10-06 hour measured 558). Live tabs share it, since their window ends fall in the same minute. The cache holds one entry, so a request for a past window (another minute floor) computes its own baseline; since `1e2ade7` it does not replace a newer cached one. The live measurement is in "Like for like, live 10-07" above.
+- **The cost moves out of the per-refresh path (isolated estimate).** At the 2026-10-06 rate of 1,006 map runs/h and one baseline a minute, the estimate is 1,006 × 9.8 ms + 60 × 216 ms, about **23 CPU s/h**, against 236 for the old query at the same rate and from the same isolated runs (the live 10-06 hour measured 558). Live tabs share it, since their window ends fall in the same minute. The cache holds one entry, so a request for a past window (another minute floor) computes its own baseline; since `1e2ade7` it does not replace a newer cached one. The live measurement is in "Like for like, live 10-07" above.
 - **The baselines' CPU falls by 6.4x and 3.5x (isolated estimate).** At 60 runs/h, `endpoint_stats` drops from about 49 to about 8 CPU s/h and `op_stats` from about 78 to about 22 (the live 10-06 hour measured 70 and 97).
 - **`op_stats` wall time is not lower** (148 against 125 ms best of 3) even though CPU falls 3.5x. The cause was not investigated. CPU and bytes read are what the stack pays for.
 
@@ -278,7 +280,7 @@ The fix round adds a post-lookup: `SELECT trace_id, max(span_count) … WHERE tr
 Both last only until the parts merge. A page with more than 50 dropped rows comes back short. Rows with equal `ts` are ordered by `trace_id`; `FINAL` left that order unspecified. The constant's doc comment has the details.
 
 Sources, compared only within one source:
-- **live 10-06**: spec §2.7, the `system.query_log` hour of 2026-10-06 (old code, real UI use);
+- **live 10-06**: the `system.query_log` hour of 2026-10-06 in the ClickHouse section above (old code, real UI use);
 - **isolated**: the old and the new SQL run back to back on the live `tayga` database, with `readonly=2`, `use_query_cache=0` and 3 runs each, read from `system.query_log`. The window was the default `1h` request: `[end - 3600, end + 60)` with `end` fixed 5 minutes back, so ingest could not move it. CPU is `ProfileEvents['OSCPUVirtualTimeMicroseconds']`, as the median (min to max) of 3 runs;
 - **deployed**: `GET /api/v1/traces/search` requests after `make up`, read from `system.query_log`.
 
@@ -296,7 +298,7 @@ Sources, compared only within one source:
 | `limit=500` | 422 | 95 + 76 | 4.80 M / 0.34 + 3.64 M | 251.0 / 18.7 + 121.5 MiB | 500, same set |
 
 - **The post-lookup is the larger part of the cost.** Each id reads about one 8,192-row granule of `trace_id` per part, and the table had 12 parts with 499 marks. 100 ids read 276 marks (73.6 MiB) and 550 ids read 450 (121.1 MiB): most of the `trace_id` column.
-- **The main query alone reads 13.4× less than `FINAL`** (18.7 against 251.0 MiB). With the post-lookup, the default request reads 2.4× less (103.0 MiB) and uses 3.3× less CPU (146 against 477 ms). **The 4× bytes target is missed: 2.4× with the post-lookup.** The controller accepted this on 2026-10-07: correctness comes first. The options to close the gap are an open idea in `docs/superpowers/followups.md`.
+- **The main query alone reads 13.4× less than `FINAL`** (18.7 against 251.0 MiB). With the post-lookup, the default request reads 2.4× less (103.0 MiB) and uses 3.3× less CPU (146 against 477 ms). **The 4× bytes target is missed: 2.4× with the post-lookup.** This was accepted on 2026-10-07: correctness comes first. Options to close the gap, none chosen: drop the post-lookup and accept the stale-fragment edge; a small per-trace table keyed by `trace_id` holding the highest `span_count`; fewer or larger parts, or a smaller `index_granularity` on `trace_summaries`.
 - **The query condition cache.** ClickHouse's query condition cache, on by default, makes a repeated post-lookup with the same ids read about 700 rows (3 ms). A search whose ids change, as they do while traces arrive, does not get that benefit. The table above has the cache off.
 - **Results.** Every request returned the same rows as `FINAL`. Three came back in another order: the default, `service=frontend-web` and `limit=500`. In each case only rows with an equal `ts` swapped places. The `ts` lists are identical, and so are the results once ties are sorted by `trace_id`. The post-lookup dropped 0 rows in these windows.
 - **The `ec70b40f` check** (isolated at 10:15:44 UTC, window 09:20 to 09:40 UTC, `service=payment`, limit 500). `FINAL` returned 0 rows. The main query returned 1 row: the fragment, which the first version of the rewrite showed. The post-lookup dropped it, so the search returned 0 rows. The same request against the deployed API (`since=20m&until=2026-10-07T09:40:00Z`) returned `[]`.
@@ -338,4 +340,4 @@ It then asserts both tie edges against `FINAL`. It fails, each mutation tried al
 
 - **Default backend: `scalar`.** The logminer's batch is one Kafka record, 5.2 logs on average (Live load above). At 5 bodies `parallel` and `gpu` both run on the calling thread and measure the same as scalar (2.44, 2.44 and 2.43 µs), so neither earns a default.
 - **GPU: kept behind the `gpu` feature, not recommended.** It is slower than `parallel` at every measured size and passes one thread only from about 5,000 bodies (4 % slower at 2,048), a batch the logminer never forms. It is not in the Docker images; `logminer.fingerprinter = "gpu"` in a build without the feature is a startup error.
-- **Arrow: not added** (spec §3.9).
+- **Arrow: not added.** `BodyBatch` already has Arrow's string layout (one bytes buffer and `len + 1` `u32` offsets, which the GPU reads as is). A batch is about 1 KB (5 logs), and `arrow-array` would add a dependency tree for a two-buffer struct with no measured gain. Neither the Kafka envelope nor the ClickHouse writer shows up in the Live load or ClickHouse sections.

@@ -3,3 +3,19 @@
 .env.local
 /fixtures/*.tmp
 .superpowers/
+
+# Internal strategy document, never commit
+docs/Product_Strategy.docx
+
+# Docs site (site/)
+site/node_modules/
+site/dist/
+site/.astro/
+
+# macOS and local tool output
+.DS_Store
+.playwright-mcp/
+
+# Internal planning docs, kept locally only
+docs/superpowers/
+idea.txt

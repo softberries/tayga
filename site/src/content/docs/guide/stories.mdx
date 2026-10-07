@@ -1,0 +1,160 @@
+---
+title: "Stories and story groups"
+description: "The Stories home page: KPI tiles, the story-groups table and its filters, the inspector, the mini service map and the latest log alerts."
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Screenshot from '../../../components/Screenshot.astro';
+
+The Stories page answers **"what is going wrong right now, and how often?"** It groups every failing or slow request in the time range into story groups, ranks them by how many stories they produced, and shows the latest story of the selected group beside the table, so you can decide what to open first.
+
+It is the home page of the app (`/`), and the first item in the navigation rail.
+
+<Screenshot name="stories-home-full" eager caption="The Stories page over the last hour, with the top group selected." />
+
+The page has five regions: the [KPI tiles](#kpi-tiles) at the top, the [story groups table](#story-groups-table), the [inspector](#the-inspector) for the selected group, and below the table the [mini service map](#mini-service-map) and the [latest log alerts](#log-alerts-panel). Every panel follows the time range in the header (see [Time range and live mode](/tayga/guide/time-range/)) and refreshes every 10 seconds while Live is on.
+
+## KPI tiles
+
+<Screenshot name="stories-kpis" caption="The four KPI tiles." />
+
+Each tile shows a number for the time range, a short note beside it, and a sparkline of the same value across the range.
+
+- **Error stories** and **Slow stories** count the stories of each kind in the range. The label carries the range, for example "Error stories · 1h". The note compares the count with the window of the same length just before it: `+38 vs prev`, `−5 vs prev` or `same as prev`.
+  - `no earlier window` means that the previous window would reach past 7 days, the API's limit and data retention.
+  - `—` means the previous window could not be loaded. Hover over it (or focus it) to see why.
+- **Active log alerts** counts the log alerts that are still firing at the end of the range: alerts last seen within the 10 minutes before it. The note splits them by kind, for example `2 spike · 1 new`, or says `none active`. The sparkline shows how many alerts were open in each bucket.
+- **Spans / s** is the number of spans stored in the range divided by its length. The note, `lag 1.9 s`, is the logminer's data lag, the seconds between a log and its mining, from the latest sample recorded in the 5 minutes before the end of the range (the slowest replica's, when you run several). It shows `lag —` when there is no recent sample. The [Pipeline](/tayga/guide/pipeline/) page charts the same lag over time.
+
+## Story groups table
+
+A story group collects the stories that share a fingerprint: the same kind of failure on the same endpoint with the same root cause. The table lists up to 100 groups in the range, ranked by their number of stories. See [Story groups and fingerprints](/tayga/concepts/story-groups/) for how stories are grouped.
+
+### Filters and search
+
+<Screenshot name="stories-filters" caption="The filter bar above the story groups." />
+
+- **Kind** opens a menu: **All kinds**, **Errors** or **Slow**. **Errors** and **Slow** show how many groups of that kind there are.
+- **+ service** filters by the root-cause service, and **+ endpoint** by the endpoint (the service and operation where the request entered). Each menu lists the values present in the current groups, with a count. Once you pick a value, the button becomes a chip, for example `Service: payment`; its **×** button removes the filter. The buttons are disabled when there is nothing to pick.
+- **Search groups** matches text in the group summary, the root-cause service and the endpoint. The list filters as you type.
+- At the right, a counter says how many groups are shown and how they are sorted: `26 groups · sorted by stories`, or `3 of 26 groups` while a filter is active.
+
+The filters and the search are kept in the URL (see [URL parameters](#url-parameters)), so a filtered view can be bookmarked or shared.
+
+### Rows and columns
+
+<Screenshot name="stories-group-row" caption="One story group row." />
+
+- The coloured stripe and the **error** or **slow** badge give the kind: red for errors, amber for slow requests.
+- The **title** is the first part of the latest story's summary, for example "payment charge failed" or "frontend-web GET /api/cart took 228.0 ms". The line under it holds the detail (the error message, or the p99 and where the time went) and the endpoint. When either is cut off, hover over it or focus the row to read it in full.
+- **Trend** is a sparkline of the group's stories per bucket across the range. It is hidden on phones.
+- **Stories** is the number of stories in the range.
+- **Last seen** is how long ago the latest story happened. It is hidden on phones.
+
+Sort by **Group** (A to Z first), **Stories** or **Last seen** (largest or newest first) by selecting the column header; select it again to reverse the order. The default is by stories, most first.
+
+### Selecting and opening a group
+
+<Steps>
+
+1. Click a row to select it. The [inspector](#the-inspector) shows the group's latest story, and the URL gains `group=<fingerprint>`. With no `group` in the URL, the top row is selected.
+
+2. Double-click a row, press <kbd>Enter</kbd> on it, or select **Open story** in the inspector to open the story on its own page, [Story detail](/tayga/guide/story-detail/).
+
+</Steps>
+
+With the keyboard, focus the table and use <kbd>↑</kbd> and <kbd>↓</kbd> to move the selection, <kbd>Home</kbd> and <kbd>End</kbd> to jump to the first and last row, and <kbd>Enter</kbd> to open the story. The inspector waits until the selection rests for a moment before it loads, so holding an arrow key does not fetch every story on the way.
+
+If a refresh or a filter removes the selected group, the selection moves back to the top row and `group` leaves the URL.
+
+## The inspector
+
+<Screenshot name="stories-inspector" caption="The inspector for the selected group." />
+
+The inspector shows the latest story of the selected group without leaving the page. On screens at least 1180 px wide it sits to the right of the table and stays in view as you scroll; drag its left edge to resize it (the width is remembered in your browser). On narrower screens it sits below the table.
+
+It contains:
+
+- a line with the kind (**ERROR** or **SLOW**), the shortened trace id and the root span's duration;
+- the summary as a title and detail;
+- the **request path**: the services from the entry point to the root cause, joined by arrows. The last service, where it went wrong, is red for an error and amber for a slow story;
+- a **waterfall summary** of at most 10 spans, chosen by importance (the root cause and its parents first, then the critical path, then errors). It is zoomed to the critical path and the root cause. Select a span to open the story with that span's details. When the trace has more spans, **Show all N spans** opens the full trace at the root cause;
+- **Compared with normal**: operations missing compared with the endpoint's baseline, up to three operations slower than their usual p95, and new operations. It shows the first five of each list and "and N more". It says "Every operation ran as usual for this endpoint." when nothing differs, and "No baseline for this endpoint yet." when there is no baseline. See [Baselines](/tayga/concepts/baselines/);
+- two buttons: **Open story**, and a button that names the trace's logs and services (for example **42 logs · 10 services**) and opens the story at its logs.
+
+When the sample story has expired, the inspector says "This story has expired"; the group is still counted, and newer stories replace the sample. When only the trace has expired, the waterfall summary says so and the rest of the story still shows.
+
+## Mini service map
+
+<Screenshot name="stories-minimap" caption="The mini service map." />
+
+A small, static picture of the services called in the range, in columns by call depth. Services with errors glow red and slow services amber; failing calls (at least 1 % errors) are dashed red lines. Infrastructure services, such as `flagd` by default, are left out; the full map has a switch for them. Hover over a service to see its full name and health.
+
+The whole picture is one link: select it, or **Open service map**, to open the [Service map](/tayga/guide/service-map/). When nothing was called in the range, the panel says "No service calls in this window."
+
+## Log alerts panel
+
+<Screenshot name="stories-alerts-panel" caption="The latest log alerts." />
+
+The five most recently seen log alerts in the range. Each card shows the kind badge (**new**, **spike** or **silence**), the service, a red dot while the alert is active, and the template text. On the right:
+
+- a new alert says `first seen 5 min ago`;
+- spike and silence alerts show the peak count against the baseline per window, for example `11 vs 1.6 / window`.
+
+Select a card to open its log template. **View all**, and **All N alerts** when there are more than five, open the [Alerts](/tayga/guide/alerts/) page with the same time range. With no alerts the panel says "No log alerts in this window."
+
+## Empty, loading and error states
+
+While a panel loads, it shows grey placeholders in its shape.
+
+<Screenshot name="stories-empty" caption="No stories in the time range." />
+
+When nothing failed or ran slow in the range, the table says "No stories in this window" and, for a range that ends now, suggests a longer time range. The inspector is hidden.
+
+<Screenshot name="stories-filter-empty" caption="Filters that match no group." />
+
+When the filters or the search match no group, the table says "No groups match these filters". Select **Clear filters** to remove the kind, service, endpoint and search filters at once.
+
+<Screenshot name="stories-error" caption="A panel that could not load." />
+
+When a panel cannot load, it shows a red banner, "Could not load story groups." (or the summary, the service map, log alerts), with the HTTP status and message, and a **Try again** button. When a refresh fails but earlier data exists, the panel keeps that data and shows a note, "Refresh failed · showing data from 14:03:07", with **Try again**. If the storage is down, a banner under the header says "Storage unavailable." until a later request succeeds.
+
+<Aside type="note" title="Custom ranges past retention">
+A custom range in an old bookmark can fall outside the 7-day data retention. The panels then say "This range is older than the 7-day data retention" and offer **Show last 1h**.
+</Aside>
+
+## On a phone
+
+<Screenshot name="mobile-stories" caption="The Stories page on a 390 px wide phone." />
+
+On a narrow screen the KPI tiles form a 2 × 2 grid, the table hides the Trend and Last seen columns, and the inspector, the mini map and the alerts stack below the table. The navigation rail becomes a bar at the bottom.
+
+## URL parameters
+
+Everything you set on this page is in the URL, so you can bookmark it or send it to a colleague.
+
+| Parameter | Values | Meaning |
+|---|---|---|
+| `kind` | `error`, `slow` | Kind filter. Absent: all kinds. |
+| `service` | a service name | Root-cause service filter. |
+| `endpoint` | `"<service> <operation>"` | Endpoint filter, as the table shows it. |
+| `q` | text, up to 200 characters | Search over title, service and endpoint. |
+| `group` | a fingerprint (decimal) | The selected group. |
+| `since`, `until` | see [Time range](/tayga/guide/time-range/#url-parameters) | The time range. |
+
+For example, `/?kind=error&service=payment&since=24h` shows the error groups whose root cause is in `payment` over the last 24 hours.
+
+## Tips
+
+- Start with the top group: it produced the most stories in the range. Sort by **Last seen** to find what started most recently.
+- Use the inspector to triage several groups quickly with the arrow keys, and open a story only when you need the full waterfall and the logs.
+- Two groups can have the same title; the endpoint on the second line tells them apart.
+- To see one service's problems, open it on the [Service map](/tayga/guide/service-map/): its drawer lists the groups whose root cause is there and links back here with the service filter set.
+
+## Related
+
+- [Error stories](/tayga/concepts/error-stories/): what a story is and when Tayga writes one.
+- [Story groups and fingerprints](/tayga/concepts/story-groups/)
+- [Root cause and critical path](/tayga/concepts/root-cause-critical-path/)
+- [Baselines](/tayga/concepts/baselines/): what "compared with normal" compares against.
+- [Log alerts](/tayga/concepts/log-alerts/)

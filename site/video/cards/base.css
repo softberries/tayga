@@ -1,0 +1,52 @@
+/* Shared styles for the video cards (1920x1080). Served by record.ts from http://cards.local/,
+   with /fonts and /logo.jpg mapped to ui/public. Colours are the app's dark tokens. */
+@font-face { font-family: 'Sora'; font-weight: 400; src: url('/fonts/sora-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Sora'; font-weight: 500; src: url('/fonts/sora-latin-500-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Sora'; font-weight: 600; src: url('/fonts/sora-latin-600-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Sora'; font-weight: 700; src: url('/fonts/sora-latin-700-normal.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-weight: 400; src: url('/fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-weight: 500; src: url('/fonts/jetbrains-mono-latin-500-normal.woff2') format('woff2'); }
+
+:root {
+	--ground: #0a1020;
+	--panel: #0e162a;
+	--panel-line: #1c2944;
+	--inner: #111c33;
+	--ink: #d8e1f0;
+	--ink-2: #c9d4e6;
+	--muted: #8e9bb3;
+	--accent: #7cc4ff;
+	--accent-strong: #2b6cb0;
+	--err: #ff6b6b;
+	--slow: #f4b740;
+	--ok: #7fd1a8;
+	--silence: #b79cff;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; }
+body {
+	background:
+		radial-gradient(1200px 700px at 78% 18%, rgba(43, 108, 176, 0.22), transparent 60%),
+		radial-gradient(900px 600px at 10% 95%, rgba(124, 196, 255, 0.08), transparent 60%),
+		var(--ground);
+	color: var(--ink);
+	font-family: 'Sora', Helvetica, Arial, sans-serif;
+	-webkit-font-smoothing: antialiased;
+}
+.grid-bg {
+	position: fixed; inset: 0; pointer-events: none;
+	background-image:
+		linear-gradient(rgba(124, 196, 255, 0.045) 1px, transparent 1px),
+		linear-gradient(90deg, rgba(124, 196, 255, 0.045) 1px, transparent 1px);
+	background-size: 48px 48px;
+	mask-image: radial-gradient(ellipse at center, black 30%, transparent 80%);
+}
+.mono { font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; }
+.brand {
+	background: linear-gradient(90deg, #2b6cb0, #7cc4ff);
+	-webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.eyebrow { text-transform: uppercase; letter-spacing: 0.16em; font-size: 20px; font-weight: 600; color: var(--accent); }
+/* The Tayga logo: the dog portrait (ui/public/logo.jpg, 1024 px), cropped to the same head-and-
+   shoulders square as the app's rail logo (logo-mark.png is this crop at 136 px). */
+img[src="/logo.jpg"] { object-fit: cover; object-view-box: inset(3.71% 8.4% 17.58% 12.89%); }

@@ -1,0 +1,136 @@
+---
+title: "Logs and templates"
+description: "The log templates list, a template's detail page, and the silence alert setting."
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Screenshot from '../../../components/Screenshot.astro';
+
+The Logs pages answer **"which kinds of log lines are my services writing, how often, and is anything unusual?"** Tayga groups log lines that differ only in their variable parts (ids, numbers, addresses) into **templates**, and counts each template's hits. You can browse the templates, open one to see its hits over time, its latest lines and its alerts, and ask Tayga to alert you when a template goes quiet.
+
+There are two pages: the templates list at `/logs/templates`, and a [template's page](#template-detail) at `/logs/templates/<template id>`. The **Logs and templates** icon in the rail opens the [Alerts](/tayga/guide/alerts/) page; **Browse templates** there, **Log templates** in the [command palette](/tayga/guide/command-palette/), or **All templates** on a template page open the list.
+
+<Screenshot name="logs-templates" eager caption="The log templates seen in the last hour." />
+
+## Templates list
+
+### Filters
+
+<Screenshot name="logs-templates-filters" caption="The filter bar." />
+
+- **Service** (1): only the templates of one service. Pick it from a searchable list; **any** clears it.
+- **Search templates** (2): templates whose text contains what you type, ignoring case. The list updates shortly after you stop typing.
+- **Clear filters** appears when either is set.
+- At the right, the number of templates. The list holds at most 200, the most frequent first; `200+ templates` means there are more, so narrow the filters.
+
+### Columns
+
+<Screenshot name="logs-template-row" caption="One template row." />
+
+- **Service**: the service that wrote the lines.
+- **Template**: the line with its variable parts replaced by `<*>`. Select it to open the [template page](#template-detail). Hover over a cut-off template to read it in full.
+- **Hits**: lines matching the template in the time range. Hover over it for the exact number.
+- **Trend**: a sparkline of the hits across the range.
+- **First seen**: when Tayga first saw the template. Hover over it for the date and time.
+- **Status**:
+  - a bell when **Alert when silent** is on for the template (see [Silence alert](#silence-alert));
+  - an **alerting** badge while the template has a new or spike alert last seen within the 10 minutes before the end of the range.
+
+Sort by **Template** (A to Z), **Hits** or **First seen** by selecting the header; select it again to reverse. The default is most hits first. With the table focused, <kbd>PageUp</kbd>, <kbd>PageDown</kbd>, <kbd>Home</kbd> and <kbd>End</kbd> scroll it.
+
+<Screenshot name="logs-templates-search" caption="A search narrowed to one template." />
+
+### Empty states
+
+- "No log templates in this window": no logs arrived in the range. For a range ending now it suggests a longer one.
+- "No templates match these filters", with **Clear filters**.
+- "Could not load log templates." with **Try again** when the list fails to load.
+
+## Template detail
+
+<Screenshot name="logs-template-detail-full" maxHeight="42rem" caption="A template's page." />
+
+### Header
+
+<Screenshot name="logs-template-header" caption="The template header." />
+
+The service, an **alerting** badge while the template is alerting, and **All templates** to go back to the list. Then the full template text, and:
+
+- **Hits in 1h** (the range): the template's hits in the range;
+- **First seen** and **Last seen**: how long ago, with the date and time on hover;
+- **Alerts**: how many alerts the template has had (up to 20, from the 7 days before the end of the range).
+
+### Silence alert
+
+A silence alert fires when a template you expect to see regularly stops appearing: a heartbeat, a scheduled job's "done" line, a health check. It is off for every template until you turn it on.
+
+<Screenshot name="logs-silence-off" caption="The silence setting, off." />
+
+<Steps>
+
+1. Turn on **Alert when silent** (1).
+
+2. Set the minutes in **after … minutes** (2): how long the template may go without a hit before Tayga alerts. Use a whole number from 1 to 1440 (24 hours); the default is 10. The field is disabled while the switch is off.
+
+3. Select **Save** (3). It is enabled only when something changed. The card confirms "Saved: alerts after 10 min of silence", or "Saved: off".
+
+</Steps>
+
+<Screenshot name="logs-silence-on" caption="The silence setting switched on, before saving." />
+
+"Minutes must be a whole number from 1 to 1440." flags an invalid value. If the save fails, the card shows the error and keeps your change so you can try again. With sign-in turned on, saving needs a session; if yours has expired you are sent to the [sign-in page](/tayga/guide/login/) and back.
+
+Templates with the setting on show a bell in the list. When the alert fires, it appears on the [Alerts](/tayga/guide/alerts/) page as a **silence** alert. See [Log alerts](/tayga/concepts/log-alerts/) for how silence is detected.
+
+### Hits
+
+<Screenshot name="logs-template-hits" caption="Hits per minute over the range." />
+
+A bar chart of the template's hits per bucket across the range; the heading names the bucket, for example "Hits per minute". Hover over it to see the counts. "No hits in this window" means the template matched no log in the range.
+
+### Sample and latest hits
+
+<Screenshot name="logs-template-sample" caption="A sample line of the template." />
+
+**Sample** shows one real log line that matched the template, with the variable parts filled in.
+
+<Screenshot name="logs-template-recent" caption="The latest hits." />
+
+**Latest N hits** lists up to 20 of the newest lines that matched, up to the end of the range, even when they are older than its start. Each row has the **Time** (date and time, and how long ago), the **Severity**, the **Trace** (select it to open the [trace view](/tayga/guide/traces/#trace-view)) and the **Story** when the trace has one ("none" otherwise).
+
+### Alerts on this template
+
+<Screenshot name="logs-template-alerts" caption="The alerts raised on this template." />
+
+The template's alerts, with the same columns as the [Alerts](/tayga/guide/alerts/#alerts-table) page minus the service and the template. "No alerts for this template" means it has not spiked, gone silent or been flagged as new.
+
+### Template not found
+
+<Screenshot name="logs-template-not-found" caption="A template id that is not stored." />
+
+"Template not found" means no template with that id is stored, usually because it expired. **All templates** goes back to the list.
+
+## URL parameters
+
+| Page | Parameter | Values | Meaning |
+|---|---|---|---|
+| `/logs/templates` | `service` | a service name | Service filter. |
+| `/logs/templates` | `q` | text, up to 200 characters | Template search. |
+| both | `since`, `until` | see [Time range](/tayga/guide/time-range/#url-parameters) | The time range. |
+
+For example, `/logs/templates?service=payment&q=timeout` lists the payment service's templates that contain "timeout".
+
+## Tips
+
+- Sort by **First seen** to find log lines that appeared only recently, for example after a deploy.
+- From a [story's logs](/tayga/guide/story-detail/#logs), select a template to see whether the same line shows up in other requests.
+- Turn on **Alert when silent** for lines that must keep coming, and pick minutes comfortably above their normal gap, so a quiet period does not alert.
+
+## Related
+
+- [Log templates](/tayga/concepts/log-templates/): how lines are grouped and masked.
+- [Log alerts](/tayga/concepts/log-alerts/): new, spike and silence alerts.
+- [Error stories](/tayga/concepts/error-stories/)
+- [Root cause and critical path](/tayga/concepts/root-cause-critical-path/)
+- [Baselines](/tayga/concepts/baselines/)
+- [Re-mining templates](/tayga/operations/remine/)

@@ -1,0 +1,198 @@
+<!doctype html>
+<!--
+  README hero banner. Rendered to docs/assets/hero-light.png and hero-dark.png by render.mjs
+  (1280x640 CSS px at 2x). Open with ?theme=dark or ?theme=light. Uses the app's design tokens
+  (ui/src/theme/tokens.css), the self-hosted Sora and JetBrains Mono fonts, the logo from ui/public
+  and a real screenshot from the docs site (site/src/assets/screens/hero-story-*.webp).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tayga hero</title>
+<style>
+@font-face { font-family: 'Sora'; font-weight: 400; src: url('../../../ui/public/fonts/sora-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Sora'; font-weight: 500; src: url('../../../ui/public/fonts/sora-latin-500-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Sora'; font-weight: 600; src: url('../../../ui/public/fonts/sora-latin-600-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Sora'; font-weight: 700; src: url('../../../ui/public/fonts/sora-latin-700-normal.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-weight: 400; src: url('../../../ui/public/fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-weight: 500; src: url('../../../ui/public/fonts/jetbrains-mono-latin-500-normal.woff2') format('woff2'); }
+
+/* Tokens: ui/src/theme/tokens.css, light on :root, dark on [data-theme="dark"]. */
+:root {
+  --ground: #eef2f8;
+  --panel: #ffffff;
+  --panel-line: #dce3ee;
+  --ink: #0e1a2e;
+  --muted: #55627a;
+  --faint: #8a96aa;
+  --accent: #1c69c7;
+  --err: #bf342d;
+  --err-soft: #fce8e6;
+  --brand-from: #2b6cb0;
+  --brand-to: #7cc4ff;
+  --grid: rgba(28, 105, 199, 0.07);
+  --glow-a: rgba(124, 196, 255, 0.55);
+  --glow-b: rgba(43, 108, 176, 0.18);
+  --shot-shadow: 0 2px 4px rgba(16, 24, 40, 0.06), 0 30px 70px -20px rgba(16, 40, 80, 0.35);
+  --chip-bg: rgba(255, 255, 255, 0.75);
+}
+[data-theme="dark"] {
+  --ground: #0a1020;
+  --panel: #0e162a;
+  --panel-line: #1c2944;
+  --ink: #d8e1f0;
+  --muted: #8e9bb3;
+  --faint: #56637c;
+  --accent: #7cc4ff;
+  --err: #ff6b6b;
+  --err-soft: #2a1420;
+  --grid: rgba(124, 196, 255, 0.05);
+  --glow-a: rgba(43, 108, 176, 0.45);
+  --glow-b: rgba(124, 196, 255, 0.10);
+  --shot-shadow: 0 2px 4px rgba(0, 0, 0, 0.3), 0 30px 80px -20px rgba(0, 0, 0, 0.8);
+  --chip-bg: rgba(14, 22, 42, 0.8);
+}
+
+* { box-sizing: border-box; margin: 0; }
+html, body { width: 1280px; height: 640px; overflow: hidden; }
+body {
+  font-family: 'Sora', system-ui, sans-serif;
+  color: var(--ink);
+  background: var(--ground);
+  position: relative;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Background: a faint grid, two soft brand glows. */
+.bg {
+  position: absolute; inset: 0;
+  background:
+    radial-gradient(620px 420px at 78% 30%, var(--glow-a), transparent 70%),
+    radial-gradient(520px 380px at 8% 100%, var(--glow-b), transparent 70%),
+    linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 32px 32px,
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0 / 32px 32px,
+    var(--ground);
+}
+.bg::after {
+  /* Fade the grid out towards the copy so the text stays calm. */
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, var(--ground) 0%, color-mix(in srgb, var(--ground) 70%, transparent) 38%, transparent 60%);
+}
+
+.copy {
+  position: absolute; left: 72px; top: 0; bottom: 0; width: 500px;
+  display: flex; flex-direction: column; justify-content: center;
+}
+.brand { display: flex; align-items: center; gap: 16px; margin-bottom: 40px; }
+.brand img {
+  width: 64px; height: 64px; border-radius: 16px;
+  box-shadow: 0 6px 18px rgba(43, 108, 176, 0.45);
+}
+.brand .name { font-size: 34px; font-weight: 700; letter-spacing: -0.02em; }
+.brand .tag {
+  margin-left: 4px; padding: 5px 11px; border-radius: 999px;
+  font-size: 13px; font-weight: 500; color: var(--muted);
+  border: 1px solid var(--panel-line); background: var(--chip-bg);
+}
+h1 {
+  font-size: 54px; line-height: 1.06; font-weight: 700; letter-spacing: -0.035em;
+}
+h1 .grad {
+  background: linear-gradient(100deg, var(--brand-from), var(--brand-to));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.lede {
+  margin-top: 22px; font-size: 21px; line-height: 1.5; color: var(--muted); max-width: 470px;
+}
+.lede b { color: var(--ink); font-weight: 600; }
+.facts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 30px; }
+.facts span {
+  font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 500;
+  padding: 7px 12px; border-radius: 7px; color: var(--muted);
+  border: 1px solid var(--panel-line); background: var(--chip-bg);
+}
+
+/* The product shot: a window frame with the real screenshot, tilted slightly. */
+.stage { position: absolute; left: 620px; top: 58px; width: 760px; height: 600px; perspective: 1800px; }
+.window {
+  position: absolute; left: 0; top: 0; width: 800px;
+  border-radius: 14px; overflow: hidden;
+  border: 1px solid var(--panel-line); background: var(--panel);
+  box-shadow: var(--shot-shadow);
+  transform: rotateY(-9deg) rotateX(3deg); transform-origin: left center;
+}
+.chrome {
+  display: flex; align-items: center; gap: 7px; height: 30px; padding: 0 14px;
+  border-bottom: 1px solid var(--panel-line);
+}
+.chrome i { width: 10px; height: 10px; border-radius: 50%; background: var(--panel-line); }
+.chrome p { margin-left: 12px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--faint); }
+.shot { display: block; width: 800px; height: 500px; object-fit: cover; object-position: left top; }
+
+/* A callout lifted out of the screenshot: the story's root cause. */
+.callout {
+  position: absolute; left: -46px; top: 352px; width: 506px;
+  padding: 16px 18px; border-radius: 14px;
+  background: var(--panel); border: 1px solid var(--panel-line);
+  box-shadow: 0 24px 50px -16px rgba(16, 24, 40, 0.45);
+}
+[data-theme="dark"] .callout { box-shadow: 0 24px 60px -12px rgba(0, 0, 0, 0.75); }
+.callout .k {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em; color: var(--err);
+  padding: 4px 10px; border-radius: 999px; background: var(--err-soft);
+}
+.callout .k::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--err); box-shadow: 0 0 10px var(--err); }
+.callout .t { margin-top: 10px; font-size: 15px; font-weight: 600; line-height: 1.35; }
+.callout .s { margin-top: 4px; font-size: 13px; color: var(--muted); }
+.callout .s code { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; color: var(--ink); }
+.path { display: flex; align-items: center; gap: 5px; margin-top: 12px; flex-wrap: nowrap; }
+.path span {
+  font-family: 'JetBrains Mono', monospace; font-size: 10.5px; padding: 3px 6px; white-space: nowrap; border-radius: 5px;
+  color: var(--muted); border: 1px solid var(--panel-line);
+}
+.path em { font-style: normal; color: var(--faint); font-size: 11px; }
+.path span.rc { color: var(--err); border-color: var(--err); background: var(--err-soft); }
+</style>
+</head>
+<body>
+<div class="bg"></div>
+
+<section class="copy">
+  <div class="brand">
+    <img src="../../../ui/public/logo.jpg" alt="">
+    <span class="name">Tayga</span>
+    <span class="tag">Open source · Rust</span>
+  </div>
+  <h1>Every failing request, <span class="grad">explained.</span></h1>
+  <p class="lede">OpenTelemetry traces and logs become <b>error stories</b>: root cause, request path, critical path, what changed, and the logs that matter.</p>
+  <div class="facts">
+    <span>OTLP gRPC + HTTP</span>
+    <span>Redpanda</span>
+    <span>ClickHouse</span>
+    <span>AGPLv3</span>
+  </div>
+</section>
+
+<div class="stage">
+  <div class="window">
+    <div class="chrome"><i></i><i></i><i></i><p>localhost:8090 · Story</p></div>
+    <img class="shot" id="shot" alt="">
+  </div>
+  <div class="callout">
+    <span class="k">Root cause</span>
+    <p class="t">payment charge failed: Payment request failed. Invalid token.</p>
+    <p class="s">in <code>payment</code> · span <code>charge</code></p>
+    <div class="path">
+      <span>load-generator</span><em>→</em><span>frontend-proxy</span><em>→</em><span>frontend</span><em>→</em><span>checkout</span><em>→</em><span class="rc">payment</span>
+    </div>
+  </div>
+</div>
+
+<script>
+  const theme = new URLSearchParams(location.search).get('theme') === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = theme;
+  document.getElementById('shot').src = `../../../site/src/assets/screens/hero-story-${theme}.webp`;
+</script>
+</body>
+</html>

@@ -1,0 +1,636 @@
+---
+title: "HTTP API"
+description: "Every route of the tayga-api JSON API: parameters, limits, response shapes, real examples, errors and authentication."
+tableOfContents:
+  maxHeadingLevel: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`tayga-api` serves the web app and a JSON API on one port, 8090 by default. The app uses exactly these routes, so anything the app shows can be scripted. The examples on this page are real responses from the OpenTelemetry demo stack on 2026-10-07, trimmed: `…` marks removed items, and long strings are shortened.
+
+## Basics
+
+| Topic | Details |
+|---|---|
+| Base URL | `http://<host>:8090`; data routes are under `/api/v1/`. |
+| Format | JSON, UTF-8. Only `PUT …/silence` and the login routes take a body. |
+| Authentication | None by default. With [authentication](/tayga/operations/authentication/) on, every `/api/*` route except `config` and the three `auth` routes needs the session cookie or HTTP Basic credentials. |
+| Stability | The API is versioned `v1` and serves the app. It has no compatibility promise yet. |
+
+### Identifiers and numbers
+
+| Value | Format |
+|---|---|
+| Story and trace ids | 32 hexadecimal characters (`2b061ed5d124c26643e501e934cb4267`). A story id is its trace id. |
+| Fingerprints, template ids, log ids | Unsigned 64-bit integers as **decimal strings** (`"14061731164122576331"`): JavaScript loses precision above 2⁵³. |
+| Timestamps | `*_ns` fields are Unix nanoseconds. `buckets` pairs start with Unix **seconds**; `pipeline/series` points start with Unix **milliseconds**. |
+| Durations | `*_ns`, nanoseconds. |
+
+### Time windows
+
+Every route that takes `since` also takes `until`.
+
+| Parameter | Format | Default | Limits |
+|---|---|---|---|
+| `since` | `<n>s`, `<n>m`, `<n>h` or `<n>d`, for example `15m`, `1h`, `7d` | per route (`1h` or `24h`) | 1 second to 7 days. An empty value means the default. |
+| `until` | RFC 3339 (`2026-10-04T12:00:00Z`, any offset; fractions dropped) or Unix seconds | now | At most 60 s in the future. The window `[until − since, until)` must start within the last 7 days. |
+
+- Without `until` the window ends now, and **row lists** (trace search, log alerts, a template's recent hits) also include rows stamped up to 60 s past now, so a producer whose clock runs slightly ahead hides nothing.
+- **Counts, rates and bucketed series** stop at the window's end, so a total always equals the sum of its buckets.
+- **Buckets** lie on the epoch grid (multiples of `bucket_secs`), so a moving live window keeps its bucket edges; the first and last bucket may be partial. `bucket_secs` is the window divided by 120, rounded up to whole minutes, at least 60: 60 s for `1h`, 720 s for `24h`, 5,040 s for `7d`.
+- Alert `active` flags, template `alerting` and the overview's active alerts and data lag are **as of the window's end**.
+- 7 days is the longest TTL of the tables these routes read. Shorter-lived tables (`spans`, `logs` and hits 3 days, `trace_summaries` 2 days) return nothing older.
+
+### Errors
+
+Every error on an `/api/` route is JSON: `{"error": "<message>"}`.
+
+| Status | When | Example body |
+|---|---|---|
+| 400 | A bad parameter or body | `{"error":"since must be between 1s and 7d (got 8d)"}` |
+| 401 | Authentication is on and the request has no valid session or Basic credentials | `{"error":"unauthorized"}` |
+| 404 | No such story, trace, group or template, or no such `/api/` route | `{"error":"not found"}` |
+| 415 | A body route without `Content-Type: application/json` | `{"error":"content type must be application/json"}` |
+| 429 | Too many failed password checks from this IP | `{"error":"too many attempts"}` |
+| 503 | ClickHouse failed | `{"error":"storage unavailable"}` |
+| 503 | `pipeline/lag` could not read Kafka | `{"error":"kafka unavailable"}` |
+| 504 | A ClickHouse read passed `query_timeout_secs` (15 s), or the request was still running 5 s after it | `{"error":"storage timeout"}` |
+
+More real 400 messages: `invalid kind "foo": expected error or slow`, `invalid limit "501": expected 1 to 500`, `until must not be more than 60 s in the future`, `invalid id "…": expected 32 hex characters`, `minutes must be 1..=1440`.
+
+## Routes
+
+| Method and path | Returns |
+|---|---|
+| [`GET /api/v1/story-groups`](#get-apiv1story-groups) | Top 100 story groups in a window |
+| [`GET /api/v1/story-groups/{fingerprint}`](#get-apiv1story-groupsfingerprint) | One group and its example stories |
+| [`GET /api/v1/stories/{story_id}`](#get-apiv1storiesstory_id) | A full story |
+| [`GET /api/v1/stories/series`](#get-apiv1storiesseries) | Stories per bucket |
+| [`GET /api/v1/overview`](#get-apiv1overview) | The Stories page's KPI values and series |
+| [`GET /api/v1/traces/search`](#get-apiv1tracessearch) | Trace rows for the explorer |
+| [`GET /api/v1/traces/{trace_id}`](#get-apiv1tracestrace_id) | A trace's spans and logs |
+| [`GET /api/v1/traces/{trace_id}/log-templates`](#get-apiv1tracestrace_idlog-templates) | The template of each of a trace's logs |
+| [`GET /api/v1/service-map`](#get-apiv1service-map) | Edges and service health |
+| [`GET /api/v1/services`](#get-apiv1services) | Service names |
+| [`GET /api/v1/services/{name}`](#get-apiv1servicesname) | One service's RED series |
+| [`GET /api/v1/log-alerts`](#get-apiv1log-alerts) | Log alerts in a window |
+| [`GET /api/v1/log-templates`](#get-apiv1log-templates) | Templates with hits in a window |
+| [`GET /api/v1/log-templates/{id}`](#get-apiv1log-templatesid) | One template's detail |
+| [`PUT /api/v1/log-templates/{id}/silence`](#put-apiv1log-templatesidsilence) | Set a template's silence alert |
+| [`GET /api/v1/search`](#get-apiv1search) | Command-palette search |
+| [`GET /api/v1/pipeline/series`](#get-apiv1pipelineseries) | A series from the recorded metrics |
+| [`GET /api/v1/pipeline/lag`](#get-apiv1pipelinelag) | Consumer lag per group |
+| [`GET /api/v1/config`](#get-apiv1config) | What the app needs before signing in |
+| [`POST /api/v1/auth/login`, `logout`, `GET /api/v1/auth/me`](#authentication-routes) | Sessions (only with authentication on) |
+| [`GET /healthz`, `GET /metrics`](#health-and-metrics) | Liveness and Prometheus metrics |
+
+`PUT …/silence` is the only route that changes stored data.
+
+## Stories
+
+### `GET /api/v1/story-groups`
+
+The 100 [story groups](/tayga/concepts/story-groups/) with the most stories in the window, most first.
+
+| Parameter | Type | Default | Notes |
+|---|---|---|---|
+| `since`, `until` | window | `1h` | |
+| `kind` | `error` or `slow` | all | |
+| `service` | string | all | Matches the **root-cause** service. |
+
+```json title="GET /api/v1/story-groups?since=1h"
+[
+  {
+    "fingerprint": "11084856324465239891",
+    "kind": "error",
+    "summary": "payment charge failed: Payment request failed. Invalid token. demo.user_context.loyalty_level=gold",
+    "rc_service": "payment",
+    "rc_span_name": "charge",
+    "endpoint_service": "load-generator",
+    "endpoint_name": "user_checkout_single",
+    "stories": 18,
+    "first_seen_ns": 1791379402686922836,
+    "last_seen_ns": 1791379900184126927,
+    "sample_story_id": "f8c5fe9a9b7e899a081fb814b5f8573d",
+    "bucket_secs": 60,
+    "buckets": [[1791379380, 3], [1791379440, 1], …]
+  },
+  …
+]
+```
+
+`summary` and `sample_story_id` are those of the newest story. `buckets` are `[bucket_start_unix_s, stories]`, about 120 per window, without empty buckets.
+
+### `GET /api/v1/story-groups/{fingerprint}`
+
+One group, with the group fields above and its example stories in the window (newest first). 404 when the group has no story in the window; 400 when the fingerprint is not a decimal `u64`.
+
+| Parameter | Type | Default |
+|---|---|---|
+| `since`, `until` | window | `24h` |
+
+```json title="GET /api/v1/story-groups/14061731164122576331?since=1h"
+{
+  "group": {
+    "fingerprint": "14061731164122576331",
+    "kind": "error",
+    "summary": "payment charge failed: Payment request failed. Invalid token. …",
+    "rc_service": "payment", "rc_span_name": "charge",
+    "endpoint_service": "load-generator", "endpoint_name": "user_checkout_multi",
+    "stories": 16,
+    "first_seen_ns": 1791379379394299756, "last_seen_ns": 1791379953552094258,
+    "sample_story_id": "2b061ed5d124c26643e501e934cb4267",
+    "bucket_secs": 60, "buckets": [[1791379320, 1], [1791379380, 2], …]
+  },
+  "examples": [
+    {
+      "story_id": "2b061ed5d124c26643e501e934cb4267",
+      "ts_ns": 1791379953552094258,
+      "trace_id": "2b061ed5d124c26643e501e934cb4267",
+      "duration_ns": 81734541,
+      "summary": "payment charge failed: Payment request failed. Invalid token. …"
+    },
+    …
+  ]
+}
+```
+
+### `GET /api/v1/stories/{story_id}`
+
+A full [story](/tayga/concepts/error-stories/). No parameters. 404 when absent (stories are kept 7 days); 400 for an id that is not 32 hex characters.
+
+```json title="GET /api/v1/stories/2b061ed5d124c26643e501e934cb4267"
+{
+  "story_id": "2b061ed5d124c26643e501e934cb4267",
+  "fingerprint": "14061731164122576331",
+  "kind": "error",
+  "ts_ns": 1791379953552094258,
+  "duration_ns": 81734541,
+  "trace_id": "2b061ed5d124c26643e501e934cb4267",
+  "endpoint_service": "load-generator",
+  "endpoint_name": "user_checkout_multi",
+  "root_cause": {
+    "service": "payment", "span_name": "charge", "span_kind": "internal",
+    "span_id": "2f70db2ac4878c98",
+    "message": "Payment request failed. Invalid token. demo.user_context.loyalty_level=gold",
+    "exception_type": "Error"
+  },
+  "summary": "payment charge failed: Payment request failed. Invalid token. demo.user_context.loyalty_level=gold",
+  "path_services": ["load-generator", "frontend-proxy", …],
+  "path_spans": [
+    { "span_id": "48a63fc366d2fc73", "service": "load-generator", "name": "user_checkout_multi",
+      "kind": "internal", "status": "unset", "start_ns": 1791379953552094258, "duration_ns": 81734541 },
+    …
+  ],
+  "critical_path": {
+    "segments": [
+      { "span_id": "48a63fc366d2fc73", "service": "load-generator", "name": "user_checkout_multi",
+        "start_ns": 1791379953552094258, "end_ns": 1791379953552140758 },
+      …
+    ],
+    "top": [
+      { "span_id": "74b01cee318ac313", "service": "product-catalog",
+        "name": "oteldemo.ProductCatalogService/GetProduct", "self_time_ns": 4629493 },
+      …
+    ]
+  },
+  "baseline_diff": {
+    "new_ops": [],
+    "missing_ops": ["cart:POST", "cart:POST /oteldemo.CartService/EmptyCart", …],
+    "slower_ops": []
+  },
+  "logs": [
+    { "ts_ns": 1791379953631000000, "service": "payment", "span_id": "1db4a125a7e92d80",
+      "severity_number": 13, "severity_text": "warn",
+      "body": "Payment request failed. Invalid token. demo.user_context.loyalty_level=gold" },
+    …
+  ],
+  "also_failed": [],
+  "span_count": 140,
+  "flags": []
+}
+```
+
+`baseline_diff` is `null` when the endpoint had no trusted baseline. `slower_ops` entries are `{op, duration_ns, baseline_p95_ns}`. `flags` can hold `incomplete` and `truncated`. `logs` holds at most 50, the most severe first.
+
+### `GET /api/v1/stories/series`
+
+Stories per bucket, for charts.
+
+| Parameter | Type | Default | Notes |
+|---|---|---|---|
+| `since`, `until` | window | `1h` | |
+| `kind` | `error` or `slow` | all | |
+| `service` | string | all | Root-cause service. |
+
+```json title="GET /api/v1/stories/series?since=15m"
+{"bucket_secs":60,"error":[[1791381000,2]],"slow":[[1791380820,1],[1791381360,1],[1791381420,1],[1791381600,2]]}
+```
+
+### `GET /api/v1/overview`
+
+The values behind the Stories page's tiles, for the window.
+
+| Parameter | Type | Default |
+|---|---|---|
+| `since`, `until` | window | `1h` |
+
+```json title="GET /api/v1/overview?since=15m"
+{
+  "bucket_secs": 60,
+  "error_stories": 2,
+  "slow_stories": 5,
+  "active_alerts": 0,
+  "spans_per_sec": 126.17,
+  "data_lag_secs": 3.080075509,
+  "stories": { "bucket_secs": 60, "error": [[1791381000, 2]], "slow": [[1791380820, 1], …] },
+  "spans": [[1791380760, 0.35], …]
+}
+```
+
+`data_lag_secs` is the logminer's [data lag](/tayga/concepts/data-clock/#watching-the-lag): the largest of the replicas' newest samples from the last 300 s. `spans` is spans per second per bucket.
+
+## Traces
+
+### `GET /api/v1/traces/search`
+
+Assembled traces in the window, newest first, with their story when one exists. Each trace appears once, in the version with the most spans.
+
+| Parameter | Type | Default | Notes |
+|---|---|---|---|
+| `since`, `until` | window | `1h` | |
+| `service` | string, ≤ 200 chars | all | The trace's endpoint service… |
+| `touched` | `0` or `1` | `0` | …or, with `1`, any service that has a span in the trace. |
+| `endpoint` | string, ≤ 200 chars | all | Endpoint name, exact. |
+| `min_ms`, `max_ms` | whole milliseconds | none | Root duration bounds; `min_ms` may not exceed `max_ms`. |
+| `errors` | `0` or `1` | `0` | Only failing traces. |
+| `limit` | 1 to 500 | `100` | |
+
+```json title="GET /api/v1/traces/search?since=15m&limit=3"
+[
+  {
+    "trace_id": "0d25b43d23029237b7fd82eb877f03cd",
+    "ts_ns": 1791380675346000000,
+    "endpoint_service": "frontend-web",
+    "endpoint_name": "GET /images/products/<*>",
+    "duration_ns": 5000000,
+    "is_error": false,
+    "span_count": 4,
+    "story_id": null,
+    "story_kind": null
+  },
+  …
+]
+```
+
+### `GET /api/v1/traces/{trace_id}`
+
+A trace's raw spans and logs, from the `spans` and `logs` tables (kept 3 days), with the fields the app's waterfall and span drawer use. 404 when neither spans nor logs exist.
+
+```json title="GET /api/v1/traces/2b061ed5d124c26643e501e934cb4267"
+{
+  "trace_id": "2b061ed5d124c26643e501e934cb4267",
+  "spans": [
+    {
+      "span_id": "95bbf82304b8328d",
+      "parent_span_id": "754c1e4b3639689d",
+      "service_name": "quote",
+      "span_name": "POST /getquote",
+      "kind": "server",
+      "start_ns": 1791379953532675345,
+      "duration_ns": 177292,
+      "status": "unset",
+      "status_message": "",
+      "attrs": [["code.function.name", "Slim\\App::handle"], …],
+      "resource": [["service.name", "quote"], ["host.name", "docker-desktop"], …],
+      "events": [],
+      "self_ns": 69875
+    },
+    …
+  ],
+  "logs": [
+    {
+      "log_id": "9196926201850625558",
+      "ts_ns": 1791379953552160000,
+      "span_id": "b27245ebc00c87cd",
+      "service_name": "load-generator",
+      "severity_number": 9,
+      "severity_text": "INFO",
+      "body": "User 8d65a798-… adding 2 of product 0PUK6V6EV0 to cart"
+    },
+    …
+  ],
+  "story_id": "2b061ed5d124c26643e501e934cb4267"
+}
+```
+
+`events` entries are `{ts_ns, name, attrs}`. `self_ns` is the span's duration minus its children's. `story_id` is `null` when the trace has no story.
+
+### `GET /api/v1/traces/{trace_id}/log-templates`
+
+The template of each of the trace's logs, and the template's alert around the trace's time: a `new` or `spike` alert that started at most 5 minutes after the trace and was last seen at most 10 minutes before it (`spike` wins over `new`), else `null`. Silence alerts are not included.
+
+```json title="GET /api/v1/traces/2b061ed5d124c26643e501e934cb4267/log-templates"
+[
+  { "log_id": "9196926201850625558", "template_id": "1052235204628498982",
+    "template": "User <*> adding <*> of product <*> to cart", "alert": null },
+  …
+]
+```
+
+## Services
+
+### `GET /api/v1/service-map`
+
+The [service map](/tayga/concepts/service-map/): calls between services and per-service health.
+
+| Parameter | Type | Default |
+|---|---|---|
+| `since`, `until` | window | `1h` |
+
+```json title="GET /api/v1/service-map?since=15m"
+{
+  "edges": [
+    { "parent": "frontend-proxy", "child": "frontend", "calls": 11097, "errors": 0,
+      "error_rate": 0.0, "avg_duration_ns": 3229294 },
+    …
+  ],
+  "nodes": [
+    { "service": "ad", "calls": 317, "rate": 0.3522, "error_ratio": 0.0,
+      "p99_ns": 2320415.0, "baseline_p99_ns": 2335160.03, "health": "ok" },
+    …
+  ]
+}
+```
+
+`health` is `ok`, `slow` or `error`. `baseline_p99_ns` is the service's p99 over the 24 hours up to the earlier of the window end and now, floored to the minute, cached once a minute (up to 60 s stale). Older versions returned a plain array of edges; read `edges`.
+
+### `GET /api/v1/services`
+
+The names of the services with spans in the last 24 hours, sorted (at most 500). No parameters.
+
+```json title="GET /api/v1/services"
+["accounting","ad","cart","checkout","currency","email","flagd","fraud-detection","frontend", …]
+```
+
+### `GET /api/v1/services/{name}`
+
+RED series for one service (its server and consumer spans): rate, error ratio and p50/p95/p99 per bucket. 404 when the service has no spans in the window; 400 for a name over 200 characters.
+
+| Parameter | Type | Default |
+|---|---|---|
+| `since`, `until` | window | `1h` |
+
+```json title="GET /api/v1/services/payment?since=15m"
+{
+  "service": "payment",
+  "bucket_secs": 60,
+  "calls": 43,
+  "errors": 10,
+  "buckets": [
+    { "bucket": 1791379800, "rate": 0.0833, "error_ratio": 1.0,
+      "p50_ns": 490458.0, "p95_ns": 2783841.6, "p99_ns": 3236568.32 },
+    …
+  ]
+}
+```
+
+## Logs
+
+### `GET /api/v1/log-alerts`
+
+Up to 200 [log alerts](/tayga/concepts/log-alerts/) that overlap the window (seen after its start, started by its end), newest `last_at` first.
+
+| Parameter | Type | Default |
+|---|---|---|
+| `since`, `until` | window | `24h` |
+| `kind` | `new`, `spike` or `silence` | all |
+| `service` | string | all |
+
+```json title="GET /api/v1/log-alerts?since=24h"
+[
+  {
+    "alert_id": "b8b44f4f67291acc",
+    "kind": "spike",
+    "template_id": "5461860963333777332",
+    "service": "payment",
+    "template": "Payment request failed. Invalid token. demo.user_context.loyalty_level=gold",
+    "started_at_ns": 1791379505064379258,
+    "last_at_ns": 1791380044792536717,
+    "window_count": 14,
+    "peak_count": 18,
+    "baseline_per_window": 2.0833333333333335,
+    "active": false,
+    "example_traces": [
+      { "trace_id": "2b061ed5d124c26643e501e934cb4267", "story_id": "2b061ed5d124c26643e501e934cb4267" },
+      …
+    ]
+  },
+  …
+]
+```
+
+`active` is true while the alert was last seen within 10 minutes of the window's end. `example_traces[].story_id` is `null` when the trace has no story. Seasonal alerts also carry `baseline_day` and `baseline_week`.
+
+### `GET /api/v1/log-templates`
+
+The 200 [templates](/tayga/concepts/log-templates/) with the most hits in the window.
+
+| Parameter | Type | Default | Notes |
+|---|---|---|---|
+| `since`, `until` | window | `1h` | |
+| `service` | string | all | |
+| `q` | string, ≤ 200 chars | none | Case-insensitive substring of the template (ASCII case folding). |
+
+```json title="GET /api/v1/log-templates?since=1h"
+[
+  {
+    "template_id": "17971563567275943127",
+    "service": "product-catalog",
+    "template": "Product Found",
+    "count": 16559,
+    "first_seen_ns": 1791009750818696710,
+    "last_seen_ns": 1791380685671500055,
+    "max_severity": 9,
+    "alerting": false,
+    "silence_enabled": false,
+    "bucket_secs": 60,
+    "buckets": [[1791377040, 68], [1791377100, 289], …]
+  },
+  …
+]
+```
+
+`count` is the template's total since it was created (approximate); the window's hits are in `buckets`. `alerting` is true when a `new` or `spike` alert on the template is active at the window's end (silence alerts do not count). Buckets without hits are left out.
+
+### `GET /api/v1/log-templates/{id}`
+
+One template: its fields, a sample line, hits per bucket, the 20 most recent hits up to the window's end, its alerts of the 7 days before that end, and its silence setting. 404 for an unknown template.
+
+| Parameter | Type | Default |
+|---|---|---|
+| `since`, `until` | window | `24h` |
+
+```json title="GET /api/v1/log-templates/5461860963333777332?since=24h"
+{
+  "template": {
+    "template_id": "5461860963333777332", "service": "payment",
+    "template": "Payment request failed. Invalid token. demo.user_context.loyalty_level=gold",
+    "count": 110, "first_seen_ns": 1791037543844000000, "last_seen_ns": 1791379953631000000,
+    "max_severity": 13, "alerting": false
+  },
+  "sample": "Payment request failed. Invalid token. demo.user_context.loyalty_level=gold",
+  "bucket_secs": 720,
+  "buckets": [[1791304560, 18], [1791306720, 3], …],
+  "recent": [
+    { "ts_ns": 1791379953631000000, "trace_id": "2b061ed5d124c26643e501e934cb4267",
+      "span_id": "1db4a125a7e92d80", "severity_number": 13,
+      "story_id": "2b061ed5d124c26643e501e934cb4267" },
+    …
+  ],
+  "alerts": [ { "alert_id": "b8b44f4f67291acc", "kind": "spike", … }, … ],
+  "silence": null
+}
+```
+
+`silence` is `{"enabled": bool, "minutes": n}`, or `null` when never set.
+
+### `PUT /api/v1/log-templates/{id}/silence`
+
+Turns the [silence alert](/tayga/concepts/log-alerts/#silence) of a template on or off. Needs `Content-Type: application/json`. Settings are stored in `log_template_silence`; the newest row per template wins.
+
+| Body field | Type | Limits |
+|---|---|---|
+| `enabled` | boolean | |
+| `minutes` | integer | 1 to 1440 |
+
+```sh
+curl -X PUT http://localhost:8090/api/v1/log-templates/5461860963333777332/silence \
+  -H 'content-type: application/json' -d '{"enabled": true, "minutes": 10}'
+```
+
+The answer is the stored setting: `{"enabled":true,"minutes":10}`. Errors: 415 without the JSON content type, 400 on a bad body (`body must be {"enabled": bool, "minutes": 1..=1440}`), an id that is not a decimal `u64`, or `minutes` out of range, and 404 for an unknown template.
+
+## Search
+
+### `GET /api/v1/search`
+
+The command palette's search: services, templates and story groups that match `q`; and, when `q` is 32 hexadecimal characters, that string as `trace_id`.
+
+| Parameter | Type | Notes |
+|---|---|---|
+| `q` | string, 1 to 200 chars | Required. |
+
+```json title="GET /api/v1/search?q=pay"
+{
+  "services": ["payment"],
+  "templates": [
+    { "template_id": "11639505410085675064", "service": "checkout", "template": "payment went through" },
+    …
+  ],
+  "groups": [
+    { "fingerprint": "14061731164122576331", "kind": "error",
+      "summary": "payment charge failed: Payment request failed. …", "stories": 225 },
+    …
+  ],
+  "trace_id": null
+}
+```
+
+## Pipeline
+
+### `GET /api/v1/pipeline/series`
+
+A series computed from the metric samples the API records (`metric_samples`, 7 days). This is how the Pipeline page draws its charts.
+
+| Parameter | Type | Default | Notes |
+|---|---|---|---|
+| `metric` | `[a-z_:][a-z0-9_:]*`, ≤ 200 chars | | Required. A metric name as exposed, for example `tayga_logminer_logs_mined_total`. For `q50`/`q99`, the histogram with or without `_bucket`. |
+| `kind` | `rate`, `gauge`, `q50` or `q99` | | Required. Per-second counter rate, last value, or a histogram quantile. |
+| `job` | string | all | `tayga-ingest`, `tayga-writer`, `tayga-assembler`, `tayga-logminer`, `tayga-notifier` or `tayga-api`. |
+| `labels` | `k=v,k=v` | none | Up to 8 required label values; values cannot contain commas. |
+| `since`, `until` | window | `1h` | |
+
+With several replicas, rates and quantiles sum them; gauges named `*_data_lag_seconds` or `*_templates`, and `up`, take the largest replica; other gauges are summed.
+
+```json title="GET /api/v1/pipeline/series?metric=tayga_logminer_logs_mined_total&kind=rate&job=tayga-logminer&since=15m"
+{
+  "metric": "tayga_logminer_logs_mined_total",
+  "kind": "rate",
+  "bucket_secs": 60,
+  "points": [[1791379860000, 36.7], [1791379920000, 40.63], …]
+}
+```
+
+`points` are `[bucket_start_unix_ms, value]`; a quantile is `null` in a bucket without data.
+
+### `GET /api/v1/pipeline/lag`
+
+Consumer lag per group, read from Kafka on request (at most every 5 seconds; results are shared). Live only: it takes no window. 503 `{"error":"kafka unavailable"}` when Kafka cannot be read.
+
+```json title="GET /api/v1/pipeline/lag"
+[
+  {"group":"tayga-writer","topic":"tayga.signals","committed":1458496,"end":1458508,"lag":12},
+  {"group":"tayga-assembler","topic":"tayga.signals","committed":1456938,"end":1458508,"lag":1570},
+  {"group":"tayga-logminer","topic":"tayga.logs","committed":127462,"end":127467,"lag":5},
+  {"group":"tayga-notifier","topic":"tayga.alerts","committed":118,"end":118,"lag":0}
+]
+```
+
+`committed` and `end` are summed over the topic's partitions; `lag` is `end − committed`.
+
+## App configuration
+
+### `GET /api/v1/config`
+
+What the app needs before it signs in. Open even with authentication on.
+
+```json title="GET /api/v1/config"
+{"jaeger_url":"http://localhost:8080/jaeger/ui","grafana_url":null,"auth_enabled":false,"infra_services":["flagd"]}
+```
+
+The links are `null` when unset; `infra_services` is the `[map]` list.
+
+## Authentication routes
+
+These exist only when [authentication](/tayga/operations/authentication/) is on; otherwise they return 404.
+
+| Route | Request | Response |
+|---|---|---|
+| `POST /api/v1/auth/login` | JSON body `{"username": "…", "password": "…"}` | 204 and the `tayga_session` cookie; 401 on a wrong login; 429 when limited; 415 without the JSON content type |
+| `POST /api/v1/auth/logout` | `Content-Type: application/json`, no session needed | 204 and a cookie that clears the session |
+| `GET /api/v1/auth/me` | the session cookie | `{"username": "…"}`, or 401. Basic credentials are not accepted here. |
+
+Scripts can skip sessions and send HTTP Basic credentials with every request:
+
+```sh
+curl -u admin:'my password' 'http://localhost:8090/api/v1/story-groups?since=15m'
+```
+
+## Health and metrics
+
+| Route | Response |
+|---|---|
+| `GET /healthz` | `ok` (plain text). Open with authentication on; the Compose healthcheck uses it. |
+| `GET /metrics` | Prometheus text: the API's own metrics. Open with authentication on. |
+
+`/healthz`, `/metrics` and the app's files are not bounded by the query timeout.
+
+## App routes
+
+Every other `GET` serves the web app (`index.html`, status 200), which renders its own page or a not-found page. `/assets/*` files are served with `Cache-Control: public, max-age=31536000, immutable`, `index.html` with `no-cache`; a missing `/assets/*` file or `/api/*` route returns a JSON 404.
+
+| Path | Query | Page |
+|---|---|---|
+| `/` | `since`, `until`, `kind`, `service`, `group` | Stories |
+| `/stories/{story_id}` | `since`, `until` | Story |
+| `/traces`, `/traces/{trace_id}` | `since`, `until`, filters | Trace explorer, trace |
+| `/map` | `since`, `until`, `service`, `q`, `infra=true` | Service map |
+| `/logs/alerts`, `/logs/templates`, `/logs/templates/{id}` | `since`, `until`, filters | Logs (`/logs` goes to the alerts tab) |
+| `/pipeline` | `since`, `until` | Pipeline |
+| `/login` | `next` | Login, only with authentication on |
+
+<Aside type="note" title="Checked against">
+Routes and parameters: `crates/tayga-api/src/routes.rs`, `routes_v2.rs`, `auth.rs` and `params.rs` on 2026-10-07. Examples: `curl` against the live API of the OpenTelemetry demo stack on 2026-10-07 between 13:30 and 14:10 UTC. Error bodies: live requests with bad parameters the same day.
+</Aside>

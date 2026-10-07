@@ -1,0 +1,200 @@
+---
+import Section from './Section.astro';
+import Icon from './Icon.astro';
+import { href } from '../../lib/links';
+
+const features = [
+	{
+		icon: 'alert',
+		tone: 'err',
+		title: 'Error stories',
+		body: 'The root-cause span, picked from the failing leaves and explained in one sentence, plus the request path across services and the spans that also failed.',
+		link: 'concepts/error-stories/',
+	},
+	{
+		icon: 'timer',
+		tone: 'slow',
+		title: 'Slow stories and the critical path',
+		body: "A request slower than its endpoint's normal, max(p99 × 1.5, p99 + 100 ms), becomes a slow story with the critical path and its top contributors.",
+		link: 'concepts/root-cause-critical-path/',
+	},
+	{
+		icon: 'diff',
+		tone: 'accent',
+		title: 'Compared with normal',
+		body: "Each story is diffed against the endpoint's baseline from the last hour: new operations, missing operations and slower operations.",
+		link: 'concepts/baselines/',
+	},
+	{
+		icon: 'layers',
+		tone: 'accent',
+		title: 'Story groups',
+		body: 'A fingerprint of kind, endpoint, root-cause span and masked message folds one underlying problem into one group, with its trend.',
+		link: 'concepts/story-groups/',
+	},
+	{
+		icon: 'template',
+		tone: 'ok',
+		title: 'Log templates',
+		body: 'Drain mines every service’s logs into templates as they stream in. Numbers, UUIDs and hex runs are masked; HTTP status codes in access logs are kept.',
+		link: 'concepts/log-templates/',
+	},
+	{
+		icon: 'bell',
+		tone: 'silence',
+		title: 'Log alerts',
+		body: 'New-template and rate-spike alerts, plus opt-in silence alerts per template, delivered to webhook and Slack targets with retries.',
+		link: 'concepts/log-alerts/',
+	},
+	{
+		icon: 'map',
+		tone: 'ok',
+		title: 'Service map',
+		body: "Services and their calls with rate, error ratio and p99 against the service's 24-hour baseline. Infrastructure services hide behind one switch.",
+		link: 'concepts/service-map/',
+	},
+	{
+		icon: 'search',
+		tone: 'accent',
+		title: 'Trace explorer',
+		body: 'Filter by service, endpoint, duration and errors, brush the duration scatter, and open any trace as a waterfall with a span drawer.',
+		link: 'guide/traces/',
+	},
+	{
+		icon: 'pulse',
+		tone: 'slow',
+		title: 'Pipeline health built in',
+		body: 'Component status, metric history and consumer lag, recorded by the API itself. Prometheus and Grafana stay optional.',
+		link: 'guide/pipeline/',
+	},
+] as const;
+---
+
+<Section
+	id="features"
+	eyebrow="What you get"
+	title="From raw spans to an explanation"
+	lede="Tayga does the reading for you. It assembles every trace, analyses the failing and slow ones, mines the logs, and shows the result in one web app."
+>
+	<ul class="tg-features">
+		{
+			features.map((f) => (
+				<li class={`tg-feature tg-tone--${f.tone}`}>
+					<span class="tg-feature__icon">
+						<Icon name={f.icon} size={20} />
+					</span>
+					<h3>
+						<a href={href(f.link)}>{f.title}</a>
+					</h3>
+					<p>{f.body}</p>
+				</li>
+			))
+		}
+	</ul>
+</Section>
+
+<style>
+	.tg-features {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
+		gap: 1rem;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+	.tg-feature {
+		position: relative;
+		display: grid;
+		align-content: start;
+		gap: 0.6rem;
+		margin: 0;
+		padding: 1.5rem;
+		border-radius: var(--tg-radius-card);
+		border: 1px solid var(--sl-color-hairline-light);
+		background: linear-gradient(180deg, color-mix(in srgb, var(--tg-panel) 92%, transparent), color-mix(in srgb, var(--tg-panel) 60%, transparent));
+		box-shadow: var(--tg-shadow);
+		transition:
+			transform 0.2s ease,
+			border-color 0.2s ease;
+	}
+	.tg-feature:hover,
+	.tg-feature:focus-within {
+		transform: translateY(-2px);
+		border-color: color-mix(in srgb, var(--tone) 50%, var(--sl-color-hairline-light));
+	}
+	.tg-feature__icon {
+		display: grid;
+		place-items: center;
+		width: 2.5rem;
+		height: 2.5rem;
+		border-radius: var(--tg-radius-field);
+		color: var(--tone);
+		background: var(--tone-soft);
+		box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tone) 25%, transparent);
+		margin-bottom: 0.35rem;
+	}
+	h3 {
+		margin: 0;
+		font-size: 1.05rem;
+		font-weight: 600;
+		letter-spacing: -0.01em;
+	}
+	h3 a {
+		color: var(--sl-color-white);
+		text-decoration: none;
+	}
+	/* The whole card is the link target. */
+	h3 a::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		border-radius: inherit;
+	}
+	h3 a:focus-visible {
+		outline: none;
+	}
+	.tg-feature:has(a:focus-visible) {
+		outline: 2px solid var(--sl-color-text-accent);
+		outline-offset: 2px;
+	}
+	p {
+		margin: 0;
+		font-size: 0.9rem;
+		line-height: 1.65;
+		color: var(--sl-color-gray-2);
+	}
+	@media (max-width: 40rem) {
+		.tg-feature {
+			grid-template-columns: auto 1fr;
+			align-items: center;
+			column-gap: 0.85rem;
+			padding: 1.15rem 1.2rem;
+		}
+		.tg-feature__icon {
+			margin-bottom: 0;
+		}
+		.tg-feature p {
+			grid-column: 1 / -1;
+		}
+	}
+	.tg-tone--err {
+		--tone: var(--tg-err);
+		--tone-soft: var(--tg-err-soft);
+	}
+	.tg-tone--slow {
+		--tone: var(--tg-slow);
+		--tone-soft: var(--tg-slow-soft);
+	}
+	.tg-tone--ok {
+		--tone: var(--tg-ok);
+		--tone-soft: var(--tg-ok-soft);
+	}
+	.tg-tone--silence {
+		--tone: var(--tg-silence);
+		--tone-soft: var(--tg-silence-soft);
+	}
+	.tg-tone--accent {
+		--tone: var(--sl-color-text-accent);
+		--tone-soft: var(--sl-color-accent-low);
+	}
+</style>

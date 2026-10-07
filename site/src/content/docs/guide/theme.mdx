@@ -1,0 +1,37 @@
+---
+title: "Theme"
+description: "Switching between the light, dark and system themes."
+---
+
+import Screenshot from '../../../components/Screenshot.astro';
+
+The theme switch answers **"can I read this in my lighting?"** Tayga has a light and a dark theme, and by default follows your operating system's setting.
+
+<Screenshot name="stories-home" eager caption="The Stories page. Switch this site's theme (top right) to see the app in the other theme: every screenshot in this guide has both." />
+
+## The theme switch
+
+<Screenshot name="shell-theme-switch" caption="The theme switch." />
+
+The switch is the last button in the header (before the user menu, when sign-in is on). Its icon shows the current mode: a sun for **light**, a moon for **dark**, and a monitor for **system**. Each click moves to the next mode: **light**, then **dark**, then **system**, then light again. **System** follows your operating system's light or dark setting, and changes with it while the page is open.
+
+Hover over or focus the button to see a tooltip with the current mode and the next one (screen readers read the same label), for example "Theme: dark. Switch to system".
+
+**System** is the default. Your choice is stored in your browser (per browser, not per account) and applied before the page first paints, so there is no flash of the wrong theme. If the browser blocks storage, the choice lasts until you reload.
+
+You can also set the theme from the [command palette](/tayga/guide/command-palette/): **Theme: Light**, **Theme: Dark** or **Theme: System**. The [sign-in page](/tayga/guide/login/) has the same switch in its top right corner.
+
+The switch cross-fades the colours for a fifth of a second; with reduced motion turned on in your system, it changes at once. Charts, the service map and the waterfall follow the theme.
+
+## Tips
+
+- Use **System** if your operating system switches between light and dark during the day.
+- Error and slow colours keep their meaning in both themes: red for errors, amber for slow.
+
+## Related
+
+- [Error stories](/tayga/concepts/error-stories/)
+- [Root cause and critical path](/tayga/concepts/root-cause-critical-path/)
+- [Baselines](/tayga/concepts/baselines/)
+- [Log templates](/tayga/concepts/log-templates/)
+- [Log alerts](/tayga/concepts/log-alerts/)

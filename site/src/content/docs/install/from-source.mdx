@@ -1,0 +1,151 @@
+---
+title: "From source"
+description: "Build Tayga's image and binaries from source, run it from a checkout, and use the developer commands: tests, integration and end-to-end tests, benchmarks."
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Tayga is a Rust workspace with a React web app. Building from source is how you run an unreleased version, test a change, or package Tayga your own way.
+
+## What you need
+
+| Tool | Version | Needed for |
+|---|---|---|
+| Docker with Compose v2 | | Building the image, and every way of running Tayga below |
+| Rust | 1.98 or newer (`rust-version` in `Cargo.toml`) | Building the binaries on the host, `tayga-devtools`, the tests |
+| CMake and a C toolchain | | `rdkafka` builds librdkafka from source (`cmake-build`) |
+| Node | 24 or newer (`engines` in `ui/package.json`) | Only for developing the web app; the image builds it with Node 24 |
+| `make`, `git` | | The demo stack and the developer commands |
+
+## The workspace
+
+| Crate | What it is |
+|---|---|
+| `tayga-ingest`, `tayga-writer`, `tayga-assembler`, `tayga-logminer`, `tayga-notifier`, `tayga-api` | The six services |
+| `tayga-analysis`, `tayga-drain` | Root cause, critical path, baselines; Drain mining and alert rules. Pure logic, no I/O |
+| `tayga-model`, `tayga-kafka`, `tayga-store`, `tayga-common` | Shared types, Kafka, ClickHouse and settings |
+| `tayga-devtools` | CLI: `flag`, `capture`, `verify-raw`, `emit-log`, `hash-password`, `remine` |
+| `tayga-e2e` | End-to-end tests against the live demo stack |
+
+The web app in `ui/` is built into `ui/dist` and embedded into the `tayga-api` binary at compile time (the default `embed-ui` feature). Building the Rust crates needs no Node: without `ui/dist`, `tayga-api` serves a "UI not built" placeholder page.
+
+## Build the image
+
+The image holds every Tayga binary, the embedded web app, and `tayga-devtools`. It is what the Compose bundle, the Helm chart and the demo stack run.
+
+```sh
+git clone https://github.com/softberries/tayga.git
+cd tayga
+docker build -f docker/Dockerfile -t tayga:local .
+```
+
+`docker/Dockerfile` has three stages: the web app on `node:24-bookworm-slim`, the Rust build on `lukemathwalker/cargo-chef:latest-rust-1.98-trixie`, and the runtime on `debian:trixie-slim`, each pinned by digest. The runtime image runs as the unprivileged user `tayga` (uid 10001).
+
+Then run it in one of the tested ways:
+
+<Tabs syncKey="source-run">
+<TabItem label="Standalone Compose">
+
+```sh
+sh scripts/install.sh --local
+```
+
+Uses `deploy/standalone` and the image `tayga:local` (set `TAYGA_IMAGE` for another tag). See [Docker Compose](/tayga/install/docker-compose/).
+
+</TabItem>
+<TabItem label="Next to the OTel demo">
+
+```sh
+make up
+```
+
+Builds its own `tayga:dev` image from the same Dockerfile and starts the demo with Tayga. See [Demo with the OTel demo](/tayga/getting-started/otel-demo/).
+
+</TabItem>
+<TabItem label="Kubernetes (kind)">
+
+```sh
+kind create cluster --name tayga-test
+kind load docker-image tayga:local --name tayga-test
+helm install tayga deploy/helm/tayga --namespace tayga --create-namespace \
+  --set image.repository=tayga --set image.tag=local --set image.pullPolicy=Never --wait
+```
+
+See [Helm and Kubernetes](/tayga/install/helm/).
+
+</TabItem>
+</Tabs>
+
+## Build the binaries
+
+```sh
+npm --prefix ui ci && npm --prefix ui run build    # optional: embeds the web app
+cargo build --release --workspace --bins
+```
+
+The binaries land in `target/release/`: the six services and `tayga-devtools`. Each service reads its settings from `TAYGA__*` environment variables and an optional TOML file named by `TAYGA_CONFIG`; the [Configuration reference](/tayga/operations/configuration/) lists every one. The minimum is the Kafka brokers and the ClickHouse URL. Run the schema migration once before the other services:
+
+```sh
+TAYGA__KAFKA__BROKERS=localhost:9092 TAYGA__CLICKHOUSE__URL=http://localhost:8123 \
+  target/release/tayga-writer migrate
+```
+
+<Aside type="caution" title="Running services as host processes">
+The writer, assembler, logminer and notifier each serve `/metrics` on `0.0.0.0:9100` by default, so on one host give each its own `TAYGA__<SERVICE>__METRICS_ADDR`, and point the API's recorder at them (`metric_targets`, set in the config file). The packaged ways above are the tested ones; running every service on the host is not.
+</Aside>
+
+### The API alone, against the demo stack
+
+For working on the API or the web app, run `tayga-api` on the host against the demo stack's ClickHouse and Redpanda. Turn its recorder off, since a host process cannot reach the container scrape targets and would record them as down:
+
+```sh
+cargo build -q -p tayga-api
+TAYGA__CLICKHOUSE__URL=http://localhost:18123 TAYGA__KAFKA__BROKERS=localhost:19092 \
+  TAYGA__HTTP_ADDR=127.0.0.1:18090 TAYGA__RECORD_SECS=0 target/debug/tayga-api
+```
+
+It logs `metric recorder disabled (record_secs = 0)` and serves on `http://127.0.0.1:18090`.
+
+### The web app
+
+```sh
+npm --prefix ui ci
+make ui-dev                  # Vite dev server; proxies /api and /metrics to http://127.0.0.1:8090 (TAYGA_API overrides)
+npm --prefix ui test         # unit and component tests (vitest)
+npm --prefix ui run lint
+npm --prefix ui run typecheck
+make ui-e2e                  # Playwright against the running app
+```
+
+`make ui-e2e` first waits up to 5 minutes for the stack's data (story groups, log templates, service-map edges and a non-zero span rate) and prints `[global-setup] <url> has data after <n> s`; with authentication on, a 401 on every check skips the wait. Component tests wait up to 5 s for async queries, with a 15 s per-test timeout.
+
+## Developer commands
+
+| Command | What it does |
+|---|---|
+| `cargo test --workspace` | Unit tests. The integration and end-to-end tests are `#[ignore]`d. |
+| `make it` | Starts a standalone Redpanda and ClickHouse (Compose project `tayga-it`) and runs the ignored integration tests of every crate except `tayga-e2e`; each ClickHouse test seeds a uniquely named database. Run it with the demo stack down: both use host ports 19092 and 18123. |
+| `make infra-down` | Stops that standalone infrastructure and **removes its volumes**. |
+| `make e2e` | Resets the demo flags, then runs the end-to-end tests against the live demo stack (`make up` first), one at a time. Ten tests: flag-driven story scenarios (payment failure, payment unreachable, shipping slowdown, product catalog, ad), the service map, raw span counts against Jaeger, a log spike, a new template from a probe service, and a silence alert. |
+| `make e2e-notifier` | Runs the silence scenario with delivery. It recreates `tayga-notifier` with `deploy/compose.notifier-e2e.yaml`, which mounts `deploy/tayga-notifier.e2e.toml` (one webhook target, `http://host.docker.internal:18099/hook`) in place of the default config. It then runs `silence_alert_and_delivery` with `TAYGA_E2E_NOTIFIER=1`, so the test starts a mock webhook on the host's port 18099 and checks that the alert is delivered there. Afterwards it recreates the notifier with the default, target-less config, whether the run passed or not. Port 18099 must be free on the host. |
+| `make verify-raw` | Compares span counts per trace in ClickHouse with the demo's Jaeger. |
+| `make capture NAME=<n> ARGS="<args>"` | Captures complete traces from `tayga.signals` into `fixtures/<n>.pb.gz` (see `cargo run -p tayga-devtools -- capture --help`). |
+| `make flag NAME=<flag> VARIANT=<v>`, `make flags-reset` | Set a demo feature flag; restore the demo's defaults. |
+| `cargo bench -p tayga-drain --bench mining` | Criterion benches over the 50,000-line corpus `fixtures/log_corpus.jsonl.gz`: Drain stages, the fingerprint backends, and the cache against Drain. Add `--features gpu` for the GPU rows. |
+| `cargo bench -p tayga-ingest --bench convert`, `cargo bench -p tayga-store --bench flatten`, `cargo bench -p tayga-assembler --bench close` | The pipeline benches over `fixtures/healthy.pb.gz`. |
+| `TAYGA_CORPUS=<file> cargo test -p tayga-drain --release --test differential --test fingerprint` | The cache-versus-Drain differential test and the fingerprint oracle on another JSON-lines corpus (fields `service`, `ts_ns`, `sev`, `body`, in time order). |
+| `cargo test -p tayga-drain -p tayga-logminer --features gpu` | Also builds and tests the wgpu backend. Tested only on macOS (Metal). Without an adapter the GPU tests print a skip and pass; `TAYGA_REQUIRE_GPU=1` makes them fail instead. The feature is never in the Docker images. |
+
+The results and method of the benches are on [Performance](/tayga/performance/).
+
+### Notes on the end-to-end tests
+
+- They share the demo's flag file, so they run one at a time; a scenario that tries to take the flags while another holds them fails at once.
+- The log spike scenario fails up front if a payment spike alert is still active from an earlier run; wait about 10 minutes.
+- The first run on a fresh stack waits up to 16 more minutes for the probe service to age past the new-template warmup.
+- The shipping scenario places its own international orders through the demo shop (one every 20 s) and needs a clean checkout baseline; it checks that first and fails at once when the baseline cannot flag a 5-second trace.
+- The ad scenario waits up to 300 s for 3 new stories summed over the `GetAds failed` groups; the other story scenarios wait 180 s.
+
+## CI
+
+`.github/workflows/ci.yml` runs on pull requests and pushes to `master`: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, the web app's lint, typecheck and unit tests, and checks of the packaging: `helm lint --strict`, the standalone Compose file, and `shellcheck` on the scripts. The integration and end-to-end tests need the stack and run locally.

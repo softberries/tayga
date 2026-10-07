@@ -1,0 +1,63 @@
+---
+title: "Changelog"
+description: "What changed in Tayga, from the merged pull requests, grouped by theme."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="note">
+Tayga has not had a tagged release yet. The workspace version is **0.1.0**, and everything below is in it. From the first `v*` tag on, this page gets one section per release.
+</Aside>
+
+Entries come from the merged pull requests, newest theme first, with their merge dates. Upgrade notes for the changes that need them are in [Upgrades and migrations](/tayga/operations/upgrades/#upgrades-with-notes).
+
+## 0.1.0 (unreleased)
+
+### Performance (7 October 2026)
+
+- **Fingerprint cache in front of Drain.** Log lines whose masked shape was already seen skip tokenising, masking and the tree walk, with identical results: 6.98× faster mining on the benchmark corpus and 99.70 % hits live. The backend is `logminer.fingerprinter`: `scalar` (default), `parallel`, `gpu` (build feature, not in the images) or `off`. Six new logminer metrics and two Pipeline charts. ([#13](https://github.com/softberries/tayga/pull/13))
+- **Cheaper ClickHouse queries.** The service map's 24-hour health baseline is computed once a minute and shared (7.3× less CPU per refresh live); the baseline queries no longer read `trace_summaries FINAL` (17–28× fewer bytes per run). ([#13](https://github.com/softberries/tayga/pull/13))
+- **Trace search without `FINAL`**, with a lookup that drops stale versions of long traces: 3.3× less CPU and 2.4× fewer bytes per default request. ([#14](https://github.com/softberries/tayga/pull/14))
+- Criterion benchmarks for Drain, ingest, the writer and the assembler, and the performance report. ([#13](https://github.com/softberries/tayga/pull/13))
+- `make it` runs on a fresh broker. ([#14](https://github.com/softberries/tayga/pull/14))
+
+### Hardening (6 October 2026)
+
+- **Query timeout:** ClickHouse reads stop after `query_timeout_secs` (15 s); a request that runs too long gets a JSON 504. ([#12](https://github.com/softberries/tayga/pull/12))
+- **Recorder off switch:** `record_secs = 0`. ([#12](https://github.com/softberries/tayga/pull/12))
+- **Metric correctness:** counters count only accepted and committed work; a taken metrics port stops a service at startup; new `tayga_logminer_commit_failures_total`. ([#12](https://github.com/softberries/tayga/pull/12))
+- **Alert republication:** an alert stored but not published is published again after the next detection pass. ([#12](https://github.com/softberries/tayga/pull/12))
+- **Metrics with several logminer replicas:** the recorder scrapes every replica; the overview shows the slowest replica's data lag. ([#12](https://github.com/softberries/tayga/pull/12))
+- **Deployment:** a healthcheck on `tayga-api`; the images run as an unprivileged user (uid 10001) on digest-pinned base images; a read-only ClickHouse user for Grafana; topics Tayga creates get 24-hour retention. ([#12](https://github.com/softberries/tayga/pull/12))
+- Unknown `/api/` paths answer JSON 404. ([#12](https://github.com/softberries/tayga/pull/12))
+
+### Log mining at scale (6 October 2026)
+
+- **Logminer replicas** (`LOGMINER_REPLICAS`): ingest also publishes logs to `tayga.logs`, keyed by service; each replica owns the services of its partitions; rebalances flush, announce and reload. ([#11](https://github.com/softberries/tayga/pull/11))
+
+### Alerting (5–6 October 2026)
+
+- **Silence alerts**, opt-in per template, judged in log time. ([#10](https://github.com/softberries/tayga/pull/10))
+- **`tayga-notifier`**: delivers alerts to webhook and Slack targets, once per alert and target, with retries and a per-target circuit breaker. ([#10](https://github.com/softberries/tayga/pull/10))
+- **`tayga-devtools remine`**: rebuilds templates from the stored logs after a settings change. ([#10](https://github.com/softberries/tayga/pull/10))
+- **Detection correctness:** spike baselines count only minutes with data (no alert storm after an outage); templates 10 to 65 minutes old can spike; opt-in seasonal mode; HTTP status codes kept in access-log templates; a persisted watermark and masking epoch; slow baselines that exclude outliers and carry through slowdowns. ([#8](https://github.com/softberries/tayga/pull/8))
+
+### Web app and login (5 October 2026)
+
+- **A new web app** (React), embedded in `tayga-api`: stories home and story page, trace explorer and waterfall, service map, log alerts and templates, Pipeline page, command palette, keyboard shortcuts, light, dark and system themes, phone layout, custom time ranges. Jaeger and Grafana became optional. ([#6](https://github.com/softberries/tayga/pull/6))
+- **Metric history** recorded by the API in ClickHouse, consumer lag, and new `/api/v1/*` routes. ([#6](https://github.com/softberries/tayga/pull/6))
+- **Optional login**, off by default: Argon2id password, signed session cookie, Basic for scripts, per-IP limit. ([#7](https://github.com/softberries/tayga/pull/7))
+- **Infrastructure services hidden on the map** behind "Show infrastructure" (`flagd` by default). ([#7](https://github.com/softberries/tayga/pull/7))
+- Old server-rendered URLs are no longer redirected. ([#7](https://github.com/softberries/tayga/pull/7))
+- Demo stack: the load generator no longer calls the missing `agent` service ([#7](https://github.com/softberries/tayga/pull/7)); higher memory limits for the demo services that starved checkout and Kafka ([#9](https://github.com/softberries/tayga/pull/9)).
+
+### Log templates (4 October 2026)
+
+- **`tayga-logminer`**: Drain templates per service, new-template and spike alerts, linked to traces and stories; `log_templates`, `log_template_hits` and `log_alerts`. ([#5](https://github.com/softberries/tayga/pull/5))
+- The story page lists every log of the trace with its span, per-service filters and counts. ([#4](https://github.com/softberries/tayga/pull/4))
+
+### The MVP (2–3 October 2026)
+
+- **API, UI, metrics and end-to-end tests:** the JSON API, a server-rendered UI, Prometheus metrics on every service, Grafana dashboards, and flag-driven e2e scenarios on the OpenTelemetry demo. ([#3](https://github.com/softberries/tayga/pull/3))
+- **Trace analysis and the assembler:** session windows, span trees, root cause, critical path, baselines, error and slow stories, service edges. ([#2](https://github.com/softberries/tayga/pull/2))
+- **The data path:** OTLP ingest over gRPC and HTTP, Redpanda, the writer and the ClickHouse schema. ([#1](https://github.com/softberries/tayga/pull/1))

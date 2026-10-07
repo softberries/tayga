@@ -1,0 +1,95 @@
+---
+import { Image } from 'astro:assets';
+import Icon from './Icon.astro';
+import { GITHUB_URL, href } from '../../lib/links';
+import logo from '../../assets/logo-mark.png';
+---
+
+<section class="tg-close" aria-labelledby="get-started">
+	<Image src={logo} alt="" width={72} height={72} class="tg-close__logo" />
+	<h2 id="get-started">Give every failing request a story</h2>
+	<p class="tg-close__lede">Run Tayga next to the OpenTelemetry demo on your laptop, or point your own Collector at it.</p>
+	<div class="tg-close__actions">
+		<a class="tg-btn tg-btn--primary" href={href('getting-started/quickstart/')}>
+			<Icon name="rocket" size={18} />
+			Quickstart
+		</a>
+		<a class="tg-btn tg-btn--secondary" href={href('getting-started/what-is-tayga/')}>
+			<Icon name="book" size={18} />
+			Docs
+		</a>
+		<a class="tg-btn tg-btn--ghost" href={GITHUB_URL}>
+			GitHub
+			<Icon name="external" size={16} />
+		</a>
+	</div>
+	<p class="tg-close__name">
+		<Icon name="paw" size={16} />
+		<span>
+			Named after Tajga, a hunting dog who can trace anything, anywhere.
+			<a href={href('getting-started/what-is-tayga/#why-the-name')}>Why the name</a>
+		</span>
+	</p>
+</section>
+
+<style>
+	.tg-close {
+		display: grid;
+		justify-items: center;
+		gap: 1rem;
+		padding-block: clamp(4rem, 9vw, 6.5rem) clamp(2rem, 5vw, 3rem);
+		text-align: center;
+	}
+	.tg-close :global(.tg-close__logo) {
+		width: 4.5rem;
+		height: 4.5rem;
+		border-radius: 20px;
+		box-shadow:
+			0 0 0 6px color-mix(in srgb, var(--tg-brand-to) 12%, transparent),
+			0 14px 36px rgba(43, 108, 176, 0.45);
+	}
+	h2 {
+		margin: 0.75rem 0 0;
+		font-size: clamp(1.75rem, 1.2rem + 2.2vw, 2.7rem);
+		line-height: 1.12;
+		letter-spacing: -0.03em;
+		font-weight: 700;
+		color: var(--sl-color-white);
+		text-wrap: balance;
+	}
+	.tg-close__lede {
+		margin: 0;
+		max-width: 36rem;
+		font-size: 1.05rem;
+		line-height: 1.7;
+		color: var(--sl-color-gray-2);
+	}
+	.tg-close__actions {
+		display: flex;
+		flex-wrap: wrap;
+		justify-content: center;
+		gap: 0.75rem;
+		margin-top: 0.5rem;
+	}
+	.tg-close__name {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.55rem;
+		margin: 1.75rem 0 0;
+		padding: 0.55rem 1rem;
+		border-radius: 999px;
+		border: 1px dashed var(--sl-color-hairline-light);
+		font-size: 0.85rem;
+		color: var(--sl-color-gray-3);
+		text-align: start;
+	}
+	.tg-close__name :global(svg) {
+		flex: none;
+		color: var(--tg-slow);
+	}
+	.tg-close__name a {
+		color: var(--sl-color-text-accent);
+		font-weight: 600;
+		margin-inline-start: 0.25rem;
+	}
+</style>

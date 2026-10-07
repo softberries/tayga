@@ -1,0 +1,266 @@
+WEBVTT
+
+1
+00:00:04.300 --> 00:00:06.234
+A checkout request fails.
+
+2
+00:00:06.195 --> 00:00:07.322
+Then another.
+
+3
+00:00:07.318 --> 00:00:10.936
+Your dashboards show the error
+rate climbing, but not why.
+
+4
+00:00:10.967 --> 00:00:14.515
+So someone opens a trace,
+scrolls through a hundred spans,
+
+5
+00:00:14.405 --> 00:00:17.673
+and goes hunting through the logs
+for anything that looks related.
+
+6
+00:00:17.704 --> 00:00:19.918
+Tayga does that first pass for you.
+
+7
+00:00:21.300 --> 00:00:23.725
+Tayga runs beside your stack.
+
+8
+00:00:23.546 --> 00:00:28.170
+Your OpenTelemetry Collector sends
+it traces and logs over OTLP,
+
+9
+00:00:28.013 --> 00:00:30.146
+with no proprietary agent.
+
+10
+00:00:29.932 --> 00:00:35.480
+Tayga buffers them in Redpanda, closes each
+trace ten seconds after its last span,
+
+11
+00:00:35.265 --> 00:00:40.673
+stores everything in ClickHouse, and analyses
+every request that failed or ran slow.
+
+12
+00:00:40.458 --> 00:00:43.725
+The core is open source, under the AGPL.
+
+13
+00:00:45.133 --> 00:00:46.962
+Let's break something.
+
+14
+00:00:46.747 --> 00:00:49.991
+The OpenTelemetry demo runs next to Tayga.
+
+15
+00:00:49.788 --> 00:00:53.640
+We turn on its paymentFailure
+flag, so every charge fails,
+
+16
+00:00:53.437 --> 00:00:56.716
+and watch the Stories page
+refresh in live mode.
+
+17
+00:00:56.501 --> 00:00:58.190
+In our end-to-end runs,
+
+18
+00:00:57.975 --> 00:01:02.857
+the first payment story arrived
+45 to 95 seconds after the flip.
+
+19
+00:01:02.677 --> 00:01:07.208
+And here it is: payment charge
+failed, a new error story group.
+
+20
+00:01:08.600 --> 00:01:10.254
+Open the story.
+
+21
+00:01:10.074 --> 00:01:14.791
+At the top, the root cause: the service
+and span where the failure started,
+
+22
+00:01:14.589 --> 00:01:16.043
+with its message.
+
+23
+00:01:15.828 --> 00:01:21.096
+Then the request path, through checkout
+to payment, the failing service in red.
+
+24
+00:01:20.881 --> 00:01:25.201
+The Compared with normal panel lists what
+differs from a typical request to this
+
+25
+00:01:25.021 --> 00:01:26.148
+endpoint.
+
+26
+00:01:25.933 --> 00:01:28.955
+Here, the operations that never got to run.
+
+27
+00:01:28.740 --> 00:01:33.247
+The waterfall opens on the critical
+path, with the root-cause span selected.
+
+28
+00:01:33.045 --> 00:01:37.201
+And below, the logs this trace
+wrote, each linked to its template.
+
+29
+00:01:38.566 --> 00:01:42.886
+Stories with the same fingerprint,
+the same kind, endpoint,
+
+30
+00:01:42.706 --> 00:01:46.570
+root-cause span and masked
+message, form one group.
+
+31
+00:01:46.355 --> 00:01:51.892
+Numbers, IDs and hex strings are masked,
+so repeated failures become one row,
+
+32
+00:01:51.665 --> 00:01:53.658
+with a count and a trend.
+
+33
+00:01:53.443 --> 00:01:58.184
+The inspector previews the latest story,
+so you can triage with the arrow keys.
+
+34
+00:01:59.566 --> 00:02:03.921
+The service map draws every service
+in call order, with its call rate,
+
+35
+00:02:03.706 --> 00:02:06.319
+error ratio and p99.
+
+36
+00:02:06.116 --> 00:02:10.132
+A service turns red when 5 %
+or more of its calls fail,
+
+37
+00:02:09.952 --> 00:02:14.763
+and amber when its p99 is more
+than twice its 24-hour level.
+
+38
+00:02:14.654 --> 00:02:18.623
+Select one for its charts, and the
+stories whose root cause is there.
+
+39
+00:02:19.999 --> 00:02:22.354
+Tayga mines your logs too.
+
+40
+00:02:22.174 --> 00:02:25.898
+Lines that differ only in their
+variable parts become templates,
+
+41
+00:02:25.683 --> 00:02:29.582
+at about 2.8 µs per line in our benchmark.
+
+42
+00:02:29.367 --> 00:02:33.839
+It alerts on a new template, a
+spike above baseline, and silence,
+
+43
+00:02:33.637 --> 00:02:35.863
+for templates you choose to watch.
+
+44
+00:02:35.648 --> 00:02:38.109
+Each alert links to example traces,
+
+45
+00:02:37.894 --> 00:02:42.214
+and the notifier sends it to Slack
+or any webhook, with retries.
+
+46
+00:02:43.599 --> 00:02:46.024
+And Tayga watches itself.
+
+47
+00:02:45.845 --> 00:02:50.492
+The Pipeline page shows whether each
+service is up, charts every stage,
+
+48
+00:02:50.289 --> 00:02:55.288
+and reads consumer lag straight from
+Kafka, all collected by the API itself,
+
+49
+00:02:55.108 --> 00:02:57.112
+with no Prometheus needed.
+
+50
+00:02:56.932 --> 00:02:58.445
+Prefer a light theme?
+
+51
+00:02:58.266 --> 00:02:59.568
+One click.
+
+52
+00:03:00.966 --> 00:03:03.497
+Getting started takes one line.
+
+53
+00:03:03.282 --> 00:03:07.707
+The installer checks Docker, starts
+Tayga with ClickHouse and Redpanda,
+
+54
+00:03:07.492 --> 00:03:10.304
+and prints the Collector
+snippet for your data.
+
+55
+00:03:10.089 --> 00:03:12.795
+On Kubernetes, there's a Helm chart.
+
+56
+00:03:12.685 --> 00:03:17.427
+Or run it next to the OpenTelemetry
+demo and flip a flag, like we just did.
+
+57
+00:03:18.832 --> 00:03:23.012
+To try it yourself, start with
+the quickstart on the docs site.
+
+58
+00:03:22.832 --> 00:03:27.714
+Tayga: from a failing request to
+its root cause, in one story.

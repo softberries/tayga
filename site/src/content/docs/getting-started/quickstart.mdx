@@ -1,0 +1,157 @@
+---
+title: "Quickstart"
+description: "Install Tayga with the one-line installer, send it your first traces and logs, and see them become error stories and log templates."
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Screenshot from '../../../components/Screenshot.astro';
+
+The installer starts Tayga with ClickHouse and Redpanda on one Docker host. It checks Docker, Compose and the ports, starts the stack, waits until the API is healthy, and prints the URLs and an OpenTelemetry Collector snippet. With the images already pulled, it reported a healthy stack 14 seconds after it started in our test; the first run also pulls the images, about 1.5 GB on disk (ClickHouse, Redpanda and Tayga, measured on arm64).
+
+**You need:** Docker with the Compose v2 plugin, and the ports 8090, 4317 and 4318 free on 127.0.0.1 (the installer can move them). With a little test traffic the stack uses about 1.2 GB of memory, most of it ClickHouse and Redpanda.
+
+<Aside type="tip" title="Rather see it with real traffic first?">
+The [demo with the OpenTelemetry demo](/tayga/getting-started/otel-demo/) runs Tayga next to a whole microservice shop with a load generator, so you can break something on purpose and watch the story appear.
+</Aside>
+
+## Install
+
+<Steps>
+
+1. **Run the installer.**
+
+   <Tabs syncKey="install-source">
+   <TabItem label="Latest release">
+
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/softberries/tayga/master/scripts/install.sh | sh
+   ```
+
+   </TabItem>
+   <TabItem label="Pinned version">
+
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/softberries/tayga/master/scripts/install.sh | sh -s -- --version 0.1.0 --dir ~/tayga
+   ```
+
+   </TabItem>
+   <TabItem label="From a checkout">
+
+   ```sh
+   git clone https://github.com/softberries/tayga.git
+   cd tayga
+   sh scripts/install.sh --local
+   ```
+
+   `--local` uses the checkout's `deploy/standalone` and a local image `tayga:local`, built from `docker/Dockerfile` when it does not exist yet (the first build takes several minutes).
+
+   </TabItem>
+   </Tabs>
+
+   It installs into `~/tayga` by default. Every option, such as `--ports` to move the ports or `--bind` to expose them, is listed under [Installer options](/tayga/install/docker-compose/#installer-options).
+
+2. **Read what it prints.** Once `tayga-api` is healthy you get the addresses:
+
+   ```txt frame="terminal" title="Output"
+   Waiting for tayga-api to become healthy (up to 300s)...
+
+   Tayga is running.
+
+     Web app and API:  http://localhost:8090
+     OTLP gRPC:        localhost:4317
+     OTLP HTTP:        http://localhost:4318  (/v1/traces, /v1/logs)
+     Install dir:      /home/you/tayga   (settings in .env)
+   ```
+
+   It goes on with a Collector exporter snippet and the commands to manage the stack.
+
+3. **Open the app** at `http://localhost:8090`. It is empty until telemetry arrives: the Stories page says nothing failed in the range.
+
+</Steps>
+
+## Send your first data
+
+Tayga reads OTLP traces and logs (not metrics) on port 4317 (gRPC) and 4318 (HTTP). The fastest test is [telemetrygen](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/cmd/telemetrygen), the OpenTelemetry Collector's load generator, run in Docker on the stack's network (`tayga_default`, from the default project name `tayga`):
+
+```sh
+# 20 traces whose spans fail, from a service called checkout
+docker run --rm --network tayga_default ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:latest \
+  traces --otlp-endpoint tayga-ingest:4317 --otlp-insecure --traces 20 --child-spans 3 --status-code Error --service checkout
+
+# 50 error logs with the same shape and different numbers
+docker run --rm --network tayga_default ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:latest \
+  logs --otlp-endpoint tayga-ingest:4317 --otlp-insecure --logs 50 --service checkout \
+  --body "payment declined for order 12345 after 3 retries" --severity-text ERROR
+```
+
+Each command sends one item a second, so they take under a minute each. From your own code or Collector instead:
+
+<Tabs syncKey="sender">
+<TabItem label="OpenTelemetry SDK">
+
+Point the SDK's OTLP exporter at the ingest port with the standard variable:
+
+```sh
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318   # OTLP/HTTP; use :4317 for gRPC
+```
+
+</TabItem>
+<TabItem label="OpenTelemetry Collector">
+
+Add an exporter and list it in your `traces` and `logs` pipelines, next to the exporters you already have:
+
+```yaml title="otel-collector.yaml"
+exporters:
+  otlp_grpc/tayga:
+    endpoint: localhost:4317
+    tls:
+      insecure: true
+```
+
+[Connect your Collector](/tayga/install/collector/) has the complete config, HTTP, and where to point it from a container or a cluster.
+
+</TabItem>
+</Tabs>
+
+## What you see
+
+- **Stories**, a few seconds after a trace ends: the assembler closes a trace 10 s after its last span (60 s at most) and checks it. The 20 failing telemetrygen traces fold into **one group**, `checkout okey-dokey-0 failed: error`, with 20 stories, because they share a fingerprint. Open it for the root-cause span, the request path and the waterfall.
+- **Log templates**, under **Logs → Templates**, within seconds: the 50 lines become one template, `payment declined for order <*> after <*> retries`, with 50 hits. A template that appears for the first time after its service has been around for 15 minutes raises a `new` alert; a sudden rate rise raises a `spike`.
+- **Pipeline**, which shows whether each Tayga service is up, what each stage processes, and how far behind the consumers are.
+
+<Screenshot name="stories-home" caption="The Stories page once failures arrive (here with the OpenTelemetry demo's traffic): KPI tiles, the story groups, and the inspector for the selected group." />
+
+The same data is in the JSON API, which is what the app reads:
+
+```sh
+curl -s "http://localhost:8090/api/v1/story-groups?since=1h"
+curl -s "http://localhost:8090/api/v1/log-templates?since=1h"
+```
+
+Telemetrygen's traces are short and identical, so the stories are plain. Real services give real root causes: "`checkout` could not reach `payment`", a slow `shipping` call on the critical path, or an operation that is new compared with the endpoint's normal. The [demo](/tayga/getting-started/otel-demo/) shows those.
+
+## Manage the stack
+
+The installer leaves a Compose project in its directory. From there:
+
+```sh
+cd ~/tayga
+docker compose ps                    # tayga-api and tayga-ingest show (healthy)
+docker compose logs -f tayga-api     # logs of one service
+sh install.sh --uninstall            # stop and remove the containers; keep the data
+```
+
+Running the installer again is safe: it keeps your data and your edited files. Upgrading and removing are on [Upgrading](/tayga/install/upgrading/) and [Uninstalling](/tayga/install/uninstalling/).
+
+<Aside type="caution" title="Before you open the ports to a network">
+The ports bind to 127.0.0.1, and authentication is off. Turn on [authentication](/tayga/install/docker-compose/#authentication) before you install with `--bind 0.0.0.0`, and keep the OTLP ports behind a firewall or a Collector: they accept data from anyone who reaches them.
+</Aside>
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="Demo with the OTel demo" description="Break a microservice shop on purpose and watch the story appear." href="/tayga/getting-started/otel-demo/" />
+	<LinkCard title="Connect your Collector" description="Send your own services' traces and logs to Tayga." href="/tayga/install/collector/" />
+	<LinkCard title="Docker Compose in depth" description="Every installer flag, .env setting, authentication and exposure." href="/tayga/install/docker-compose/" />
+	<LinkCard title="Helm and Kubernetes" description="Install on a cluster, with bundled or external backends." href="/tayga/install/helm/" />
+</CardGrid>

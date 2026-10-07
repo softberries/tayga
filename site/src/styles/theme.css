@@ -1,0 +1,461 @@
+/*
+ * Tayga docs theme. Values come from the app's design tokens (ui/src/theme/tokens.css): dark is
+ * Starlight's default (:root), light is :root[data-theme='light']. The --tg-* names mirror the app
+ * so landing components can use the same vocabulary; the --sl-* mapping drives Starlight itself.
+ */
+
+/* ---------- Tayga tokens ---------- */
+:root {
+	--tg-ground: #0a1020;
+	--tg-rail: #080d1a;
+	--tg-line: #18223a;
+	--tg-panel: #0e162a;
+	--tg-panel-line: #1c2944;
+	--tg-inner: #111c33;
+	--tg-ink: #d8e1f0;
+	--tg-ink-2: #c9d4e6;
+	--tg-muted: #8e9bb3;
+	--tg-faint: #7884a0;
+	--tg-accent: #7cc4ff;
+	--tg-accent-strong: #2b6cb0;
+	--tg-err: #ff6b6b;
+	--tg-err-soft: #2a1420;
+	--tg-slow: #f4b740;
+	--tg-slow-soft: #2b2312;
+	--tg-ok: #7fd1a8;
+	--tg-ok-soft: #10261d;
+	--tg-silence: #b79cff;
+	--tg-silence-soft: #1e1838;
+	--tg-edge: #2e4266;
+	--tg-node: #132038;
+	--tg-node-line: #3b5480;
+	--tg-brand-from: #2b6cb0;
+	--tg-brand-to: #7cc4ff;
+	--tg-cta-from: #2b6cb0;
+	--tg-cta-to: #3d8bdb;
+	--tg-glow: 16%;
+
+	--tg-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 10px 28px rgba(0, 0, 0, 0.35);
+	--tg-shadow-lg: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 18px 48px rgba(0, 0, 0, 0.5);
+	--tg-shadow-cta: 0 6px 16px rgba(43, 108, 176, 0.4);
+	--tg-shadow-code: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
+
+	--tg-radius-panel: 16px;
+	--tg-radius-card: 14px;
+	--tg-radius-field: 10px;
+	--tg-radius-control: 8px;
+	--tg-radius-chip: 6px;
+
+	/* Starlight: typography */
+	--sl-font: 'Sora', 'Segoe UI', system-ui, sans-serif;
+	--sl-font-mono: 'JetBrains Mono', ui-monospace, monospace;
+	--sl-text-body: 0.9688rem;
+	--sl-line-height: 1.72;
+	--sl-line-height-headings: 1.18;
+	--sl-nav-height: 3.75rem;
+	--sl-sidebar-width: 17.5rem;
+	--sl-content-width: 47rem;
+	--sl-text-h2: 1.75rem;
+	--sl-text-h3: 1.35rem;
+	--sl-text-h4: 1.15rem;
+
+	/* Starlight: colours, dark */
+	--sl-color-white: #f2f6fc;
+	--sl-color-gray-1: #d8e1f0;
+	--sl-color-gray-2: #c9d4e6;
+	--sl-color-gray-3: #9aa7bf;
+	--sl-color-gray-4: #7884a0;
+	--sl-color-gray-5: #1c2944;
+	--sl-color-gray-6: #0e162a;
+	--sl-color-black: #0a1020;
+
+	--sl-color-accent-low: #0f2442;
+	--sl-color-accent: #3d8bdb;
+	--sl-color-accent-high: #7cc4ff;
+
+	--sl-color-bg-nav: rgba(10, 16, 32, 0.95);
+	--sl-color-bg-sidebar: #080d1a;
+	--sl-color-bg-inline-code: #132038;
+	--sl-color-hairline-light: #1c2944;
+	--sl-color-hairline: #18223a;
+	--sl-color-hairline-shade: #060a14;
+	--sl-color-backdrop-overlay: rgba(4, 8, 18, 0.66);
+
+	--sl-hue-blue: 210;
+	--sl-color-blue-low: #0f2442;
+	--sl-color-blue: #3d8bdb;
+	--sl-color-blue-high: #a9d8ff;
+	--sl-color-green-low: #10261d;
+	--sl-color-green: #4fb487;
+	--sl-color-green-high: #a6e3c5;
+	--sl-color-orange-low: #2b2312;
+	--sl-color-orange: #f4b740;
+	--sl-color-orange-high: #f9d48a;
+	--sl-color-red-low: #2a1420;
+	--sl-color-red: #ff6b6b;
+	--sl-color-red-high: #ffb3b3;
+	--sl-color-purple-low: #1e1838;
+	--sl-color-purple: #b79cff;
+	--sl-color-purple-high: #d8caff;
+}
+
+:root[data-theme='light'] {
+	--tg-ground: #eef2f8;
+	--tg-rail: #ffffff;
+	--tg-line: #d9e1ec;
+	--tg-panel: #ffffff;
+	--tg-panel-line: #dce3ee;
+	--tg-inner: #f5f8fc;
+	--tg-ink: #0e1a2e;
+	--tg-ink-2: #24324a;
+	--tg-muted: #55627a;
+	--tg-faint: #6b778c;
+	--tg-accent: #1c69c7;
+	--tg-accent-strong: #1f6fd1;
+	--tg-err: #bf342d;
+	--tg-err-soft: #fce8e6;
+	--tg-slow: #8f5c06;
+	--tg-slow-soft: #fbf0da;
+	--tg-ok: #1f7a4d;
+	--tg-ok-soft: #e3f3ea;
+	--tg-silence: #6b4fc8;
+	--tg-silence-soft: #eee9fa;
+	--tg-edge: #a8b9d3;
+	--tg-node: #f1f5fb;
+	--tg-node-line: #8da4c6;
+	--tg-glow: 22%;
+
+	--tg-shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 8px 24px rgba(16, 24, 40, 0.07);
+	--tg-shadow-lg: 0 1px 2px rgba(16, 24, 40, 0.06), 0 16px 40px rgba(16, 24, 40, 0.12);
+	--tg-shadow-code: 0 1px 2px rgba(16, 24, 40, 0.04);
+
+	--sl-color-white: #0e1a2e;
+	--sl-color-gray-1: #1a2740;
+	--sl-color-gray-2: #24324a;
+	--sl-color-gray-3: #4d5a72;
+	--sl-color-gray-4: #6b778c;
+	--sl-color-gray-5: #cbd5e3;
+	--sl-color-gray-6: #e7ecf3;
+	--sl-color-gray-7: #f5f8fc;
+	--sl-color-black: #ffffff;
+
+	--sl-color-accent-low: #dceafb;
+	--sl-color-accent: #1c69c7;
+	--sl-color-accent-high: #134f99;
+
+	--sl-color-bg-nav: rgba(255, 255, 255, 0.95);
+	--sl-color-bg-sidebar: #f7f9fc;
+	--sl-color-bg-inline-code: #eaf0f8;
+	--sl-color-hairline-light: #e1e7f0;
+	--sl-color-hairline: #e7ecf3;
+	--sl-color-hairline-shade: #d9e1ec;
+	--sl-color-backdrop-overlay: rgba(14, 26, 46, 0.35);
+
+	--sl-color-blue-low: #e3edfb;
+	--sl-color-blue: #1c69c7;
+	--sl-color-blue-high: #134f99;
+	--sl-color-green-low: #e3f3ea;
+	--sl-color-green: #1f7a4d;
+	--sl-color-green-high: #165c3a;
+	--sl-color-orange-low: #fbf0da;
+	--sl-color-orange: #b7790b;
+	--sl-color-orange-high: #6f4704;
+	--sl-color-red-low: #fce8e6;
+	--sl-color-red: #bf342d;
+	--sl-color-red-high: #8f241f;
+	--sl-color-purple-low: #eee9fa;
+	--sl-color-purple: #6b4fc8;
+	--sl-color-purple-high: #4f379c;
+}
+
+/* ---------- Global polish ---------- */
+html {
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+	text-rendering: optimizeLegibility;
+}
+
+:focus-visible {
+	outline: 2px solid var(--sl-color-text-accent);
+	outline-offset: 2px;
+	border-radius: 4px;
+}
+
+::selection {
+	background: color-mix(in srgb, var(--tg-brand-to) 35%, transparent);
+}
+
+/* Header: translucent, blurred, hairline. */
+.header {
+	backdrop-filter: saturate(160%) blur(14px);
+	-webkit-backdrop-filter: saturate(160%) blur(14px);
+	border-bottom-color: var(--sl-color-hairline) !important;
+}
+.site-title {
+	gap: 0.65rem;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	font-size: 1.15rem;
+	color: var(--sl-color-white);
+}
+.site-title img {
+	height: 2rem;
+	width: 2rem;
+	border-radius: 9px;
+	box-shadow: 0 4px 12px rgba(43, 108, 176, 0.35);
+	object-fit: cover;
+}
+
+/* Sidebar: app-like rail with soft active pill. */
+.sidebar-pane {
+	border-inline-end: 1px solid var(--sl-color-hairline);
+}
+nav.sidebar .top-level > li > details > summary .group-label > span,
+nav.sidebar .top-level > li > details > summary {
+	font-size: 0.72rem;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--sl-color-gray-3);
+	font-weight: 600;
+}
+nav.sidebar a {
+	border-radius: var(--tg-radius-control);
+	font-size: 0.875rem;
+	transition:
+		background-color 0.15s ease,
+		color 0.15s ease;
+}
+nav.sidebar a:hover {
+	background: color-mix(in srgb, var(--sl-color-accent) 9%, transparent);
+	color: var(--sl-color-white);
+}
+nav.sidebar a[aria-current='page'],
+nav.sidebar a[aria-current='page']:hover,
+nav.sidebar a[aria-current='page']:focus {
+	background: var(--sl-color-accent-low);
+	color: var(--sl-color-text-accent);
+	font-weight: 600;
+	box-shadow: inset 2px 0 0 var(--sl-color-text-accent);
+}
+
+/* Headings in Sora with tight tracking. */
+.sl-markdown-content :is(h1, h2, h3, h4),
+h1#_top:not(.tg-hero__title) {
+	letter-spacing: -0.02em;
+	font-weight: 600;
+}
+h1#_top:not(.tg-hero__title) {
+	font-size: clamp(1.9rem, 1.4rem + 2vw, 2.6rem);
+	background: linear-gradient(120deg, var(--sl-color-white) 30%, var(--sl-color-text-accent));
+	-webkit-background-clip: text;
+	background-clip: text;
+	color: transparent;
+	/* Each wrapped line gets the whole gradient, so a word does not fade out across a line break. */
+	-webkit-box-decoration-break: clone;
+	box-decoration-break: clone;
+}
+
+/* Links in content: accent with a soft underline. */
+.sl-markdown-content a:not(:where(.not-content *)) {
+	text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+	text-underline-offset: 0.2em;
+	text-decoration-thickness: 1px;
+}
+.sl-markdown-content a:not(:where(.not-content *)):hover {
+	text-decoration-color: currentColor;
+}
+
+/* Inline code. */
+.sl-markdown-content :not(pre) > code:not(:where(.not-content *)) {
+	border: 1px solid var(--sl-color-hairline-light);
+	border-radius: var(--tg-radius-chip);
+	padding: 0.1em 0.35em;
+	font-size: 0.85em;
+}
+
+/* Tables as panels. */
+.sl-markdown-content table:not(:where(.not-content *)) {
+	border-radius: var(--tg-radius-field);
+	border: 1px solid var(--sl-color-hairline-light);
+	border-collapse: separate;
+	border-spacing: 0;
+	font-size: 0.875rem;
+	/* Starlight makes tables blocks; scroll a wide one inside its rounded panel instead of clipping it. */
+	overflow-x: auto;
+}
+/*
+ * Scroll affordance for every wide table: a soft shadow at an edge while there is more to scroll
+ * that way. The "local" covers move with the content and hide the "scroll" shadows at the ends.
+ */
+.sl-markdown-content table:not(:where(.not-content *)) {
+	--tg-table-bg: var(--sl-color-bg);
+	/* Dark theme: a pale glow reads better than a shadow on the near-black ground. */
+	--tg-table-shade: rgba(124, 196, 255, 0.22);
+	background:
+		linear-gradient(to right, var(--tg-table-bg) 30%, transparent) left center / 2.5rem 100% no-repeat local,
+		linear-gradient(to left, var(--tg-table-bg) 30%, transparent) right center / 2.5rem 100% no-repeat local,
+		radial-gradient(farthest-side at 0 50%, var(--tg-table-shade), transparent) left center / 1.25rem 100% no-repeat scroll,
+		radial-gradient(farthest-side at 100% 50%, var(--tg-table-shade), transparent) right center / 1.25rem 100% no-repeat scroll;
+	background-color: var(--tg-table-bg);
+}
+:root[data-theme='light'] .sl-markdown-content table:not(:where(.not-content *)) {
+	--tg-table-shade: rgba(14, 26, 46, 0.28);
+}
+/*
+ * On narrow screens a table scrolls sideways rather than breaking identifiers mid-token: the first
+ * column (setting names, env vars, routes) never wraps inside a code span, and the last column
+ * keeps a readable width.
+ */
+@media (max-width: 50rem) {
+	.sl-markdown-content td:first-child code:not(:where(.not-content *)) {
+		white-space: nowrap;
+	}
+	.sl-markdown-content td:last-child:not(:where(.not-content *)):not(:first-child) {
+		min-width: 15rem;
+	}
+}
+
+/*
+ * Wide pages (the comparison matrix): the matrix uses the full width beside the sidebar while the
+ * prose keeps its reading measure, and the product column stays put while the rest scrolls.
+ */
+:root:has(.tg-wide) {
+	--sl-content-width: 80rem;
+}
+:root:has(.tg-wide) .sl-markdown-content > :not(.tg-wide),
+:root:has(.tg-wide) .content-panel:first-of-type .sl-container > * {
+	max-width: 47rem;
+}
+.sl-markdown-content .tg-matrix table:not(:where(.not-content *)) {
+	font-size: 0.8125rem;
+}
+.sl-markdown-content .tg-matrix :is(th, td):first-child:not(:where(.not-content *)) {
+	position: sticky;
+	left: 0;
+	z-index: 1;
+	min-width: 8.5rem;
+	background: var(--sl-color-bg);
+	box-shadow: 1px 0 0 var(--sl-color-hairline-light), 6px 0 10px -6px var(--tg-table-shade);
+}
+.sl-markdown-content .tg-matrix th:first-child:not(:where(.not-content *)) {
+	background: var(--sl-color-gray-6);
+}
+:root[data-theme='light'] .sl-markdown-content .tg-matrix th:first-child:not(:where(.not-content *)) {
+	background: var(--sl-color-gray-7);
+}
+.sl-markdown-content .tg-matrix :is(th, td):not(:first-child):not(:where(.not-content *)) {
+	min-width: 6.5rem;
+}
+.sl-markdown-content .tg-matrix :is(th, td):not(:where(.not-content *)),
+.sl-markdown-content .tg-matrix :is(th, td):is(:first-child, :last-child):not(:where(.not-content *)) {
+	padding: 0.6rem 0.7rem;
+}
+.sl-markdown-content :is(th, td):not(:where(.not-content *)) {
+	border-bottom: 1px solid var(--sl-color-hairline-light);
+	border-inline: 0;
+	border-top: 0;
+}
+.sl-markdown-content :is(th, td):not(:where(.not-content *)),
+.sl-markdown-content :is(th, td):first-child:not(:where(.not-content *)),
+.sl-markdown-content :is(th, td):last-child:not(:where(.not-content *)) {
+	padding: 0.6rem 0.9rem;
+}
+.sl-markdown-content tr:last-child td:not(:where(.not-content *)) {
+	border-bottom: 0;
+}
+.sl-markdown-content th:not(:where(.not-content *)) {
+	background: var(--sl-color-gray-6);
+	font-size: 0.75rem;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--sl-color-gray-2);
+}
+:root[data-theme='light'] .sl-markdown-content th:not(:where(.not-content *)) {
+	background: var(--sl-color-gray-7);
+}
+
+/* Asides: rounded panels with the semantic stripe. */
+.starlight-aside {
+	border-radius: var(--tg-radius-field);
+	border-inline-start-width: 3px;
+}
+
+/* Cards and link cards. */
+.card,
+.sl-link-card {
+	border-radius: var(--tg-radius-card) !important;
+	border-color: var(--sl-color-hairline-light) !important;
+	background: color-mix(in srgb, var(--sl-color-gray-6) 55%, transparent);
+	transition:
+		border-color 0.2s ease,
+		transform 0.2s ease,
+		box-shadow 0.2s ease;
+}
+.sl-link-card:hover {
+	border-color: var(--sl-color-accent) !important;
+	transform: translateY(-2px);
+	box-shadow: var(--tg-shadow);
+}
+:root[data-theme='light'] :is(.card, .sl-link-card) {
+	background: var(--sl-color-black);
+	box-shadow: var(--tg-shadow);
+}
+
+/* Buttons (LinkButton) match the app's CTA. */
+.sl-link-button {
+	border-radius: var(--tg-radius-field) !important;
+	font-weight: 600;
+}
+.sl-link-button.primary {
+	background: linear-gradient(135deg, var(--tg-cta-from), var(--tg-cta-to)) !important;
+	border-color: transparent !important;
+	color: #fff !important;
+	box-shadow: var(--tg-shadow-cta);
+}
+
+/* A row of LinkButtons. */
+.tg-button-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.75rem;
+}
+.tg-button-row .sl-link-button {
+	margin: 0;
+}
+.sl-link-button.secondary {
+	border-color: var(--sl-color-hairline-shade) !important;
+}
+:root:not([data-theme='light']) .sl-link-button.secondary {
+	border-color: var(--sl-color-gray-5) !important;
+}
+
+/* Steps markers in brand colours. */
+.sl-steps {
+	--bullet-size: 1.75rem;
+}
+
+/* Pagination (prev / next). */
+.pagination-links a {
+	border-radius: var(--tg-radius-card) !important;
+	box-shadow: none !important;
+	border-color: var(--sl-color-hairline-light) !important;
+}
+.pagination-links a:hover {
+	border-color: var(--sl-color-accent) !important;
+}
+
+/* The TODO block that marks pages still being written. */
+.starlight-aside.tg-todo,
+.tg-todo {
+	border-style: dashed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation: none !important;
+		transition: none !important;
+	}
+}

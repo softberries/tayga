@@ -1,0 +1,247 @@
+---
+title: "Configuration reference"
+description: "Every setting of every Tayga service, with its environment variable, default and meaning, checked against the code."
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Every Tayga service is configured the same way, and every setting has a default except the addresses of Kafka and ClickHouse. This page lists them all, per service. They were checked against the settings structs and their `serde` defaults in each crate on 2026-10-07.
+
+## How settings are read
+
+Each service builds its settings from two sources, in this order:
+
+1. **A TOML file**, if the environment variable `TAYGA_CONFIG` names one.
+2. **Environment variables** that start with `TAYGA__`. They override the file.
+
+An environment variable is the setting's path in upper case, with `__` between the parts: `kafka.brokers` is `TAYGA__KAFKA__BROKERS`, `logminer.fingerprinter` is `TAYGA__LOGMINER__FINGERPRINTER`, and a top-level key such as `http_addr` is `TAYGA__HTTP_ADDR`.
+
+<Aside type="caution" title="Lists can only be set in the file">
+Settings whose value is a list (`metric_targets`, `map.infra_services`, `notifier.targets`, `notifier.kinds`) cannot be set with an environment variable: Tayga does not turn on list parsing for `TAYGA__*` variables, and a service given one stops at startup with an error such as `invalid type: string "flagd,otel-collector", expected a sequence`.
+</Aside>
+
+Settings are read once, at startup: restart a service after changing them. An invalid value stops the service with an error naming the setting (for example `notifier.timeout_secs must be within 1..=15`). Services log in JSON; `RUST_LOG` sets the log filter (default `info`).
+
+<Tabs>
+<TabItem label="Environment variables">
+
+```sh
+TAYGA__KAFKA__BROKERS=redpanda:9092
+TAYGA__CLICKHOUSE__URL=http://clickhouse:8123
+TAYGA__LOGMINER__FINGERPRINTER=scalar
+TAYGA__QUERY_TIMEOUT_SECS=15
+```
+
+</TabItem>
+<TabItem label="TOML file">
+
+```toml title="tayga.toml (TAYGA_CONFIG=/etc/tayga/tayga.toml)"
+query_timeout_secs = 15
+
+[kafka]
+brokers = "redpanda:9092"
+
+[clickhouse]
+url = "http://clickhouse:8123"
+
+[logminer]
+fingerprinter = "scalar"
+
+[map]
+infra_services = ["flagd"]
+```
+
+</TabItem>
+</Tabs>
+
+A service ignores the sections it does not use, so one file can serve all of them.
+
+### Where the bundled stacks set them
+
+| Stack | What is set |
+|---|---|
+| Standalone Docker Compose (`deploy/standalone`) | `TAYGA__KAFKA__BROKERS` and `TAYGA__CLICKHOUSE__URL` on every service; the notifier reads `notifier.toml`. The `.env` file maps a few variables (`TAYGA_AUTH_*`, `TAYGA_PUBLIC_URL`, `LOGMINER_FINGERPRINTER`, `RUST_LOG`) to Tayga settings. Add any other `TAYGA__*` variable in a `compose.override.yaml` next to `compose.yaml`. |
+| Next to the OpenTelemetry demo (`make up`) | The same two variables; `tayga-api` reads `deploy/tayga-api.toml` and sets `TAYGA__JAEGER_URL`; the notifier reads `deploy/tayga-notifier.toml`; `LOGMINER_FINGERPRINTER` and `LOGMINER_REPLICAS` pass through `make`. |
+
+## Shared sections
+
+### `[kafka]`
+
+Used by every service. Only `brokers` is required.
+
+| Setting and variable | Default | Meaning |
+|---|---|---|
+| `kafka.brokers`<br/>`TAYGA__KAFKA__BROKERS` | required | Kafka bootstrap servers (Redpanda or any Kafka API broker), comma-separated. |
+| `kafka.topic`<br/>`TAYGA__KAFKA__TOPIC` | `tayga.signals` | Spans and logs, keyed by trace id. |
+| `kafka.logs_topic`<br/>`TAYGA__KAFKA__LOGS_TOPIC` | `tayga.logs` | Logs keyed by service, for the logminer. Must differ from `kafka.topic`. |
+| `kafka.partitions`<br/>`TAYGA__KAFKA__PARTITIONS` | `12` | Partitions of the two topics above, when Tayga creates them. Must be positive. |
+| `kafka.max_record_bytes`<br/>`TAYGA__KAFKA__MAX_RECORD_BYTES` | `900000` | Byte budget of one record; ingest splits larger groups and drops a single span or log that alone exceeds it. 1 to 1,048,575. |
+| `kafka.retention_ms`<br/>`TAYGA__KAFKA__RETENTION_MS` | `86400000` (24 h) | `retention.ms` of topics Tayga creates. `-1` is unlimited; 0 or below −1 stops the service. An existing topic is never altered. See [Retention and disk](/tayga/operations/retention/). |
+
+Ingest, the writer, the assembler, the logminer and the notifier validate `[kafka]` at startup; `tayga-api` only reads consumer lag with it.
+
+### `[clickhouse]`
+
+Used by the writer, assembler, logminer, notifier and API, and by `tayga-devtools remine`.
+
+| Setting and variable | Default | Meaning |
+|---|---|---|
+| `clickhouse.url`<br/>`TAYGA__CLICKHOUSE__URL` | required | ClickHouse HTTP URL, for example `http://clickhouse:8123`. Tayga connects as the `default` user and does not support ClickHouse credentials yet. |
+| `clickhouse.database`<br/>`TAYGA__CLICKHOUSE__DATABASE` | `tayga` | Database. `tayga-writer migrate` creates its tables. |
+
+## tayga-ingest
+
+| Setting and variable | Default | Meaning |
+|---|---|---|
+| `grpc_addr`<br/>`TAYGA__GRPC_ADDR` | `0.0.0.0:4317` | OTLP/gRPC listener (traces and logs; gzip accepted; messages up to 64 MiB). |
+| `http_addr`<br/>`TAYGA__HTTP_ADDR` | `0.0.0.0:4318` | OTLP/HTTP listener: `POST /v1/traces`, `POST /v1/logs`, and `GET /metrics`. |
+
+Ingest also reads `[kafka]`. It accepts traces and logs; it does not accept OTLP metrics.
+
+## tayga-writer
+
+| Setting and variable | Default | Meaning |
+|---|---|---|
+| `writer.max_rows`<br/>`TAYGA__WRITER__MAX_ROWS` | `10000` | Insert a batch once it has this many rows… |
+| `writer.max_age_ms`<br/>`TAYGA__WRITER__MAX_AGE_MS` | `1000` | …or once its oldest row is this old. |
+| `writer.metrics_addr`<br/>`TAYGA__WRITER__METRICS_ADDR` | `0.0.0.0:9100` | Prometheus `/metrics` listener. A taken port stops the writer. |
+
+`tayga-writer migrate` runs the ClickHouse schema migrations and exits; see [Upgrades and migrations](/tayga/operations/upgrades/).
+
+## tayga-assembler
+
+| Setting and variable | Default | Meaning |
+|---|---|---|
+| `assembler.gap_ms`<br/>`TAYGA__ASSEMBLER__GAP_MS` | `10000` | Close a trace after this long without a new span (processing time). |
+| `assembler.max_age_ms`<br/>`TAYGA__ASSEMBLER__MAX_AGE_MS` | `60000` | Close a trace that has been open this long. |
+| `assembler.max_spans`<br/>`TAYGA__ASSEMBLER__MAX_SPANS` | `10000` | Close a trace with more spans than this, flagged `truncated`. |
+| `assembler.max_buffer_bytes`<br/>`TAYGA__ASSEMBLER__MAX_BUFFER_BYTES` | `536870912` (512 MiB) | When all buffered traces pass this, the oldest are closed, flagged `truncated`. |
+| `assembler.recent_per_partition`<br/>`TAYGA__ASSEMBLER__RECENT_PER_PARTITION` | `100000` | Closed trace ids remembered per partition to recognise late spans. |
+| `assembler.baseline_window_minutes`<br/>`TAYGA__ASSEMBLER__BASELINE_WINDOW_MINUTES` | `60` | Window of the endpoint baselines. |
+| `assembler.baseline_refresh_secs`<br/>`TAYGA__ASSEMBLER__BASELINE_REFRESH_SECS` | `60` | How often baselines are reloaded. |
+| `assembler.stories_topic`<br/>`TAYGA__ASSEMBLER__STORIES_TOPIC` | `tayga.stories` | Topic stories are published to. |
+| `assembler.stories_partitions`<br/>`TAYGA__ASSEMBLER__STORIES_PARTITIONS` | `3` | Its partitions, when created. |
+| `assembler.metrics_addr`<br/>`TAYGA__ASSEMBLER__METRICS_ADDR` | `0.0.0.0:9100` | Prometheus `/metrics` listener. |
+
+### `[thresholds]` (assembler)
+
+The rules of [baselines](/tayga/concepts/baselines/) and slow stories.
+
+| Setting and variable | Default | Meaning |
+|---|---|---|
+| `thresholds.min_baseline_traces`<br/>`TAYGA__THRESHOLDS__MIN_BASELINE_TRACES` | `50` | Non-error traces a baseline needs to be trusted. |
+| `thresholds.slow_trace_factor`<br/>`TAYGA__THRESHOLDS__SLOW_TRACE_FACTOR` | `1.5` | Slow when the duration is above `max(p99 × factor, p99 + margin)`… |
+| `thresholds.slow_trace_margin_ms`<br/>`TAYGA__THRESHOLDS__SLOW_TRACE_MARGIN_MS` | `100` | …with this margin. |
+| `thresholds.new_op_presence`<br/>`TAYGA__THRESHOLDS__NEW_OP_PRESENCE` | `0.01` | An operation in fewer of the baseline's traces than this share is "new". |
+| `thresholds.missing_op_presence`<br/>`TAYGA__THRESHOLDS__MISSING_OP_PRESENCE` | `0.95` | An operation in more than this share, absent from the trace, is "missing". |
+| `thresholds.slower_op_factor`<br/>`TAYGA__THRESHOLDS__SLOWER_OP_FACTOR` | `2.0` | An operation is "slower" above `max(p95 × factor, p95 + margin)`… |
+| `thresholds.slower_op_margin_ms`<br/>`TAYGA__THRESHOLDS__SLOWER_OP_MARGIN_MS` | `50` | …with this margin. |
+
+## tayga-logminer
+
+| Setting and variable | Default | Meaning |
+|---|---|---|
+| `logminer.sim_threshold`<br/>`TAYGA__LOGMINER__SIM_THRESHOLD` | `0.5` | Drain similarity to join a template, 0 to 1. |
+| `logminer.max_clusters_per_service`<br/>`TAYGA__LOGMINER__MAX_CLUSTERS_PER_SERVICE` | `5000` | Templates per service before lines go to `<overflow>`. Must be positive. |
+| `logminer.keep_http_status`<br/>`TAYGA__LOGMINER__KEEP_HTTP_STATUS` | `true` | Keep HTTP status codes in access-log templates. Changing it starts a new masking epoch. |
+| `logminer.fingerprinter`<br/>`TAYGA__LOGMINER__FINGERPRINTER` | `scalar` | Fingerprint cache backend: `off`, `scalar`, `parallel` or `gpu` (needs a build with the `gpu` feature). See [Performance tuning](/tayga/operations/performance-tuning/). |
+| `logminer.max_batch`<br/>`TAYGA__LOGMINER__MAX_BATCH` | `5000` | Flush hits and templates after this many logs… |
+| `logminer.flush_ms`<br/>`TAYGA__LOGMINER__FLUSH_MS` | `1000` | …or after this long. |
+| `logminer.detect_secs`<br/>`TAYGA__LOGMINER__DETECT_SECS` | `60` | Interval of the detection pass. |
+| `logminer.spike_window_min`<br/>`TAYGA__LOGMINER__SPIKE_WINDOW_MIN` | `5` | Spike window, in minutes. |
+| `logminer.baseline_window_min`<br/>`TAYGA__LOGMINER__BASELINE_WINDOW_MIN` | `60` | Spike baseline, in minutes before the window. |
+| `logminer.spike_factor`<br/>`TAYGA__LOGMINER__SPIKE_FACTOR` | `5.0` | A spike is at least this many times the baseline… |
+| `logminer.spike_min_count`<br/>`TAYGA__LOGMINER__SPIKE_MIN_COUNT` | `10` | …and at least this many logs in the window. |
+| `logminer.baseline_mode`<br/>`TAYGA__LOGMINER__BASELINE_MODE` | `flat` | `flat` or `seasonal` (also compare with the same window a day and a week earlier). |
+| `logminer.new_template_warmup_min`<br/>`TAYGA__LOGMINER__NEW_TEMPLATE_WARMUP_MIN` | `15` | A service must have had a template this long before a `new` alert; also the quiet period after a masking epoch. |
+| `logminer.alert_active_min`<br/>`TAYGA__LOGMINER__ALERT_ACTIVE_MIN` | `10` | A spike stays active this long after its last confirmation. The API uses its own constant of 10; see [Log alerts](/tayga/concepts/log-alerts/#when-a-spike-is-active). |
+| `logminer.ownership_window_min`<br/>`TAYGA__LOGMINER__OWNERSHIP_WINDOW_MIN` | `60` | A replica owns a service for this long after mining one of its logs. |
+| `logminer.alerts_topic`<br/>`TAYGA__LOGMINER__ALERTS_TOPIC` | `tayga.alerts` | Topic alerts are published to (3 partitions when created). |
+| `logminer.metrics_addr`<br/>`TAYGA__LOGMINER__METRICS_ADDR` | `0.0.0.0:9100` | Prometheus `/metrics` listener. |
+
+The logminer also reads `[kafka]` (it consumes `kafka.logs_topic`) and `[clickhouse]`. `tayga-devtools remine` reads the same `[logminer]` Drain settings, so give it the same variables. The number of replicas is a deployment setting, not a Tayga one: see [Scaling logminer replicas](/tayga/operations/scaling-logminer/).
+
+## tayga-notifier
+
+| Setting and variable | Default | Meaning |
+|---|---|---|
+| `notifier.targets`<br/>file only | none | `[[notifier.targets]]` tables with `name`, `kind` (`webhook` or `slack`) and `url`. |
+| `notifier.public_url`<br/>`TAYGA__NOTIFIER__PUBLIC_URL` | `http://localhost:8090` | Base of the links back into the app. |
+| `notifier.kinds`<br/>file only | `["new", "spike", "silence"]` | Alert kinds to deliver. |
+| `notifier.max_attempts`<br/>`TAYGA__NOTIFIER__MAX_ATTEMPTS` | `8` | Attempts per alert and target. |
+| `notifier.timeout_secs`<br/>`TAYGA__NOTIFIER__TIMEOUT_SECS` | `10` | Timeout per request, 1 to 15. |
+| `notifier.max_age_secs`<br/>`TAYGA__NOTIFIER__MAX_AGE_SECS` | `3600` | Skip alerts whose `last_at` is older. |
+| `notifier.breaker_cooldown_secs`<br/>`TAYGA__NOTIFIER__BREAKER_COOLDOWN_SECS` | `300` | How long a failing target's breaker stays open. |
+| `notifier.alerts_topic`<br/>`TAYGA__NOTIFIER__ALERTS_TOPIC` | `tayga.alerts` | Topic to read. |
+| `notifier.metrics_addr`<br/>`TAYGA__NOTIFIER__METRICS_ADDR` | `0.0.0.0:9100` | Prometheus `/metrics` listener. |
+
+Details and examples: [The notifier](/tayga/alerting/notifier/).
+
+## tayga-api
+
+| Setting and variable | Default | Meaning |
+|---|---|---|
+| `http_addr`<br/>`TAYGA__HTTP_ADDR` | `0.0.0.0:8090` | The web app, the JSON API, `/healthz` and `/metrics`. Plain HTTP. |
+| `query_timeout_secs`<br/>`TAYGA__QUERY_TIMEOUT_SECS` | `15` | ClickHouse `max_execution_time` of every read. An `/api/` request still running 5 s after it is answered 504. `0` turns both off. |
+| `record_secs`<br/>`TAYGA__RECORD_SECS` | `15` | Interval of the metric recorder behind the Pipeline page. `0` turns it off; 1 to 4 log a warning (each tick inserts a small part into ClickHouse). |
+| `metric_targets`<br/>file only | the five services (below) | `[[metric_targets]]` tables with `job` and `url`: the `/metrics` endpoints the recorder scrapes. |
+| `jaeger_url`<br/>`TAYGA__JAEGER_URL` | empty | Base of the "Open in Jaeger" links. Empty hides them. |
+| `grafana_url`<br/>`TAYGA__GRAFANA_URL` | empty | Base of the "Open in Grafana" link on the map. Empty hides it. |
+| `map.infra_services`<br/>file only | `["flagd"]` | Services the map hides unless "Show infrastructure" is on. An empty list hides the switch. |
+
+The API also reads `[clickhouse]` and `[kafka]` (`brokers`, `topic` and `logs_topic`, to read consumer lag).
+
+The default `metric_targets`, by Compose service name:
+
+```toml title="deploy/tayga-api.toml"
+[[metric_targets]]
+job = "tayga-ingest"
+url = "http://tayga-ingest:4318/metrics"
+
+[[metric_targets]]
+job = "tayga-writer"
+url = "http://tayga-writer:9100/metrics"
+
+[[metric_targets]]
+job = "tayga-assembler"
+url = "http://tayga-assembler:9100/metrics"
+
+[[metric_targets]]
+job = "tayga-logminer"
+url = "http://tayga-logminer:9100/metrics"
+
+[[metric_targets]]
+job = "tayga-notifier"
+url = "http://tayga-notifier:9100/metrics"
+```
+
+The API records its own metrics without HTTP, as job `tayga-api`.
+
+### `[auth]` (api)
+
+| Setting and variable | Default | Meaning |
+|---|---|---|
+| `auth.enabled`<br/>`TAYGA__AUTH__ENABLED` | `false` | Turns on the login page and protects `/api/*`. When on, the keys below are checked at startup. |
+| `auth.username`<br/>`TAYGA__AUTH__USERNAME` | none | The one account. Required when enabled; may not contain `\|` or `:`. |
+| `auth.password_hash`<br/>`TAYGA__AUTH__PASSWORD_HASH` | none | Argon2id hash in PHC format. Required when enabled. |
+| `auth.session_ttl`<br/>`TAYGA__AUTH__SESSION_TTL` | `12h` | Session length, `<n>s`, `<n>m`, `<n>h` or `<n>d`, at most `365d`. |
+| `auth.session_key`<br/>`TAYGA__AUTH__SESSION_KEY` | unset | Base64 of at least 32 bytes, to sign cookies. Unset: a random key per process, so a restart signs everyone out. |
+| `auth.secure_cookie`<br/>`TAYGA__AUTH__SECURE_COOKIE` | `false` | Add `Secure` to the cookie (behind HTTPS). |
+
+See [Authentication](/tayga/operations/authentication/).
+
+## Fixed values
+
+Some values are constants in the code, not settings:
+
+| Value | Where |
+|---|---|
+| Story logs kept per story: 50; top critical-path contributors: 3 | assembler analysis |
+| Clock-skew tolerance of the critical path: 5 ms | assembler analysis |
+| Drain tree depth 4, 100 children per node, 64 tokens per line | logminer |
+| Fingerprint cache: 10,000 entries per service | logminer |
+| Minimum template age for a spike and fresh-install clock offset: 10 minutes | logminer |
+| Alert republish window: 24 hours, 1,000 per pass | logminer |
+| Login limit: 5 attempts per client IP per 5 minutes | api |
+| Active alert window in the API: 10 minutes | api (`ALERT_ACTIVE_MIN`) |
+| Retention of the ClickHouse tables | migrations; see [Retention and disk](/tayga/operations/retention/) |

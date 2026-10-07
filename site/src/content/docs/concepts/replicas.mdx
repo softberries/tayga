@@ -1,0 +1,86 @@
+---
+title: "Replicas and partitioning"
+description: "How Tayga spreads work over Kafka partitions, why logs travel on two topics, and how several logminer replicas share the work."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Tayga's services talk only through Redpanda topics and ClickHouse. The topic keys decide which service instance sees which data, and so what can run as several replicas.
+
+## Topics and keys
+
+| Topic | Key | Partitions | Producer | Consumer groups |
+|---|---|---|---|---|
+| `tayga.signals` | trace id | 12 | ingest | `tayga-writer`, `tayga-assembler` |
+| `tayga.logs` | service name | 12 | ingest | `tayga-logminer` |
+| `tayga.stories` | story fingerprint | 3 | assembler | none in Tayga |
+| `tayga.alerts` | template id | 3 | logminer | `tayga-notifier` |
+
+`tayga.signals` is keyed by **trace id**, so every span of a trace reaches the same assembler partition and the trace can be assembled in one place. For each OTLP request, ingest publishes one record per trace id (split further only to stay under 900,000 bytes per record); spans and logs without a valid trace id are keyed by service instead.
+
+Drain keeps one template tree per service, so it needs every log of a service in one place. A trace-id key spreads a service over all partitions, so ingest also publishes each log batch to `tayga.logs`, **keyed by service**: one record per request and service. Every log is therefore written to Kafka twice; spans are not. On the demo stack `tayga.logs` grew by about 53 MB an hour, next to 25.4 GB in `tayga.signals` under the broker's former 7-day retention (measured 2026-10-06).
+
+The partition counts are `kafka.partitions` (12) for the two signal topics, and 3 for the stories and alerts topics. They apply only when a topic is created; whichever service starts first creates it.
+
+## The logminer: ownership
+
+Several logminer replicas share the consumer group `tayga-logminer`, so Kafka splits the 12 partitions of `tayga.logs` between them: 6 and 6 with two replicas. A replica beyond the twelfth gets no partition and idles.
+
+Records are keyed by service, so a replica **owns** the services whose logs it mined within the last `ownership_window_min` (60 minutes). Every query that raises alerts (new-template candidates, spike windows, silence inputs) is filtered to the owned services, so outside a hand-over two replicas never judge the same service. A service that has not logged for 60 minutes drops out until it logs again.
+
+<Aside type="note">
+An ongoing silence alert is refreshed only while its service still logs. Once the whole service has been quiet for 60 minutes, or after a restart or hand-over, its `last_at` stops advancing and the app shows the alert as inactive.
+</Aside>
+
+## Rebalances
+
+When its partitions change, a replica, before reading on:
+
+1. flushes pending hits and templates and commits their offsets;
+2. after a revoke, runs one new-template pass for the services it owned, bounded at 30 seconds, so a template mined just before the revoke is still announced;
+3. after an assignment, reloads every template from ClickHouse into a fresh miner and clears its owned services, per-partition clocks and spike state.
+
+A replica that takes over a service first restores that service's active spike alerts from `log_alerts`, so an ongoing spike keeps its alert id.
+
+### Why re-reads are harmless
+
+Offsets are committed only for records whose hits and templates are stored. A commit sent after a revoke can be refused, or land after the new owner's and move its offset back; either way records are read again, never lost. Re-reading is safe:
+
+- hits are deduplicated by log id, and minute counts use `uniqExact(log_id)`;
+- template ids are hashes of service and template;
+- alert ids are deterministic, and `log_alerts` is a `ReplacingMergeTree` by `alert_id`.
+
+Only a template's `count` can grow by the re-read logs.
+
+## Clean shutdown and the crash window
+
+On a clean stop a replica flushes (bounded at 15 seconds) and runs one new-template pass for its owned services (bounded at 20 seconds); Compose gives it 40 seconds (`stop_grace_period`). A crash, or a revoke or shutdown pass that fails or times out, skips that pass: a template first seen after the last detection pass is then announced only if its service logs again within about one detection tick. Its hits and template are stored either way; only the `new` alert can be missed.
+
+## Alert publication
+
+Each alert's publication to `tayga.alerts` is recorded in `log_alert_publications`. After every detection pass a replica republishes the alerts of its owned services that were stored in the last 24 hours and have no publication mark, oldest first, at most 1,000 per pass, stopping at the first failed send. They are counted in `tayga_logminer_alerts_republished_total`.
+
+The notifier delivers once per alert and target, so a repeat is harmless. Delivery is also bounded by the notifier's `max_age_secs` (1 hour): an alert republished after a longer outage is stored and counted, but not delivered. See [Delivery semantics](/tayga/alerting/delivery/).
+
+## Watermarks and heartbeats
+
+The logminer keeps its state in the ClickHouse table `logminer_state`:
+
+| Key | Meaning |
+|---|---|
+| `new_template_watermark_ns:p<N>` | The new-template watermark of partition N. On assignment a replica starts from the minimum over its partitions, so after scaling from 2 to 1 the survivor resumes from the slower of the two. |
+| `new_template_watermark_ns` | The old global watermark. It seeds a partition without its own key; only `remine` still writes it. |
+| `logminer_heartbeat_ns:<replica id>` | Written after every detection pass. The replica id is the container's hostname. `remine` refuses to run while any heartbeat is under 3 minutes old. Keys older than a day are deleted at startup. |
+| `masking_version`, `masking_epoch_start_ns` | See [the masking epoch](/tayga/concepts/log-templates/#the-masking-epoch). |
+
+## The other services
+
+| Service | Replicas | Why |
+|---|---|---|
+| `tayga-logminer` | 1 to 12 | As above. `LOGMINER_REPLICAS` sets the count; see [Scaling logminer replicas](/tayga/operations/scaling-logminer/). |
+| `tayga-assembler` | 1 | It keeps open traces and drops the state of revoked partitions, but running several is not tested or documented. |
+| `tayga-writer`, `tayga-ingest`, `tayga-notifier`, `tayga-api` | 1 | One instance each in the Compose files; running more is not tested. |
+
+## Metrics with several replicas
+
+The API's metric recorder resolves the logminer's address on every tick and scrapes each replica, labelling its samples with `instance="<ip>:<port>"`. On the Pipeline page, counter rates and quantiles sum the replicas; the data lag, the template count and `up` take the largest replica; other gauges are summed. The edges at a scale change are listed under [Scaling logminer replicas](/tayga/operations/scaling-logminer/#metrics-at-a-scale-change).

@@ -1,0 +1,86 @@
+---
+title: "Retention and disk"
+description: "How long Tayga keeps data in ClickHouse and Redpanda, how to change topic retention on an older stack, and how to watch the disk."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Tayga keeps data in two places: **ClickHouse**, where everything you see in the app lives, and **Redpanda**, which buffers records between the services. Both expire data on their own; you do not need a cleanup job.
+
+## ClickHouse
+
+Every table has a TTL set by its migration:
+
+| Table | Holds | Kept |
+|---|---|---|
+| `spans`, `logs` | raw telemetry | 3 days |
+| `trace_summaries` | one row per assembled trace (baseline input, trace search) | 2 days |
+| `error_stories` | stories | 7 days |
+| `service_edges` | calls between services, per minute | 7 days |
+| `log_template_hits` | one row per log line and its template | 3 days |
+| `log_template_minutes` | per-minute template counts (spike and seasonal baselines) | 8 days |
+| `log_templates` | templates | 30 days after the template was last seen |
+| `log_alerts` | alerts | 7 days |
+| `log_alert_publications` | which alerts were published to `tayga.alerts` | 7 days |
+| `notifier_deliveries` | delivery state per alert and target | 30 days |
+| `metric_samples` | the Pipeline page's metric history | 7 days |
+| `log_template_silence`, `logminer_state`, `schema_migrations` | settings and state | no TTL |
+
+The API accepts time windows that start within the last 7 days, the longest TTL of the tables its routes read. Windows older than a table's TTL simply come back empty: a 5-day-old trace has no spans left.
+
+<Aside type="caution" title="Old timestamps are dropped at insert">
+The raw tables drop whole parts when they expire (`ttl_only_drop_parts`). A span or log whose timestamp is already older than the TTL, or 0, is therefore dropped as soon as it is written. Make sure your services' clocks are right.
+</Aside>
+
+The TTLs are fixed in the migrations and are not settings.
+
+## Redpanda topics
+
+Topics that Tayga creates (`tayga.signals`, `tayga.logs`, `tayga.stories`, `tayga.alerts`) get `retention.ms` = 86,400,000, which is **24 hours**. Change it with `TAYGA__KAFKA__RETENTION_MS` before the topics are created: `-1` means unlimited, and 0 or a value below −1 stops ingest, the writer, the assembler, the logminer and the notifier at startup.
+
+The setting applies **only when a topic is created**. Tayga never alters an existing topic, so a topic created by an older version keeps its retention: 7 days, the broker default, before the 24-hour default was added.
+
+Retention bounds how long a service can be down without losing data: a writer or assembler outage longer than the retention loses the records it had not consumed yet. The same holds for the logminer on `tayga.logs` and the notifier on `tayga.alerts`.
+
+### Why 24 hours
+
+On 2026-10-06 the Docker disk of the demo stack reached 99 %, with Redpanda's volume at 28 GB under the 7-day default, and Redpanda stopped on a broker assertion (`vassert`, exit code 133). Nothing was ingested until it was restarted. Setting the existing topics to 24 hours took Redpanda's volume from 28.8 GB to 9.1 GB and the Docker disk from 92 % to 70 %.
+
+### Changing retention on an existing stack
+
+To bring an older stack's topics to 24 hours (this deletes every segment older than 24 hours at once):
+
+```sh
+# Next to the OpenTelemetry demo:
+docker exec opentelemetry-demo-redpanda-1 rpk topic alter-config \
+  tayga.signals tayga.logs tayga.stories tayga.alerts --set retention.ms=86400000 --no-confirm
+docker exec opentelemetry-demo-redpanda-1 rpk topic describe -c tayga.signals | grep retention.ms
+```
+
+In the standalone bundle run the same `rpk` commands with `docker compose exec redpanda rpk …`. Use the same command with another value to change retention later; `-1` keeps everything.
+
+## Sizing the disk
+
+Tayga's footprint grows with your telemetry volume, so measure it on your own traffic. For orientation, on the OpenTelemetry demo:
+
+| Measure | Value | When |
+|---|---|---|
+| `tayga.signals` | 25.4 GB under the former 7-day default; 7.4 GB right after the switch to 24 hours | 2026-10-06 |
+| `tayga.logs` | about 53 MB an hour (70.6 MB in its first 80 minutes) | 2026-10-06 |
+| Standalone stack with a little test traffic | about 1.2 GB of memory in all (ClickHouse about 950 MB, Redpanda about 220 MB, each Tayga service under 10 MB) | 2026-10-07 |
+
+Every log is written to Kafka twice (once per topic), spans once.
+
+## Watching it
+
+- **The Docker disk.** `docker system df -v` lists volume sizes; `docker run --rm alpine df /` shows the Docker VM's disk on Docker Desktop.
+- **Topic sizes.** `rpk cluster logdirs describe --topics tayga.signals,tayga.logs --aggregate-into topic` in the Redpanda container.
+- **Table sizes.** In ClickHouse:
+
+  ```sql
+  SELECT table, formatReadableSize(sum(bytes_on_disk)) AS size
+  FROM system.parts WHERE active AND database = 'tayga'
+  GROUP BY table ORDER BY sum(bytes_on_disk) DESC
+  ```
+
+- **Consumer lag** on the Pipeline page: a group that falls far behind risks losing records once they pass the topic retention.

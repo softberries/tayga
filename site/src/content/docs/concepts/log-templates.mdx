@@ -1,0 +1,95 @@
+---
+title: "Log templates"
+description: "How Tayga mines log lines into templates with Drain: masking, HTTP status codes, the fingerprint cache and storage."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import RefShot from '../../../components/RefShot.astro';
+
+A **log template** is the shape shared by many log lines, with the variable parts replaced by `<*>`. `Found 3 products from database` and `Found 12 products from database` are one template, `Found <*> products from database`. `tayga-logminer` mines templates as logs stream in, keeps them in ClickHouse, links every log line to its template, and raises [log alerts](/tayga/concepts/log-alerts/) on them.
+
+<RefShot
+	name="logs-template-row"
+	alt="A template row: service, the template text with masked variables, hits, trend, first seen and status."
+	caption="A template in the Logs page: the masked variables show as <*>."
+/>
+
+## From a log line to a template
+
+For each log body the logminer:
+
+1. **Splits** it on whitespace. Bodies longer than 64 tokens keep the first 64 and end with `<…>`; an empty body becomes `<empty>`.
+2. **Masks** each token. UUIDs, hex runs of 8 or more characters (with or without `0x`) and numbers become `<*>`, and a token that contains any of them becomes exactly `<*>`: `user_1234` is `<*>`. The same masking is used for [story fingerprints](/tayga/concepts/story-groups/).
+3. **Keeps HTTP status codes** in access-log positions (below).
+4. **Finds the template** in the service's Drain tree, or creates one.
+
+There is one tree per service: templates never mix services.
+
+### Drain
+
+Drain routes a line through a fixed-depth tree, first by its token count, then by its first tokens, to a small set of candidate templates. It picks the most similar one and accepts it when the share of matching positions is at least the similarity threshold, with `<*>` counting as a match. Otherwise the line starts a new template. When a line joins a template that differs at some position, that position becomes `<*>`: the template **generalises** and keeps its id.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `logminer.sim_threshold` | `0.5` | Minimum similarity to join a template. |
+| `logminer.max_clusters_per_service` | `5000` | Templates per service. Beyond that, lines that match no template go to the service's `<overflow>` template, counted in `tayga_logminer_cluster_cap_hits_total`. |
+| tree depth | 4 | Fixed. |
+| children per node | 100 | Fixed. Further distinct routing tokens go to a `<*>` branch. |
+
+With wildcards counted as matches at 0.5, the mining prototype produced 67 templates on its sample where the classic Drain scoring gave 5,942. On the live demo stack the logminer held 423 templates (`tayga_logminer_templates`) on 2026-10-07 at 04:19 UTC, for 17 services sending logs.
+
+A template's id is a hash of its service and the template text when it was first seen, so ids are stable for the same logs in the same order with the same settings.
+
+### HTTP status codes
+
+Masking every number would merge `200` and `503` access-log lines into one template, hiding a burst of errors. With `logminer.keep_http_status = true` (the default), a token of exactly three digits from 100 to 599 that **directly follows an `HTTP/1.1`, `HTTP/1.0` or `HTTP/2` style token** stays literal:
+
+```text
+"GET /api/cart HTTP/1.1" 503 UF   →   … <*> 503 UF …
+```
+
+- A kept code matches only itself. A template's `<*>` does not absorb it, and Drain never generalises it into `<*>`, so a `200` line and a `503` line never share a template.
+- The rule is positional, so a non-access-log line such as `upstream replied HTTP/1.1 503` keeps its code too.
+- A routing token that is a kept code always gets its own tree branch (at most 500 more per node, one per code).
+- Span fingerprints use their own masking and are not affected.
+
+### The masking epoch
+
+Changing how lines are masked changes which templates lines fall into. The logminer stores a **masking version** in `logminer_state` (3 with `keep_http_status`, 1 without). When the running version differs from the stored one, it starts a new **masking epoch** at that moment:
+
+- For 15 minutes (`new_template_warmup_min`) after the epoch start, no `new` alert fires for templates first seen in that time.
+- After that, a template with a kept status code raises no `new` alert if, with its codes read as `<*>`, it would have matched a template of the same service that existed before the epoch. These are counted in `tayga_logminer_new_suppressed_total{reason="pre_epoch_match"}`.
+
+Existing templates are not rewritten; [re-mining](/tayga/operations/remine/) rebuilds them from the stored logs if you want the new rules applied to history.
+
+## The fingerprint cache
+
+Most log lines repeat a shape that was already seen. Before Drain, the logminer fingerprints every body of a Kafka record in one batch: a 64-bit key and a 64-bit check hashed from the body's masked token sequence, in one pass over its bytes, without regexes or allocation. Each service keeps a cache from key to template.
+
+- **A hit** (key and check match) skips tokenising, masking and the tree walk. It updates only the template's count, first and last seen, and highest severity, as Drain would.
+- **The results are identical to Drain alone.** A differential test feeds a corpus through both paths and requires the same template for every line.
+- A service's cache is emptied when one of its templates generalises, when templates are restored, and when it reaches 10,000 entries. A key match with a different check counts as a collision and takes the Drain path, as do bodies with a non-ASCII or NUL byte.
+
+On the live demo stack the cache served **99.70 %** of lines in the first 30 minutes after it was deployed, with no collisions, and mining took 8.0 µs per Kafka record against 34.8 µs with the cache off. The backend is set by `logminer.fingerprinter`; see [Performance tuning](/tayga/operations/performance-tuning/).
+
+## Storage
+
+| Table | One row per | Kept |
+|---|---|---|
+| `log_templates` | template (latest state: text, count, first and last seen, highest severity) | 30 days after the template was last seen |
+| `log_template_hits` | log line: its log id, template id and timestamp | 3 days |
+| `log_template_minutes` | template and minute, filled by a materialized view from the hits | 8 days |
+
+Hits are deduplicated by log id, and minute counts use `uniqExact(log_id)`, so a record read twice is not counted twice. A template's `count` in `log_templates` is approximate: it can grow when records are read again after a rebalance or crash.
+
+Writes are batched: the logminer flushes hits and changed templates every 5,000 logs or every second (`logminer.max_batch`, `logminer.flush_ms`), and commits Kafka offsets only after they are stored.
+
+<Aside type="note">
+The story page shows each log line with its template, and `GET /api/v1/traces/{trace_id}/log-templates` returns the mapping for one trace. See the [HTTP API](/tayga/reference/api/).
+</Aside>
+
+## Limits
+
+- Templates reflect the settings they were mined with. After changing `sim_threshold`, `max_clusters_per_service` or `keep_http_status`, only new lines follow the new settings until you [re-mine](/tayga/operations/remine/).
+- Only the last 3 days of logs are stored, so a re-mine sees only those.
+- Templates are per service, not per tenant.

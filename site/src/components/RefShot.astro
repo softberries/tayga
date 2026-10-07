@@ -1,0 +1,73 @@
+---
+/**
+ * A screenshot for the reference sections (Concepts, Alerting, Operations): the light or dark
+ * capture from `src/assets/screens` is shown to match the site theme. Width and height come from
+ * the image, so nothing shifts while it loads.
+ */
+import { Image } from 'astro:assets';
+import type { ImageMetadata } from 'astro';
+
+interface Props {
+	/** Base name in `src/assets/screens`, e.g. `story-root-cause` (`-dark` and `-light` must exist). */
+	name: string;
+	alt: string;
+	caption?: string;
+}
+
+const files = import.meta.glob<{ default: ImageMetadata }>('../assets/screens/*.webp', { eager: true });
+const { name, alt, caption } = Astro.props;
+const pick = (theme: 'dark' | 'light') => {
+	const img = files[`../assets/screens/${name}-${theme}.webp`]?.default;
+	if (!img) throw new Error(`RefShot: no screenshot ${name}-${theme}.webp`);
+	return img;
+};
+const variants = [
+	{ img: pick('light'), cls: 'ref-shot__light' },
+	{ img: pick('dark'), cls: 'ref-shot__dark' },
+];
+// Captures are at 2x: the CSS width is half the pixel width.
+const widths = (img: ImageMetadata) => [...new Set([Math.min(720, img.width), Math.round(img.width / 2), img.width])].sort((a, b) => a - b);
+const sizes = (img: ImageMetadata) => `(min-width: 72rem) min(${Math.round(img.width / 2)}px, 47rem), min(${Math.round(img.width / 2)}px, calc(100vw - 2rem))`;
+---
+
+<figure class="ref-shot not-content">
+	{
+		variants.map(({ img, cls }) => (
+			<Image
+				src={img}
+				alt={alt}
+				widths={widths(img)}
+				sizes={sizes(img)}
+				loading="lazy"
+				decoding="async"
+				class:list={['ref-shot__img', cls]}
+				style={`max-width:min(100%, ${Math.round(img.width / 2)}px)`}
+			/>
+		))
+	}
+	{caption ? <figcaption>{caption}</figcaption> : null}
+</figure>
+
+<style>
+	.ref-shot {
+		margin-block: 1.5rem;
+		display: grid;
+		gap: 0.6rem;
+	}
+	.ref-shot__img {
+		display: block;
+		width: 100%;
+		height: auto;
+		border-radius: var(--tg-radius-field, 10px);
+		border: 1px solid var(--sl-color-hairline-light);
+		box-shadow: var(--tg-shadow);
+	}
+	:global(:root[data-theme='light']) .ref-shot__dark,
+	:global(:root:not([data-theme='light'])) .ref-shot__light {
+		display: none;
+	}
+	figcaption {
+		font-size: 0.85rem;
+		color: var(--sl-color-gray-3);
+	}
+</style>

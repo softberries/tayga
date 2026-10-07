@@ -27,8 +27,9 @@ RUN cargo build --release --workspace --bins
 # debian:trixie-slim, pinned by digest on 2026-10-06.
 FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 # The services write nothing to disk and listen above 1024, so they run unprivileged.
+# tayga-devtools ships for `hash-password` and `remine` (docker run / compose exec / kubectl exec).
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin tayga
-COPY --from=builder /app/target/release/tayga-ingest /app/target/release/tayga-writer /app/target/release/tayga-assembler /app/target/release/tayga-api /app/target/release/tayga-logminer /app/target/release/tayga-notifier /usr/local/bin/
+COPY --from=builder /app/target/release/tayga-ingest /app/target/release/tayga-writer /app/target/release/tayga-assembler /app/target/release/tayga-api /app/target/release/tayga-logminer /app/target/release/tayga-notifier /app/target/release/tayga-devtools /usr/local/bin/
 ENV RUST_LOG=info
 USER tayga

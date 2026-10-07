@@ -1,0 +1,26 @@
+{
+  "name": "site",
+  "type": "module",
+  "version": "0.0.1",
+  "scripts": {
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro",
+    "check": "astro check",
+    "linkcheck": "node scripts/check-links.mjs",
+    "capture": "node scripts/capture.ts"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.42.5",
+    "astro": "^7.2.10",
+    "sharp": "^0.35.3"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.10",
+    "playwright": "^1.63.0",
+    "starlight-links-validator": "^0.26.0",
+    "typescript": "^6.0.3"
+  }
+}

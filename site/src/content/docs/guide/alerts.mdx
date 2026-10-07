@@ -1,0 +1,97 @@
+---
+title: "Alerts"
+description: "The log alerts page: filters, the alerts timeline and the alerts table."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Screenshot from '../../../components/Screenshot.astro';
+
+The Alerts page answers **"what is unusual in my logs?"** It lists the alerts Tayga raised on log templates in the time range: a template that is **new**, one whose rate **spiked** above its baseline, and one you asked to watch that went **silent**. Each alert links to its template and to example requests, which open as stories when Tayga built one.
+
+The page is at `/logs/alerts`. The **Logs and templates** icon in the rail, <kbd>g</kbd> then <kbd>l</kbd>, **View all** on the Stories page and **Log alerts** in the command palette open it.
+
+<Screenshot name="alerts-full" eager caption="Log alerts over the last 24 hours." />
+
+## Filters
+
+<Screenshot name="alerts-filters" caption="The filter bar." />
+
+- **Kind** (1): **All**, **New**, **Spike** or **Silence**.
+- **Service** (2): only one service's alerts. Pick it from a searchable list; **any** clears it.
+- **Active only** (3): hide the alerts that have ended. The button turns red while it is on.
+- **Clear filters** appears when any filter is set.
+- **Browse templates** (4): the [log templates](/tayga/guide/logs/) list, filtered to the same service when one is set.
+
+An alert is **active** while it was last seen within the 10 minutes before the end of the time range. For a range ending now, that means it is still firing.
+
+## Alerts timeline
+
+<Screenshot name="alerts-timeline" caption="Alerts over time, stacked by kind." />
+
+A stacked bar chart of alerts per bucket across the range: per minute for ranges up to 15 minutes, per 5 minutes up to an hour, and per hour beyond. New alerts are in the accent colour, spikes in amber and silence alerts in their own colour. Hover over the chart for the counts.
+
+New and spike alerts are counted at the moment they started. A silence alert is counted at its latest detection, since it starts at the template's last hit, which can be long before the alert fired.
+
+## Alerts table
+
+The header says how many alerts match and how many are active, for example `11 alerts · 3 active`. Active alerts come first, then the most recently seen.
+
+| Column | What it shows |
+|---|---|
+| **Kind** | A **new**, **spike** or **silence** badge. |
+| **Service** | The service that wrote the template. |
+| **Template** | The template text, linked to its [page](/tayga/guide/logs/#template-detail). Hover over it to read it in full. |
+| **Count vs baseline** | Spike: the peak count in one window against the baseline per window, for example `35 vs 1.8 / window`. New: `first seen`. Silence: how long the template has been quiet, for example `silent 12 min`. |
+| **Started** | How long ago the alert started; hover for the date and time. |
+| **Last seen** | How long ago it was last detected. |
+| **Status** | **active**, with a pulsing dot, or **ended**. |
+| **Example traces** | Short trace ids of requests that wrote the line. An id with an accent outline has a story and opens it; the others open the [trace view](/tayga/guide/traces/#trace-view). "none" when there are no examples. |
+
+The kinds look like this:
+
+<Screenshot name="alerts-card-new" caption="A new alert: a template that first appeared after its service was established." />
+
+<Screenshot name="alerts-card-spike" caption="A spike alert: the peak against the baseline, with example traces linked to stories." />
+
+<Screenshot name="alerts-card-silence" caption="A silence alert: a watched template that has not been seen for its set minutes." />
+
+How each kind is detected, and its thresholds, is explained in [Log alerts](/tayga/concepts/log-alerts/). Silence alerts only fire for templates where you turned on [Alert when silent](/tayga/guide/logs/#silence-alert).
+
+On a phone, each alert is a card: the template on top, then the kind, service, count, status and last seen, then the example traces.
+
+<Screenshot name="mobile-alerts" caption="Log alerts on a phone." />
+
+## Empty and error states
+
+- "No log alerts in this window": no template was new, spiked or went silent in the range. For a range ending now it suggests a longer one.
+- "No alerts match these filters", with **Clear filters**.
+- "Could not load log alerts." with **Try again** when the list fails to load.
+
+<Aside type="note" title="Alerts here and in Slack">
+This page shows the alerts Tayga stored. Whether they are also sent to a webhook or Slack depends on the notifier; see [The notifier](/tayga/alerting/notifier/).
+</Aside>
+
+## URL parameters
+
+| Parameter | Values | Meaning |
+|---|---|---|
+| `kind` | `new`, `spike`, `silence` | Kind filter. Absent: all. |
+| `service` | a service name | Service filter. |
+| `active` | `1` | Active only. |
+| `since`, `until` | see [Time range](/tayga/guide/time-range/#url-parameters) | The time range. |
+
+For example, `/logs/alerts?kind=spike&active=1&since=15m` lists the spikes still firing in the last 15 minutes. `/logs` opens this page too.
+
+## Tips
+
+- Start with **Active only** during an incident, then follow an example trace with a story to see a failing request that wrote the line.
+- A spike on a template that also shows in a story's logs appears on that story's page under **Related log alerts**.
+- New templates right after a deploy are expected; use the **Started** time to match them to the release.
+
+## Related
+
+- [Log alerts](/tayga/concepts/log-alerts/)
+- [Log templates](/tayga/concepts/log-templates/)
+- [Baselines](/tayga/concepts/baselines/)
+- [Error stories](/tayga/concepts/error-stories/)
+- [Root cause and critical path](/tayga/concepts/root-cause-critical-path/)

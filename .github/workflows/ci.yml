@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, unit tests)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.98
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: System libraries for librdkafka (curl headers)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Integration and e2e tests are #[ignore]d: they need the live stack (make it, make e2e).
+      - name: Unit tests
+        run: cargo test --workspace --locked
+
+  ui:
+    name: Web app (lint, typecheck, unit tests)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+
+  deploy:
+    name: Helm chart, compose bundle, scripts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+        with:
+          version: v4.2.2
+      - name: Helm lint
+        run: helm lint --strict deploy/helm/tayga
+      - name: Helm template (bundled and external backends)
+        run: |
+          helm template tayga deploy/helm/tayga >/dev/null
+          helm template tayga deploy/helm/tayga \
+            --set clickhouse.enabled=false --set redpanda.enabled=false \
+            --set external.clickhouse.url=http://clickhouse:8123 \
+            --set external.kafka.brokers=kafka:9092 >/dev/null
+      - name: Chart schema version matches the migrations
+        run: |
+          latest="$(find crates/tayga-store/migrations -name '[0-9]*_*.sql' -exec basename {} \; | sort | tail -n 1 | cut -d_ -f1)"
+          latest="$((10#$latest))"
+          chart="$(sed -n 's/.*define "tayga.schemaVersion" -}}\([0-9]*\){{.*/\1/p' deploy/helm/tayga/templates/_helpers.tpl)"
+          echo "latest migration: $latest, chart tayga.schemaVersion: $chart"
+          test "$latest" = "$chart"
+      - name: Standalone compose config
+        run: docker compose --project-directory deploy/standalone --env-file deploy/standalone/.env.example config --quiet
+      - name: Shellcheck
+        run: shellcheck --shell=sh scripts/*.sh

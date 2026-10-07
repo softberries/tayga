@@ -1,0 +1,64 @@
+---
+/** A landing section: eyebrow, heading, optional lede, then content. */
+interface Props {
+	id: string;
+	eyebrow: string;
+	title: string;
+	lede?: string;
+	align?: 'center' | 'start';
+}
+const { id, eyebrow, title, lede, align = 'center' } = Astro.props;
+---
+
+<section class:list={['tg-section', `tg-section--${align}`]} aria-labelledby={id}>
+	<header class="tg-section__head">
+		<p class="tg-section__eyebrow">{eyebrow}</p>
+		<h2 id={id}>{title}</h2>
+		{lede && <p class="tg-section__lede">{lede}</p>}
+	</header>
+	<slot />
+</section>
+
+<style>
+	.tg-section {
+		padding-block: clamp(3.5rem, 8vw, 6rem) 0;
+	}
+	.tg-section__head {
+		display: grid;
+		gap: 0.85rem;
+		max-width: 46rem;
+		margin-bottom: clamp(2rem, 4vw, 3rem);
+	}
+	.tg-section--center .tg-section__head {
+		margin-inline: auto;
+		text-align: center;
+		justify-items: center;
+	}
+	.tg-section__eyebrow {
+		margin: 0;
+		font-family: var(--__sl-font-mono);
+		font-size: 0.75rem;
+		font-weight: 500;
+		letter-spacing: 0.14em;
+		text-transform: uppercase;
+		color: var(--sl-color-text-accent);
+	}
+	h2 {
+		margin: 0;
+		/* #tour and the other anchors land on the heading: keep the eyebrow above it clear of the sticky header. */
+		scroll-margin-top: calc(var(--sl-nav-height) + 3rem);
+		font-size: clamp(1.75rem, 1.2rem + 2.2vw, 2.7rem);
+		line-height: 1.12;
+		letter-spacing: -0.03em;
+		font-weight: 700;
+		color: var(--sl-color-white);
+		text-wrap: balance;
+	}
+	.tg-section__lede {
+		margin: 0;
+		font-size: 1.05rem;
+		line-height: 1.7;
+		color: var(--sl-color-gray-2);
+		text-wrap: pretty;
+	}
+</style>
