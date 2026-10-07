@@ -3,7 +3,7 @@ title: "Re-mining templates"
 description: "Rebuilding log templates from the stored logs with tayga-devtools remine after a change to masking or Drain settings."
 ---
 
-import { Aside, Steps } from '@astrojs/starlight/components';
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
 
 Templates reflect the settings they were mined with. After you change a Drain or masking setting (`logminer.sim_threshold`, `logminer.max_clusters_per_service` or `logminer.keep_http_status`), only logs mined from then on follow the new settings. `tayga-devtools remine` rebuilds the templates from the stored logs of the **last 3 days**, with the logminer's own code and its current settings, without raising alerts for the rebuilt templates.
 
@@ -18,48 +18,70 @@ The watermark keeps the restarted logminer from announcing the rebuilt templates
 
 ## Running it
 
-`remine` is part of `tayga-devtools`, which is built from source (it is not in the Docker images). It talks to ClickHouse directly: by default `http://localhost:18123`, database `tayga`, or the `[clickhouse]` settings of its config; `--clickhouse` and `--database` override them.
+`remine` is part of `tayga-devtools`, which ships in the Tayga image and can also be built from source. It talks to ClickHouse directly, with the `[clickhouse]` settings of its config (by default `http://localhost:18123`, database `tayga`); `--clickhouse` and `--database` override them. Inside the logminer or API container it picks up the same settings as those services.
 
-<Steps>
+In every setup the steps are the same: preview with a dry run, stop every logminer replica, wait about 3 minutes (a real run refuses while any logminer heartbeat is under 3 minutes old), re-mine, and start the logminer again.
 
-1. **Preview.** The dry run is read-only and allowed while the logminer runs:
+<Tabs>
+<TabItem label="Docker Compose">
 
-   ```sh
-   cargo run --release -q -p tayga-devtools -- remine --dry-run
-   ```
+In the directory of the standalone bundle:
 
-   It prints templates per service before and after, the template ids added, removed and unchanged, and the silence settings that would be orphaned.
+```sh
+docker compose exec tayga-logminer tayga-devtools remine --dry-run   # read-only, allowed while the logminer runs
+docker compose stop tayga-logminer
+# wait about 3 minutes
+docker compose run --rm --no-deps tayga-logminer tayga-devtools remine
+docker compose start tayga-logminer
+```
 
-2. **Stop every logminer replica.** Next to the OpenTelemetry demo, from the repository root (this is the Makefile's compose command):
+`docker compose run` starts a one-off container from the logminer's service definition, so the re-mine uses the logminer's own settings, including any `TAYGA__LOGMINER__*` variables.
 
-   ```sh
-   TAYGA_ROOT=$PWD docker compose --project-directory vendor/opentelemetry-demo \
-     -f vendor/opentelemetry-demo/compose.yaml -f vendor/opentelemetry-demo/compose.full.yaml \
-     -f vendor/opentelemetry-demo/compose.observability.yaml \
-     -f deploy/compose.infra.yaml -f deploy/compose.tayga.yaml stop tayga-logminer
-   ```
+</TabItem>
+<TabItem label="Helm">
 
-   In the standalone bundle: `docker compose stop tayga-logminer`.
+With the release name `tayga` from the install guide (the deployments are `<release>-…`, or `<release>-tayga-…` when the release name does not contain `tayga`):
 
-3. **Wait about 3 minutes, then re-mine.** A real run refuses while any logminer heartbeat is under 3 minutes old:
+```sh
+kubectl --namespace tayga exec deploy/tayga-logminer -- tayga-devtools remine --dry-run
+kubectl --namespace tayga scale deploy/tayga-logminer --replicas 0
+# wait about 3 minutes
+kubectl --namespace tayga exec deploy/tayga-api -- tayga-devtools remine
+kubectl --namespace tayga scale deploy/tayga-logminer --replicas 1   # or your logminer.replicas
+```
 
-   ```sh
-   cargo run --release -q -p tayga-devtools -- remine
-   ```
+The real run goes through the API pod, which has the same ClickHouse settings, because the logminer pods are scaled to zero. If you set `TAYGA__LOGMINER__*` variables in `logminer.extraEnv`, pass the same ones: `kubectl … exec deploy/tayga-api -- env TAYGA__LOGMINER__SIM_THRESHOLD=0.5 tayga-devtools remine`.
 
-   If the logminer runs with non-default `TAYGA__LOGMINER__*` variables, pass the same ones to this command. Nothing checks that the two agree.
+</TabItem>
+<TabItem label="From source">
 
-4. **Start the logminer** with the same compose command and `start tayga-logminer`.
+Next to the OpenTelemetry demo, from the repository root (this is the Makefile's compose command):
 
-</Steps>
+```sh
+cargo run --release -q -p tayga-devtools -- remine --dry-run
+
+TAYGA_ROOT=$PWD docker compose --project-directory vendor/opentelemetry-demo \
+  -f vendor/opentelemetry-demo/compose.yaml -f vendor/opentelemetry-demo/compose.full.yaml \
+  -f vendor/opentelemetry-demo/compose.observability.yaml \
+  -f deploy/compose.infra.yaml -f deploy/compose.tayga.yaml stop tayga-logminer
+# wait about 3 minutes
+cargo run --release -q -p tayga-devtools -- remine
+```
+
+Then start the logminer with the same compose command and `start tayga-logminer`. Build with `--release`: on 8.6 million logs a debug-build dry run took 501 s and a release-build real run 211 s (2026-10-06). If the logminer runs with non-default `TAYGA__LOGMINER__*` variables, pass the same ones to `cargo run`.
+
+</TabItem>
+</Tabs>
+
+The dry run prints templates per service before and after, the template ids added, removed and unchanged, and the silence settings that would be orphaned. Nothing checks that the re-mine and the logminer use the same settings.
 
 <Aside type="note">
-In the standalone bundle ClickHouse is not published on the host. Run `remine` from a machine or container that can reach it, and point `--clickhouse` at it.
+In the standalone bundle ClickHouse is not published on the host, so a `cargo run` from the host cannot reach it. Use the commands in the Docker Compose tab, or point `--clickhouse` at an address that can.
 </Aside>
 
 ## Things to know
 
-- **Build with `--release`.** On 8.6 million logs a debug-build dry run took 501 s and a release-build real run 211 s (2026-10-06). The logminer is down for the run plus the 3-minute wait.
+- **Downtime.** The logminer is down for the run plus the 3-minute wait: 211 s for 8.6 million logs in the run below.
 - **The heartbeat guard.** Each replica writes `logminer_heartbeat_ns:<replica id>` on every detection pass. A real run reads all of them and refuses while the newest is under 3 minutes old: `Error: the logminer looks alive (heartbeat 43s ago, limit 180s). Stop it first with ...`. `--force` skips the check; use it only when you know the logminer is down. `--dry-run` never checks.
 - **Not atomic.** The tables are truncated before mining. If a run fails partway, run it again before you start the logminer.
 - **Only 3 days.** Only stored logs are mined. Templates whose logs are all older are dropped, although `log_templates` itself keeps rows for 30 days.

@@ -146,17 +146,16 @@ Off by default: anyone who reaches port 8090 can read every trace and log. One a
 
 1. **Make a password hash.** The Tayga image ships `tayga-devtools`, which asks for the password twice without echo (or reads the first line of piped input) and prints an Argon2id hash:
 
-   {/* TODO-verify: needs tayga-devtools in the published image (another agent is adding it) */}
    ```sh
    docker compose exec tayga-api tayga-devtools hash-password
    ```
 
-   Without a running stack, or in a script:
+   Without a running stack, use the image directly; in a script, pipe the password in:
 
-   {/* TODO-verify: needs tayga-devtools in the published image */}
    ```sh
    docker run --rm -it ghcr.io/softberries/tayga:0.1.0 tayga-devtools hash-password
    printf '%s' 'my password' | docker compose exec -T tayga-api tayga-devtools hash-password
+   printf '%s' 'my password' | docker run --rm -i ghcr.io/softberries/tayga:0.1.0 tayga-devtools hash-password
    ```
 
    The output starts `$argon2id$v=19$m=19456,t=2,p=1$`. Any Argon2id PHC string works.

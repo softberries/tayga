@@ -13,19 +13,46 @@ Authentication is **off by default**: with no `[auth]` settings the app and the 
 
 1. **Make a password hash.** Tayga stores only an Argon2id hash in PHC format, never a plain password.
 
-   From a source checkout, the devtools command asks for the password twice without echo, or reads the first line of piped input:
+   The Tayga image ships `tayga-devtools`, which makes one. It asks for the password twice without echo, or reads the first line of piped input:
+
+   <Tabs>
+   <TabItem label="Docker Compose">
+
+   ```sh
+   docker compose exec tayga-api tayga-devtools hash-password
+   printf '%s' 'my password' | docker compose exec -T tayga-api tayga-devtools hash-password
+   ```
+
+   Without a running stack, use the image directly (`<version>` is your Tayga version, for example `0.1.0`):
+
+   ```sh
+   docker run --rm -it ghcr.io/softberries/tayga:<version> tayga-devtools hash-password
+   printf '%s' 'my password' | docker run --rm -i ghcr.io/softberries/tayga:<version> tayga-devtools hash-password
+   ```
+
+   </TabItem>
+   <TabItem label="Helm">
+
+   With the release name `tayga` from the install guide:
+
+   ```sh
+   kubectl --namespace tayga exec -it deploy/tayga-api -- tayga-devtools hash-password
+   ```
+
+   The deployment is `<release>-api` when the release name contains `tayga`, and `<release>-tayga-api` otherwise.
+
+   </TabItem>
+   <TabItem label="From source">
 
    ```sh
    cargo run -q -p tayga-devtools -- hash-password
    printf '%s' 'my password' | cargo run -q -p tayga-devtools -- hash-password
    ```
 
-   It prints a string that starts `$argon2id$v=19$m=19456,t=2,p=1$`. The Docker images do not include `tayga-devtools`; without Rust, any Argon2id PHC string works, for example from the `argon2` tool in a Debian container:
+   </TabItem>
+   </Tabs>
 
-   ```sh
-   printf '%s' 'my password' | docker run --rm -i debian:trixie-slim sh -c \
-     'apt-get update -qq >/dev/null && apt-get install -qq -y argon2 >/dev/null && argon2 "$(head -c 16 /dev/urandom | base64)" -id -m 16 -t 3 -p 1 -e'
-   ```
+   It prints a string that starts `$argon2id$v=19$m=19456,t=2,p=1$`. Any other Argon2id PHC string works too.
 
 2. **Make a session key**, so that a restart does not sign everyone out:
 

@@ -31,7 +31,6 @@ The web app in `ui/` is built into `ui/dist` and embedded into the `tayga-api` b
 
 ## Build the image
 
-{/* TODO-verify: tayga-devtools in the image (Dockerfile change by another agent) */}
 The image holds every Tayga binary, the embedded web app, and `tayga-devtools`. It is what the Compose bundle, the Helm chart and the demo stack run.
 
 ```sh
@@ -128,7 +127,7 @@ make ui-e2e                  # Playwright against the running app
 | `make it` | Starts a standalone Redpanda and ClickHouse (Compose project `tayga-it`) and runs the ignored integration tests of every crate except `tayga-e2e`; each ClickHouse test seeds a uniquely named database. Run it with the demo stack down: both use host ports 19092 and 18123. |
 | `make infra-down` | Stops that standalone infrastructure and **removes its volumes**. |
 | `make e2e` | Resets the demo flags, then runs the end-to-end tests against the live demo stack (`make up` first), one at a time. Ten tests: flag-driven story scenarios (payment failure, payment unreachable, shipping slowdown, product catalog, ad), the service map, raw span counts against Jaeger, a log spike, a new template from a probe service, and a silence alert. |
-| `make e2e-notifier` | Runs the silence scenario with delivery: points `tayga-notifier` at a mock webhook on the host, checks the delivery, then puts the target-less config back whether the run passed or not. |
+| `make e2e-notifier` | Runs the silence scenario with delivery. It recreates `tayga-notifier` with `deploy/compose.notifier-e2e.yaml`, which mounts `deploy/tayga-notifier.e2e.toml` (one webhook target, `http://host.docker.internal:18099/hook`) in place of the default config. It then runs `silence_alert_and_delivery` with `TAYGA_E2E_NOTIFIER=1`, so the test starts a mock webhook on the host's port 18099 and checks that the alert is delivered there. Afterwards it recreates the notifier with the default, target-less config, whether the run passed or not. Port 18099 must be free on the host. |
 | `make verify-raw` | Compares span counts per trace in ClickHouse with the demo's Jaeger. |
 | `make capture NAME=<n> ARGS="<args>"` | Captures complete traces from `tayga.signals` into `fixtures/<n>.pb.gz` (see `cargo run -p tayga-devtools -- capture --help`). |
 | `make flag NAME=<flag> VARIANT=<v>`, `make flags-reset` | Set a demo feature flag; restore the demo's defaults. |

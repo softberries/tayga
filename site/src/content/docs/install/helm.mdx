@@ -201,7 +201,6 @@ Off by default; the release notes remind you while it is. Turn it on before you 
 
 1. **Make a password hash** with `tayga-devtools`, which ships in the image. It asks for the password twice without echo:
 
-   {/* TODO-verify: needs tayga-devtools in the published image (another agent is adding it) */}
    ```sh
    kubectl --namespace tayga exec -it deploy/tayga-api -- tayga-devtools hash-password
    ```

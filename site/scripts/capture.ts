@@ -758,7 +758,7 @@ const scenes: Scene[] = [
 					page: 'stories',
 					route: '/',
 					state: 'error: story groups failed to load (mocked 503)',
-					description: 'The error banner when a panel cannot load, with a Retry button.',
+					description: 'The error banner when a panel cannot load, with a Try again button.',
 					data: 'mocked',
 				});
 				await page.unroute('**/api/v1/story-groups?*');
@@ -975,7 +975,7 @@ const scenes: Scene[] = [
 				page: 'traces',
 				route,
 				state: 'the hero story trace',
-				description: 'Trace view: summary stats, the link to its story, the full waterfall and its logs.',
+				description: 'Trace view: summary stats, the link to its story and the full waterfall; a span's logs open in the span drawer.',
 			});
 			await frag(page, page.locator('[data-variant="panel"]').first(), 'trace-header', theme, {
 				page: 'traces',
