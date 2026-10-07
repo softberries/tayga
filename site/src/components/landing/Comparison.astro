@@ -4,10 +4,10 @@ import Icon from './Icon.astro';
 import { href } from '../../lib/links';
 
 const strengths = [
-	{ title: 'Analysis while data streams in', body: 'Stories are built as traces close, not when someone writes a query.' },
-	{ title: 'Deterministic, documented rules', body: 'Root cause, critical path and baselines follow rules you can read. No model in the loop.' },
+	{ title: 'Per-request stories, built while traces stream in', body: 'Every failing or slow request gets an error or slow story as its trace closes, not when someone writes a query.' },
+	{ title: 'Deterministic rules, no LLM', body: 'Root cause, critical path and baselines follow rules you can read. The same input gives the same answer.' },
 	{ title: 'Plain OpenTelemetry in', body: 'Anything that speaks OTLP, directly or through a Collector. No proprietary agent.' },
-	{ title: 'Self-hosted', body: 'Your telemetry stays in your ClickHouse and Redpanda.' },
+	{ title: 'Open source, log alerts in the core', body: 'New, spike and opt-in silence alerts on log templates are in the AGPL core, self-hosted: your telemetry stays in your ClickHouse and Redpanda.' },
 ];
 const elsewhere = [
 	{ title: 'You need metrics', body: 'Tayga takes traces and logs only. Keep a metrics backend next to it.' },
