@@ -320,9 +320,12 @@ pub const HEALTH_SLOW_FACTOR: f64 = 2.0;
 /// own query cached per minute (sub-project 4 spec §3.8).
 pub const HEALTH_BASELINE_SECS: u32 = 24 * 3600;
 
-/// End of the health baseline of a map window ending at `end` (unix seconds): the minute floor,
-/// so every refresh within a minute shares one cached baseline (sub-project 4 spec §3.8).
-pub fn health_baseline_end(end: i64) -> i64 {
+/// End of the health baseline of a map window ending at `window_end`, at `now` (both unix
+/// seconds): the minute floor of the earlier of the two, so every refresh within a minute shares
+/// one cached baseline, and a window ending up to `MAX_UNTIL_AHEAD_SECS` ahead never keys (and
+/// caches) next minute's baseline before its data exists (sub-project 4 spec §3.8).
+pub fn health_baseline_end(window_end: i64, now: i64) -> i64 {
+    let end = window_end.min(now);
     end - end.rem_euclid(60)
 }
 
