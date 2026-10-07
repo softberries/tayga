@@ -1,0 +1,183 @@
+# Tayga standalone: Tayga, ClickHouse and Redpanda, without the OpenTelemetry demo.
+# Point your own OpenTelemetry Collector (or SDKs) at the ingest ports; see README.md.
+#
+#   cp .env.example .env      # pick TAYGA_VERSION, ports, bind address
+#   docker compose up -d
+#
+# Settings come from .env (see .env.example). Every host port binds to
+# ${TAYGA_BIND:-127.0.0.1}; set TAYGA_BIND=0.0.0.0 to expose them (README.md, "Exposing the ports").
+# ClickHouse and Redpanda are not published at all: only the Tayga services reach them.
+
+name: ${COMPOSE_PROJECT_NAME:-tayga}
+
+x-tayga-image: &tayga-image ${TAYGA_IMAGE:-ghcr.io/softberries/tayga:${TAYGA_VERSION:-latest}}
+
+x-tayga-env: &tayga-env
+  RUST_LOG: ${RUST_LOG:-info}
+  TAYGA__KAFKA__BROKERS: redpanda:9092
+  TAYGA__CLICKHOUSE__URL: http://clickhouse:8123
+
+services:
+  redpanda:
+    image: redpandadata/redpanda:v26.2.3
+    command:
+      - redpanda
+      - start
+      # Single broker with development defaults (no fsync tuning, overprovisioned CPU).
+      - --mode=dev-container
+      - --smp=1
+      - --memory=${REDPANDA_MEMORY:-1G}
+      - --kafka-addr=internal://0.0.0.0:9092
+      - --advertise-kafka-addr=internal://redpanda:9092
+    volumes:
+      # Keeps buffered records and consumer offsets across restarts.
+      - redpanda-data:/var/lib/redpanda/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.8
+    environment:
+      # Tayga connects as the passwordless `default` user. ClickHouse is not
+      # published, so only containers on this compose network reach it.
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # One-shot schema migration; every service that reads or writes ClickHouse waits for it.
+  tayga-migrate:
+    image: *tayga-image
+    command: ["tayga-writer", "migrate"]
+    environment: *tayga-env
+    restart: "no"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  # OTLP receiver: gRPC on 4317, HTTP on 4318 (/v1/traces, /v1/logs).
+  tayga-ingest:
+    image: *tayga-image
+    command: ["tayga-ingest"]
+    environment: *tayga-env
+    ports:
+      - "${TAYGA_BIND:-127.0.0.1}:${TAYGA_OTLP_GRPC_PORT:-4317}:4317"
+      - "${TAYGA_BIND:-127.0.0.1}:${TAYGA_OTLP_HTTP_PORT:-4318}:4318"
+    restart: unless-stopped
+    healthcheck:
+      # The image has no curl: bash opens the OTLP/HTTP port.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/4318"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  tayga-writer:
+    image: *tayga-image
+    command: ["tayga-writer"]
+    environment: *tayga-env
+    restart: unless-stopped
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      tayga-migrate:
+        condition: service_completed_successfully
+
+  tayga-assembler:
+    image: *tayga-image
+    command: ["tayga-assembler"]
+    environment: *tayga-env
+    restart: unless-stopped
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      tayga-migrate:
+        condition: service_completed_successfully
+
+  # Scales with LOGMINER_REPLICAS (tayga.logs has 12 partitions; replicas beyond 12 idle).
+  tayga-logminer:
+    image: *tayga-image
+    command: ["tayga-logminer"]
+    environment:
+      <<: *tayga-env
+      TAYGA__LOGMINER__FINGERPRINTER: ${LOGMINER_FINGERPRINTER:-scalar}
+    restart: unless-stopped
+    # Shutdown flushes pending work (bounded at 15 s), then one new-template pass (20 s).
+    stop_grace_period: 40s
+    deploy:
+      replicas: ${LOGMINER_REPLICAS:-1}
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      tayga-migrate:
+        condition: service_completed_successfully
+
+  # Delivers log alerts to the webhook and Slack targets in notifier.toml.
+  # With no targets it idles and logs "delivery disabled: no targets".
+  tayga-notifier:
+    image: *tayga-image
+    command: ["tayga-notifier"]
+    environment:
+      <<: *tayga-env
+      TAYGA_CONFIG: /etc/tayga/notifier.toml
+      TAYGA__NOTIFIER__PUBLIC_URL: ${TAYGA_PUBLIC_URL:-http://localhost:8090}
+    volumes:
+      - ./notifier.toml:/etc/tayga/notifier.toml:ro
+    restart: unless-stopped
+    stop_grace_period: 40s
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      tayga-migrate:
+        condition: service_completed_successfully
+
+  # Web app and JSON API on 8090. The recorder scrapes the other services'
+  # /metrics by these compose service names (its built-in default targets).
+  tayga-api:
+    image: *tayga-image
+    command: ["tayga-api"]
+    environment:
+      <<: *tayga-env
+      TAYGA__KAFKA__TOPIC: tayga.signals
+      # Authentication: see README.md. A password hash contains `$`; put it in
+      # .env as-is (compose reads .env values literally when single-quoted).
+      TAYGA__AUTH__ENABLED: ${TAYGA_AUTH_ENABLED:-false}
+      TAYGA__AUTH__USERNAME: ${TAYGA_AUTH_USERNAME:-}
+      TAYGA__AUTH__PASSWORD_HASH: ${TAYGA_AUTH_PASSWORD_HASH:-}
+      TAYGA__AUTH__SESSION_KEY: ${TAYGA_AUTH_SESSION_KEY:-}
+      TAYGA__AUTH__SECURE_COOKIE: ${TAYGA_AUTH_SECURE_COOKIE:-false}
+    ports:
+      - "${TAYGA_BIND:-127.0.0.1}:${TAYGA_HTTP_PORT:-8090}:8090"
+    restart: unless-stopped
+    healthcheck:
+      # GET /healthz (open with auth on) must answer 200.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8090 && printf 'GET /healthz HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && head -n1 <&3 | grep -q ' 200 '"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      tayga-migrate:
+        condition: service_completed_successfully
+
+volumes:
+  clickhouse-data: {}
+  redpanda-data: {}
