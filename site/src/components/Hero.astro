@@ -1,0 +1,340 @@
+---
+/**
+ * Hero override. The landing page (the only page with `hero` frontmatter) gets Tayga's own hero:
+ * value statement, calls to action and a real screenshot of the app. Any other page that sets
+ * `hero` falls back to Starlight's default hero.
+ */
+import { Picture } from 'astro:assets';
+import Default from '@astrojs/starlight/components/Hero.astro';
+import Icon from './landing/Icon.astro';
+import { GITHUB_URL, href } from '../lib/links';
+import storiesDark from '../assets/screens/stories-dark.png';
+
+const isLanding = Astro.locals.starlightRoute.id === '';
+---
+
+{
+	isLanding ? (
+		<section class="tg-hero not-content" aria-labelledby="_top">
+			<div class="tg-hero__copy">
+				<p class="tg-eyebrow">
+					<span class="tg-eyebrow__dot" aria-hidden="true" />
+					Open source · Built in Rust<span class="tg-eyebrow__more">&nbsp;· OpenTelemetry traces and logs</span>
+				</p>
+				<h1 id="_top" class="tg-hero__title">
+					Every failing request, <span class="tg-gradient-text">explained.</span>
+				</h1>
+				<p class="tg-hero__lede">
+					Tayga turns OpenTelemetry traces and logs into <strong>error stories</strong>. For each
+					failing or slow request it shows the root-cause span, the path across services, the
+					critical path, what differs from the endpoint's normal, and the logs that matter. One
+					problem is one story group, not hundreds of traces.
+				</p>
+				<div class="tg-actions">
+					<a class="tg-btn tg-btn--primary" href={href('getting-started/quickstart/')}>
+						<Icon name="rocket" size={18} />
+						Quickstart
+					</a>
+					<a class="tg-btn tg-btn--secondary" href={href('getting-started/what-is-tayga/')}>
+						<Icon name="book" size={18} />
+						Read the docs
+					</a>
+					<a class="tg-btn tg-btn--ghost" href={GITHUB_URL}>
+						<svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+							<path d="M12 .5a11.5 11.5 0 0 0-3.64 22.42c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.25-1.28-5.25-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.7 5.38-5.26 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z" />
+						</svg>
+						GitHub
+					</a>
+				</div>
+				<ul class="tg-hero__facts" aria-label="At a glance">
+					<li>OTLP over gRPC and HTTP</li>
+					<li>Redpanda / Kafka API</li>
+					<li>ClickHouse storage</li>
+					<li>Self-hosted, AGPLv3 core</li>
+				</ul>
+			</div>
+			<figure class="tg-shot">
+				<div class="tg-shot__chrome" aria-hidden="true">
+					<span />
+					<span />
+					<span />
+					<p>localhost:8090 · Stories</p>
+				</div>
+				<Picture
+					src={storiesDark}
+					formats={['avif', 'webp']}
+					widths={[720, 1080, 1440, 2160]}
+					sizes="(min-width: 76rem) 70rem, 94vw"
+					loading="eager"
+					fetchpriority="high"
+					alt="The Tayga Stories page in dark theme: KPI tiles for error and slow stories, the story-groups table with trend sparklines, and an inspector showing the selected group's request path and root cause."
+				/>
+				<figcaption class="sr-only">The Stories page of the Tayga web app, captured from a running stack with the OpenTelemetry demo.</figcaption>
+			</figure>
+		</section>
+	) : (
+		<Default />
+	)
+}
+
+<style>
+	/* Landing frame: wider content, brand glows behind the hero. */
+	:global([data-has-hero]) {
+		--sl-content-width: 74rem;
+	}
+	:global([data-has-hero] .main-frame) {
+		background-image:
+			radial-gradient(56rem 34rem at 50% -6rem, color-mix(in srgb, var(--tg-brand-to) var(--tg-glow), transparent), transparent 70%),
+			radial-gradient(40rem 30rem at 100% 28rem, color-mix(in srgb, var(--tg-brand-from) var(--tg-glow), transparent), transparent 70%);
+		background-repeat: no-repeat;
+	}
+	:global([data-has-hero] .content-panel) {
+		padding-block: 0;
+	}
+	:global([data-has-hero] .sl-markdown-content) {
+		margin-top: 0;
+	}
+
+	.tg-hero {
+		display: grid;
+		gap: clamp(2.5rem, 5vw, 4rem);
+		padding-block: clamp(2.5rem, 7vw, 5.5rem) 1rem;
+	}
+	.tg-hero__copy {
+		max-width: 50rem;
+		margin-inline: auto;
+		text-align: center;
+		display: grid;
+		justify-items: center;
+		gap: 1.4rem;
+	}
+	.tg-eyebrow {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.6rem;
+		margin: 0;
+		padding: 0.4rem 0.9rem;
+		border: 1px solid var(--sl-color-hairline-light);
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--tg-panel) 70%, transparent);
+		color: var(--sl-color-gray-2);
+		font-size: 0.8rem;
+		font-weight: 500;
+		letter-spacing: 0.01em;
+	}
+	.tg-eyebrow__dot {
+		width: 0.5rem;
+		height: 0.5rem;
+		border-radius: 50%;
+		background: var(--tg-ok);
+		box-shadow: 0 0 0 0 color-mix(in srgb, var(--tg-ok) 55%, transparent);
+		animation: tg-pulse 2s ease-out infinite;
+	}
+	@keyframes tg-pulse {
+		70% {
+			box-shadow: 0 0 0 8px color-mix(in srgb, var(--tg-ok) 0%, transparent);
+		}
+		100% {
+			box-shadow: 0 0 0 0 transparent;
+		}
+	}
+	.tg-hero__title {
+		margin: 0;
+		font-size: clamp(2.4rem, 1.2rem + 5vw, 4.25rem);
+		line-height: 1.04;
+		letter-spacing: -0.035em;
+		font-weight: 700;
+		color: var(--sl-color-white);
+		text-wrap: balance;
+	}
+	.tg-gradient-text {
+		background: linear-gradient(100deg, var(--tg-brand-from) 0%, var(--tg-brand-to) 90%);
+		-webkit-background-clip: text;
+		background-clip: text;
+		color: transparent;
+		padding-inline-end: 0.05em;
+	}
+	:global(:root[data-theme='light']) .tg-gradient-text {
+		background: linear-gradient(100deg, #1c5fae 0%, #2f86dc 90%);
+		-webkit-background-clip: text;
+		background-clip: text;
+	}
+	.tg-hero__lede {
+		margin: 0;
+		max-width: 42rem;
+		font-size: clamp(1rem, 0.94rem + 0.3vw, 1.15rem);
+		line-height: 1.7;
+		color: var(--sl-color-gray-2);
+		text-wrap: pretty;
+	}
+	.tg-hero__lede strong {
+		color: var(--sl-color-white);
+		font-weight: 600;
+	}
+	.tg-actions {
+		display: flex;
+		flex-wrap: wrap;
+		justify-content: center;
+		gap: 0.75rem;
+		margin-top: 0.4rem;
+	}
+	.tg-hero__facts {
+		display: flex;
+		flex-wrap: wrap;
+		justify-content: center;
+		gap: 0.4rem 1.4rem;
+		margin: 0.4rem 0 0;
+		padding: 0;
+		list-style: none;
+		font-size: 0.8rem;
+		color: var(--sl-color-gray-3);
+	}
+	.tg-hero__facts li {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.45rem;
+	}
+	.tg-hero__facts li::before {
+		content: '';
+		width: 0.35rem;
+		height: 0.35rem;
+		border-radius: 2px;
+		background: var(--sl-color-text-accent);
+		opacity: 0.8;
+	}
+
+	/* Screenshot in a window frame, lifted off the glow. */
+	.tg-shot {
+		position: relative;
+		margin: 0;
+		border-radius: var(--tg-radius-panel);
+		border: 1px solid color-mix(in srgb, var(--tg-brand-to) 22%, var(--sl-color-hairline-light));
+		background: var(--tg-rail);
+		box-shadow:
+			0 0 0 6px color-mix(in srgb, var(--tg-brand-to) 6%, transparent),
+			0 30px 80px -20px rgba(4, 10, 24, 0.55),
+			0 0 120px -30px color-mix(in srgb, var(--tg-brand-to) 45%, transparent);
+		overflow: hidden;
+	}
+	.tg-shot__chrome {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+		height: 2.4rem;
+		padding-inline: 1rem;
+		border-bottom: 1px solid #18223a;
+		background: #080d1a;
+	}
+	.tg-shot__chrome span {
+		width: 0.7rem;
+		height: 0.7rem;
+		border-radius: 50%;
+		background: #24324f;
+	}
+	.tg-shot__chrome p {
+		margin: 0 auto;
+		padding: 0.15rem 1.2rem;
+		border-radius: 999px;
+		background: #111a2e;
+		color: #9aa7bf;
+		font-family: var(--__sl-font-mono);
+		font-size: 0.72rem;
+	}
+	.tg-shot :global(img) {
+		display: block;
+		width: 100%;
+		height: auto;
+	}
+
+	/* Shared landing buttons (used across landing sections). */
+	:global(.tg-btn) {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.5rem;
+		min-height: 2.9rem;
+		padding: 0.6rem 1.25rem;
+		border-radius: var(--tg-radius-field);
+		border: 1px solid transparent;
+		font-weight: 600;
+		font-size: 0.95rem;
+		line-height: 1;
+		text-decoration: none;
+		transition:
+			transform 0.15s ease,
+			box-shadow 0.2s ease,
+			background-color 0.2s ease,
+			border-color 0.2s ease;
+	}
+	:global(.tg-btn:hover) {
+		transform: translateY(-1px);
+	}
+	:global(.tg-btn--primary) {
+		background: linear-gradient(135deg, var(--tg-cta-from), var(--tg-cta-to));
+		color: #fff;
+		box-shadow: var(--tg-shadow-cta);
+	}
+	:global(.tg-btn--primary:hover) {
+		box-shadow: 0 10px 26px rgba(43, 108, 176, 0.5);
+		color: #fff;
+	}
+	:global(.tg-btn--secondary) {
+		background: var(--tg-panel);
+		border-color: var(--sl-color-hairline-light);
+		color: var(--sl-color-white);
+		box-shadow: var(--tg-shadow);
+	}
+	:global(.tg-btn--secondary:hover) {
+		border-color: var(--sl-color-accent);
+		color: var(--sl-color-white);
+	}
+	:global(.tg-btn--ghost) {
+		color: var(--sl-color-gray-2);
+		border-color: var(--sl-color-hairline-light);
+		background: transparent;
+	}
+	:global(.tg-btn--ghost:hover) {
+		color: var(--sl-color-white);
+		border-color: var(--sl-color-gray-4);
+	}
+	:global(.sr-only) {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
+		border: 0;
+	}
+
+	@media (max-width: 40rem) {
+		.tg-actions {
+			width: 100%;
+			display: grid;
+			grid-template-columns: 1fr 1fr;
+		}
+		.tg-actions .tg-btn--primary {
+			grid-column: 1 / -1;
+		}
+		.tg-shot__chrome p {
+			display: none;
+		}
+		.tg-eyebrow__more {
+			display: none;
+		}
+		:global(.tg-actions .tg-btn) {
+			padding-inline: 0.75rem;
+			white-space: nowrap;
+		}
+		.tg-shot {
+			border-radius: 12px;
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.tg-eyebrow__dot {
+			animation: none;
+		}
+	}
+</style>

@@ -6,3 +6,8 @@
 
 # Internal strategy document, never commit
 docs/Product_Strategy.docx
+
+# Docs site (site/)
+site/node_modules/
+site/dist/
+site/.astro/
