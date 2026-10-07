@@ -1,5 +1,5 @@
 /**
- * Contract: every fixture captured from the live API (curl, see the Task 5 report) parses
+ * Contract: every fixture captured from the live API with curl parses
  * with the strict schema its route returns. A Rust view change that adds, drops or retypes a
  * field fails here until schemas.ts (and so types.ts) follow.
  */

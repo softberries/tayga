@@ -66,7 +66,7 @@ fn backends() -> Vec<Box<dyn BatchFingerprinter>> {
     cpu
 }
 
-/// Every backend at the batch sizes of spec §2.5.
+/// Every backend from the logminer's real batch (5 bodies) up to 50,000 bodies.
 fn fingerprint(c: &mut Criterion) {
     let lines = corpus::load();
     let backends = backends();
