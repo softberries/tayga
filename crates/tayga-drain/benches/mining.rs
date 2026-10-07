@@ -4,7 +4,9 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 use tayga_drain::drain::{Drain, DrainConfig};
-use tayga_drain::fingerprint::{BatchFingerprinter, BodyBatch, ScalarFingerprinter};
+use tayga_drain::fingerprint::{
+    BatchFingerprinter, BodyBatch, ScalarFingerprinter, fingerprint_body,
+};
 use tayga_drain::preprocess::{MAX_TOKENS, tokens};
 
 #[path = "../tests/corpus/mod.rs"]
@@ -74,5 +76,31 @@ fn fingerprint(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, stages, fingerprint);
+/// The corpus through `add` and through the cache.
+fn cached(c: &mut Criterion) {
+    let lines = corpus::load();
+    let mut g = c.benchmark_group("cached");
+    g.throughput(Throughput::Elements(lines.len() as u64));
+    g.sample_size(10);
+    g.bench_function("add", |b| {
+        b.iter(|| {
+            let mut d = Drain::new(DrainConfig::default());
+            for l in &lines {
+                black_box(d.add(&l.service, &l.body, l.ts_ns, l.sev));
+            }
+        })
+    });
+    g.bench_function("add_fingerprinted", |b| {
+        b.iter(|| {
+            let mut d = Drain::new(DrainConfig::default());
+            for l in &lines {
+                let fp = fingerprint_body(l.body.as_bytes(), true);
+                black_box(d.add_fingerprinted(&l.service, &l.body, fp, l.ts_ns, l.sev));
+            }
+        })
+    });
+    g.finish();
+}
+
+criterion_group!(benches, stages, fingerprint, cached);
 criterion_main!(benches);

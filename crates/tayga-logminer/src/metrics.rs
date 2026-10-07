@@ -7,6 +7,7 @@ use prometheus_client::registry::Registry;
 use std::sync::atomic::AtomicU64;
 use tayga_common::metrics::KindLabel;
 use tayga_drain::detect::AlertKind;
+use tayga_drain::drain::{Assignment, CacheReset, Lookup};
 
 /// `reason` label on `spike_skipped` (`coverage`) and `new_suppressed` (`pre_epoch_match`).
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -20,6 +21,12 @@ impl ReasonLabel {
             reason: reason.to_string(),
         }
     }
+}
+
+/// `backend` label on `fingerprinter`: `off`, `scalar`, `parallel` or `gpu`.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct BackendLabel {
+    pub backend: String,
 }
 
 /// `reason` of a new-template candidate suppressed because a pre-epoch template would have
@@ -53,6 +60,17 @@ pub struct LogminerMetrics {
     pub seasonal_failures: Counter,
     /// New-template candidates not alerted, by reason.
     pub new_suppressed: Family<ReasonLabel, Counter>,
+    /// Lines assigned from the fingerprint cache (sub-project 4 spec §3.7).
+    pub fingerprint_cache_hits: Counter,
+    /// Lines through the Drain tree: cache misses, collisions and lines without a fingerprint.
+    pub fingerprint_cache_misses: Counter,
+    pub fingerprint_collisions: Counter,
+    /// Service caches emptied, by reason (`generalised`, `full`).
+    pub fingerprint_cache_resets: Family<ReasonLabel, Counter>,
+    /// Wall time of mining one Kafka record's logs.
+    pub mine_batch_seconds: Histogram,
+    /// 1 for the backend in use.
+    pub fingerprinter: Family<BackendLabel, Gauge>,
 }
 
 impl Default for LogminerMetrics {
@@ -74,6 +92,13 @@ impl Default for LogminerMetrics {
             spike_skipped: Family::default(),
             seasonal_failures: Counter::default(),
             new_suppressed: Family::default(),
+            fingerprint_cache_hits: Counter::default(),
+            fingerprint_cache_misses: Counter::default(),
+            fingerprint_collisions: Counter::default(),
+            fingerprint_cache_resets: Family::default(),
+            // 1 µs .. ~262 ms.
+            mine_batch_seconds: Histogram::new(exponential_buckets(1e-6, 4.0, 10)),
+            fingerprinter: Family::default(),
         }
     }
 }
@@ -157,6 +182,43 @@ impl LogminerMetrics {
              split out of a template that existed before the masking epoch)",
             m.new_suppressed.clone(),
         );
+        registry.register(
+            "tayga_logminer_fingerprint_cache_hits",
+            "Log lines assigned from the fingerprint cache, without the Drain tree",
+            m.fingerprint_cache_hits.clone(),
+        );
+        registry.register(
+            "tayga_logminer_fingerprint_cache_misses",
+            "Log lines assigned by the Drain tree (cache miss, collision or no fingerprint)",
+            m.fingerprint_cache_misses.clone(),
+        );
+        registry.register(
+            "tayga_logminer_fingerprint_collisions",
+            "Fingerprint keys found in the cache with a different check hash",
+            m.fingerprint_collisions.clone(),
+        );
+        registry.register(
+            "tayga_logminer_fingerprint_cache_resets",
+            "Service fingerprint caches emptied, by reason (generalised: a template generalised; \
+             full: the cache held its maximum)",
+            m.fingerprint_cache_resets.clone(),
+        );
+        registry.register(
+            "tayga_logminer_mine_batch_seconds",
+            "Wall time of mining the logs of one Kafka record",
+            m.mine_batch_seconds.clone(),
+        );
+        registry.register(
+            "tayga_logminer_fingerprinter",
+            "The fingerprint backend in use (1), by backend",
+            m.fingerprinter.clone(),
+        );
+        for r in [CacheReset::Generalised, CacheReset::Full] {
+            drop(
+                m.fingerprint_cache_resets
+                    .get_or_create(&ReasonLabel::new(r.as_str())),
+            );
+        }
         drop(m.spike_skipped.get_or_create(&ReasonLabel::new("coverage")));
         drop(
             m.new_suppressed
@@ -167,6 +229,29 @@ impl LogminerMetrics {
             drop(m.alerts.get_or_create(&KindLabel::new(kind.as_str())));
         }
         m
+    }
+}
+
+impl LogminerMetrics {
+    /// Counts how one line found its template.
+    pub fn record_lookup(&self, a: &Assignment) {
+        match a.lookup {
+            Lookup::Hit => {
+                self.fingerprint_cache_hits.inc();
+            }
+            Lookup::Collision => {
+                self.fingerprint_collisions.inc();
+                self.fingerprint_cache_misses.inc();
+            }
+            Lookup::Miss | Lookup::Unfingerprinted => {
+                self.fingerprint_cache_misses.inc();
+            }
+        }
+        if let Some(r) = a.reset {
+            self.fingerprint_cache_resets
+                .get_or_create(&ReasonLabel::new(r.as_str()))
+                .inc();
+        }
     }
 }
 
@@ -207,6 +292,48 @@ mod tests {
             "tayga_logminer_seasonal_failures_total 0",
             "tayga_logminer_spike_skipped_total{reason=\"coverage\"} 1",
             "tayga_logminer_new_suppressed_total{reason=\"pre_epoch_match\"} 0",
+            "tayga_logminer_fingerprint_cache_hits_total 0",
+            "tayga_logminer_fingerprint_cache_misses_total 0",
+            "tayga_logminer_fingerprint_collisions_total 0",
+            "tayga_logminer_fingerprint_cache_resets_total{reason=\"generalised\"} 0",
+            "tayga_logminer_fingerprint_cache_resets_total{reason=\"full\"} 0",
+            "# TYPE tayga_logminer_mine_batch_seconds histogram",
+        ] {
+            assert!(out.contains(line), "missing {line:?} in\n{out}");
+        }
+    }
+
+    #[test]
+    fn lookups_are_counted_by_outcome() {
+        let mut registry = Registry::default();
+        let m = LogminerMetrics::register(&mut registry);
+        let a = |lookup, reset| Assignment {
+            template_id: 1,
+            created: false,
+            overflow: false,
+            lookup,
+            reset,
+        };
+        m.record_lookup(&a(Lookup::Hit, None));
+        m.record_lookup(&a(Lookup::Hit, None));
+        m.record_lookup(&a(Lookup::Miss, Some(CacheReset::Generalised)));
+        m.record_lookup(&a(Lookup::Collision, Some(CacheReset::Full)));
+        m.record_lookup(&a(Lookup::Unfingerprinted, None));
+        m.fingerprinter
+            .get_or_create(&BackendLabel {
+                backend: "scalar".into(),
+            })
+            .set(1);
+        m.mine_batch_seconds.observe(0.000_002);
+        let out = tayga_common::metrics::render(&registry);
+        for line in [
+            "tayga_logminer_fingerprint_cache_hits_total 2",
+            "tayga_logminer_fingerprint_cache_misses_total 3",
+            "tayga_logminer_fingerprint_collisions_total 1",
+            "tayga_logminer_fingerprint_cache_resets_total{reason=\"generalised\"} 1",
+            "tayga_logminer_fingerprint_cache_resets_total{reason=\"full\"} 1",
+            "tayga_logminer_fingerprinter{backend=\"scalar\"} 1",
+            "tayga_logminer_mine_batch_seconds_bucket{le=\"0.000004\"} 1",
         ] {
             assert!(out.contains(line), "missing {line:?} in\n{out}");
         }

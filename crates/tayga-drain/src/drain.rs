@@ -3,6 +3,7 @@
 //! Kept HTTP status codes ([`is_protected`]) are the exception: they match only themselves, so a
 //! `200` line and a `503` line never share a template and a status is never generalised.
 
+use crate::fingerprint::Fingerprint;
 use crate::preprocess::{WILDCARD, is_protected, tokens};
 use std::collections::{HashMap, HashSet};
 use tayga_analysis::fingerprint::fingerprint;
@@ -49,11 +50,48 @@ impl Cluster {
     }
 }
 
+/// How a line found its template (sub-project 4 spec §3.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lookup {
+    /// From the service's cache: no tokenising, no tree walk.
+    Hit,
+    /// Fingerprinted, not cached: assigned by the tree, then cached.
+    Miss,
+    /// The key was cached with another check: assigned by the tree, the entry replaced.
+    Collision,
+    /// No fingerprint (`add`, a non-ASCII body, the `off` backend): assigned by the tree.
+    Unfingerprinted,
+}
+
+/// Why a service's cache was emptied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheReset {
+    /// A template of the service generalised: a cached line may now match an earlier one.
+    Generalised,
+    /// The cache held [`CACHE_MAX_PER_SERVICE`] entries.
+    Full,
+}
+
+impl CacheReset {
+    /// The `reason` label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Generalised => "generalised",
+            Self::Full => "full",
+        }
+    }
+}
+
+/// Most cached sequences per service; a full cache is emptied before the next insert.
+pub const CACHE_MAX_PER_SERVICE: usize = 10_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Assignment {
     pub template_id: u64,
     pub created: bool,
     pub overflow: bool,
+    pub lookup: Lookup,
+    pub reset: Option<CacheReset>,
 }
 
 /// Stable id of a cluster: hash of its service and its *initial* template.
@@ -72,6 +110,8 @@ struct ServiceTree {
     by_len: HashMap<usize, Node>,
     clusters: usize,
     overflow: Option<usize>,
+    /// Fingerprint key -> (check, cluster index) of sequences already assigned (spec sp4 §3.4).
+    cache: HashMap<u64, (u64, usize)>,
 }
 
 pub struct Drain {
@@ -131,6 +171,10 @@ impl Drain {
         }
     }
 
+    pub fn config(&self) -> &DrainConfig {
+        &self.cfg
+    }
+
     pub fn len(&self) -> usize {
         self.clusters.len()
     }
@@ -187,6 +231,69 @@ impl Drain {
     }
 
     pub fn add(&mut self, service: &str, body: &str, ts_ns: i64, severity: u8) -> Assignment {
+        self.add_fingerprinted(service, body, None, ts_ns, severity)
+    }
+
+    /// [`Drain::add`] with the service's cache in front when `fp` is given. Returns the
+    /// template, `created` and `overflow` that `add` returns (spec sp4 §3.4 has the argument,
+    /// `tests/differential.rs` the check).
+    pub fn add_fingerprinted(
+        &mut self,
+        service: &str,
+        body: &str,
+        fp: Option<Fingerprint>,
+        ts_ns: i64,
+        severity: u8,
+    ) -> Assignment {
+        let cached = fp.and_then(|fp| {
+            let tree = self.trees.get(service)?;
+            let &(check, idx) = tree.cache.get(&fp.key)?;
+            Some((check == fp.check, idx, tree.overflow == Some(idx)))
+        });
+        if let Some((true, idx, overflow)) = cached {
+            return Assignment {
+                template_id: self.record(idx, ts_ns, severity),
+                created: false,
+                overflow,
+                lookup: Lookup::Hit,
+                reset: None,
+            };
+        }
+        let lookup = match (fp, cached) {
+            (None, _) => Lookup::Unfingerprinted,
+            (Some(_), Some(_)) => Lookup::Collision,
+            (Some(_), None) => Lookup::Miss,
+        };
+        let (idx, created, overflow, generalised) = self.assign(service, body, ts_ns);
+        let template_id = self.record(idx, ts_ns, severity);
+        let tree = self
+            .trees
+            .get_mut(service)
+            .expect("assign creates the tree");
+        let mut reset = None;
+        if generalised && !tree.cache.is_empty() {
+            tree.cache.clear();
+            reset = Some(CacheReset::Generalised);
+        }
+        if let Some(fp) = fp {
+            if tree.cache.len() >= CACHE_MAX_PER_SERVICE {
+                tree.cache.clear();
+                reset = Some(CacheReset::Full);
+            }
+            tree.cache.insert(fp.key, (fp.check, idx));
+        }
+        Assignment {
+            template_id,
+            created,
+            overflow,
+            lookup,
+            reset,
+        }
+    }
+
+    /// The tree path of `add`: the cluster index, whether it was created, whether it is the
+    /// overflow cluster, and whether the merge generalised a template token.
+    fn assign(&mut self, service: &str, body: &str, ts_ns: i64) -> (usize, bool, bool, bool) {
         let toks = tokens(body, self.cfg.keep_http_status);
         let cfg = self.cfg.clone();
         let tree = self.trees.entry(service.to_string()).or_default();
@@ -200,20 +307,21 @@ impl Drain {
                 best = Some((i, s));
             }
         }
-        let (idx, created, overflow) = match best {
+        match best {
             Some((i, s)) if s >= cfg.sim_threshold => {
                 // Protected positions are equal here (`similarity` rejects a mismatch), so only
-                // ordinary tokens are generalised.
-                let c = &mut self.clusters[i];
-                for (t, m) in c.tokens.iter_mut().zip(&toks) {
-                    if t != m {
+                // ordinary tokens are generalised. A token already `<*>` is no change.
+                let mut generalised = false;
+                for (t, m) in self.clusters[i].tokens.iter_mut().zip(&toks) {
+                    if t != m && t != WILDCARD {
                         *t = WILDCARD.to_string();
+                        generalised = true;
                     }
                 }
-                (i, false, false)
+                (i, false, false, generalised)
             }
             _ if tree.clusters >= cfg.max_clusters_per_service => match tree.overflow {
-                Some(i) => (i, false, true),
+                Some(i) => (i, false, true, false),
                 None => {
                     let c = Cluster {
                         id: template_id(service, OVERFLOW),
@@ -227,7 +335,7 @@ impl Drain {
                     };
                     let i = self.push_cluster(c);
                     self.trees.get_mut(service).expect("tree exists").overflow = Some(i);
-                    (i, true, true)
+                    (i, true, true, false)
                 }
             },
             _ => {
@@ -245,20 +353,20 @@ impl Drain {
                 let tree = self.trees.get_mut(service).expect("tree exists");
                 tree.clusters += 1;
                 Self::leaf(tree, &cfg, &toks).clusters.push(i);
-                (i, true, false)
+                (i, true, false, false)
             }
-        };
+        }
+    }
+
+    /// Counts one line for cluster `idx` and marks it dirty; returns its id.
+    fn record(&mut self, idx: usize, ts_ns: i64, severity: u8) -> u64 {
         let c = &mut self.clusters[idx];
         c.count += 1;
         c.first_seen_ns = c.first_seen_ns.min(ts_ns);
         c.last_seen_ns = c.last_seen_ns.max(ts_ns);
         c.max_severity = c.max_severity.max(severity);
         self.dirty.insert(c.id);
-        Assignment {
-            template_id: c.id,
-            created,
-            overflow,
-        }
+        c.id
     }
 
     /// True when `template_tokens` (a template of `service` that contains kept status codes) would
@@ -317,6 +425,8 @@ impl Drain {
         self.by_id.insert(c.id, idx);
         self.clusters.push(c);
         let tree = self.trees.entry(service).or_default();
+        // A restored cluster may sit before cached ones in a leaf.
+        tree.cache.clear();
         if is_overflow {
             tree.overflow = Some(idx);
         } else {
@@ -329,6 +439,7 @@ impl Drain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fingerprint::fingerprint_body;
 
     fn drain() -> Drain {
         Drain::new(DrainConfig::default())
@@ -795,5 +906,147 @@ mod tests {
         let err = r#"<*> "GET /api/cart <*> 503 UF <*> <*> <*> - "-" "python""#;
         assert_eq!(got[9], (7430681490948431569, ok.to_string()));
         assert_eq!(got[10], (template_id("svc", err), err.to_string()));
+    }
+
+    fn put(d: &mut Drain, service: &str, body: &str) -> Assignment {
+        let fp = crate::fingerprint::fingerprint_body(body.as_bytes(), true);
+        d.add_fingerprinted(service, body, fp, 0, 9)
+    }
+
+    #[test]
+    fn a_cached_line_counts_like_add() {
+        let mut d = drain();
+        let alice = "GetCart called with user alice";
+        let bob = "GetCart called with user bob";
+        let a = d.add_fingerprinted(
+            "cart",
+            alice,
+            fingerprint_body(alice.as_bytes(), true),
+            5,
+            9,
+        );
+        assert_eq!((a.lookup, a.created), (Lookup::Miss, true));
+        let b = d.add_fingerprinted("cart", bob, fingerprint_body(bob.as_bytes(), true), 3, 13);
+        assert_eq!(
+            (b.lookup, b.reset),
+            (Lookup::Miss, Some(CacheReset::Generalised))
+        );
+        let c = d.add_fingerprinted("cart", bob, fingerprint_body(bob.as_bytes(), true), 9, 1);
+        assert_eq!(
+            (c.lookup, c.template_id, c.created, c.overflow),
+            (Lookup::Hit, a.template_id, false, false)
+        );
+        let cl = d.cluster(a.template_id).unwrap();
+        assert_eq!(
+            (cl.count, cl.first_seen_ns, cl.last_seen_ns, cl.max_severity),
+            (3, 3, 9, 13)
+        );
+        assert_eq!(d.take_dirty().len(), 1);
+        assert_eq!(put(&mut d, "cart", bob).lookup, Lookup::Hit);
+        assert_eq!(d.take_dirty().len(), 1, "a hit marks its template dirty");
+        assert_eq!(d.add("cart", bob, 11, 1).lookup, Lookup::Unfingerprinted);
+    }
+
+    #[test]
+    fn generalisation_empties_only_that_services_cache() {
+        let mut d = drain();
+        put(&mut d, "a", "user logged in as alice");
+        put(&mut d, "b", "order placed");
+        assert_eq!(
+            put(&mut d, "a", "user logged in as alice").lookup,
+            Lookup::Hit
+        );
+        let g = put(&mut d, "a", "user logged in as bob");
+        assert_eq!(g.reset, Some(CacheReset::Generalised));
+        assert_eq!(CacheReset::Generalised.as_str(), "generalised");
+        assert_eq!(
+            put(&mut d, "a", "user logged in as alice").lookup,
+            Lookup::Miss,
+            "emptied"
+        );
+        assert_eq!(
+            put(&mut d, "b", "order placed").lookup,
+            Lookup::Hit,
+            "other services keep theirs"
+        );
+        // A merge that changes nothing (the position is `<*>` already) keeps the cache.
+        let same = put(&mut d, "a", "user logged in as carol");
+        assert_eq!((same.lookup, same.reset), (Lookup::Miss, None));
+        assert_eq!(
+            put(&mut d, "a", "user logged in as alice").lookup,
+            Lookup::Hit
+        );
+    }
+
+    #[test]
+    fn overflow_lines_hit_and_still_report_overflow() {
+        let mut d = Drain::new(DrainConfig {
+            max_clusters_per_service: 1,
+            ..DrainConfig::default()
+        });
+        put(&mut d, "svc", "one");
+        let o = put(&mut d, "svc", "two words");
+        assert!(o.overflow && o.created);
+        let h = put(&mut d, "svc", "two words");
+        assert_eq!(
+            (h.lookup, h.overflow, h.created, h.template_id),
+            (Lookup::Hit, true, false, o.template_id)
+        );
+    }
+
+    #[test]
+    fn a_collision_takes_the_tree_and_replaces_the_entry() {
+        let mut d = drain();
+        let k = |check| Some(Fingerprint { key: 7, check });
+        let a = d.add_fingerprinted("svc", "alpha beta", k(1), 0, 9);
+        let b = d.add_fingerprinted("svc", "gamma delta", k(2), 0, 9);
+        assert_eq!(b.lookup, Lookup::Collision);
+        assert_ne!(a.template_id, b.template_id);
+        assert_eq!(
+            d.add_fingerprinted("svc", "gamma delta", k(2), 0, 9).lookup,
+            Lookup::Hit
+        );
+        assert_eq!(
+            d.add_fingerprinted("svc", "alpha beta", k(1), 0, 9).lookup,
+            Lookup::Collision
+        );
+    }
+
+    #[test]
+    fn a_full_cache_is_emptied() {
+        let mut d = drain();
+        let key = |key| Some(Fingerprint { key, check: 0 });
+        for i in 0..CACHE_MAX_PER_SERVICE as u64 {
+            assert_eq!(
+                d.add_fingerprinted("svc", "same line", key(i), 0, 9).reset,
+                None
+            );
+        }
+        let full = d.add_fingerprinted("svc", "same line", key(u64::MAX), 0, 9);
+        assert_eq!(full.reset, Some(CacheReset::Full));
+        assert_eq!(CacheReset::Full.as_str(), "full");
+        assert_eq!(
+            d.add_fingerprinted("svc", "same line", key(0), 0, 9).lookup,
+            Lookup::Miss
+        );
+    }
+
+    #[test]
+    fn restore_empties_the_service_cache() {
+        let mut d = drain();
+        put(&mut d, "svc", "user logged in as alice");
+        assert_eq!(
+            put(&mut d, "svc", "user logged in as alice").lookup,
+            Lookup::Hit
+        );
+        let mut other = drain();
+        other.add("svc", "order placed", 0, 9);
+        for c in other.take_dirty() {
+            d.restore(c);
+        }
+        assert_eq!(
+            put(&mut d, "svc", "user logged in as alice").lookup,
+            Lookup::Miss
+        );
     }
 }

@@ -18,13 +18,15 @@ use tayga_drain::detect::{
     seasonal_decision, silence_alert, spike_baseline, template_coverage,
 };
 use tayga_drain::drain::DrainConfig;
+use tayga_drain::fingerprint::BatchFingerprinter;
 use tayga_drain::preprocess::masking_version;
 use tayga_kafka::KafkaSettings;
+use tayga_logminer::backend::Backend;
 use tayga_logminer::config::{
     DrainSettings, KEY_EPOCH_START, KEY_HEARTBEAT, KEY_MASKING_VERSION, KEY_WATERMARK, Watermarks,
     heartbeat_key, watermark_key,
 };
-use tayga_logminer::metrics::{LogminerMetrics, PRE_EPOCH_MATCH, ReasonLabel};
+use tayga_logminer::metrics::{BackendLabel, LogminerMetrics, PRE_EPOCH_MATCH, ReasonLabel};
 use tayga_logminer::miner::{Miner, alert_from_row, alert_json, alert_row};
 use tayga_logminer::ownership::Ownership;
 use tayga_model::envelope::{Envelope, HEADER_KIND, Kind};
@@ -81,6 +83,8 @@ struct LogminerSettings {
     baseline_mode: String,
     alerts_topic: String,
     metrics_addr: SocketAddr,
+    /// Fingerprint backend in front of Drain: `off`, `scalar`, `parallel` or `gpu`.
+    fingerprinter: String,
 }
 
 impl Default for LogminerSettings {
@@ -104,6 +108,7 @@ impl Default for LogminerSettings {
             baseline_mode: "flat".to_string(),
             alerts_topic: "tayga.alerts".to_string(),
             metrics_addr: SocketAddr::from(([0, 0, 0, 0], 9100)),
+            fingerprinter: "scalar".to_string(),
         }
     }
 }
@@ -127,7 +132,14 @@ impl LogminerSettings {
         self.baseline_mode
             .parse::<BaselineMode>()
             .map_err(|e| anyhow::anyhow!("logminer.baseline_mode: {e}"))?;
+        self.backend()?;
         Ok(())
+    }
+
+    fn backend(&self) -> anyhow::Result<Backend> {
+        self.fingerprinter
+            .parse()
+            .map_err(|e| anyhow::anyhow!("logminer.fingerprinter: {e}"))
     }
 
     fn drain_settings(&self) -> DrainSettings {
@@ -345,7 +357,14 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     tayga_common::metrics::spawn_server(cfg.metrics_addr, Arc::new(registry), stop_rx.clone())
         .await?;
 
-    let Some(miner) = load_miner(&store, cfg.drain(), &mut stop_rx).await else {
+    let (fingerprinter, backend) = cfg.backend()?.build();
+    metrics
+        .fingerprinter
+        .get_or_create(&BackendLabel {
+            backend: backend.to_string(),
+        })
+        .set(1);
+    let Some(miner) = load_miner(&store, cfg.drain(), fingerprinter, &mut stop_rx).await else {
         return Ok(());
     };
     let restored = miner.len();
@@ -430,6 +449,7 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
         restored,
         epoch_start,
         masking_version = current_version,
+        fingerprinter = backend,
         "tayga-logminer consuming"
     );
 
@@ -611,10 +631,11 @@ impl LoopState {
 async fn load_miner(
     store: &Store,
     drain: DrainConfig,
+    fingerprinter: Option<Arc<dyn BatchFingerprinter>>,
     stop: &mut watch::Receiver<bool>,
 ) -> Option<Miner> {
     let templates = retry_until("load templates", || store.load_templates(), stop).await?;
-    let mut miner = Miner::new(drain);
+    let mut miner = Miner::with_fingerprinter(drain, fingerprinter);
     miner.restore(templates);
     Some(miner)
 }
@@ -679,7 +700,8 @@ async fn on_rebalance(
     if !changes.iter().any(|c| matches!(c, Change::Assign(_))) {
         return Ok(true);
     }
-    let Some(miner) = load_miner(ctx.store, cfg.drain(), stop).await else {
+    let Some(miner) = load_miner(ctx.store, cfg.drain(), st.miner.fingerprinter(), stop).await
+    else {
         return Ok(false);
     };
     let Some(watermark) = load_watermark(ctx.store, &cfg.detect(), &assigned, stop).await else {
@@ -723,8 +745,15 @@ fn on_message(
     };
     let (_, logs) = rows_from_envelope(&env);
     let mined_at = now_ns();
-    for log in &logs {
-        let (hit, a) = miner.mine(log);
+    let started = Instant::now();
+    let mined = miner.mine_batch(&logs);
+    if !logs.is_empty() {
+        metrics
+            .mine_batch_seconds
+            .observe(started.elapsed().as_secs_f64());
+    }
+    for (hit, a) in mined {
+        metrics.record_lookup(&a);
         ownership.touch(&hit.service, mined_at);
         pending.record_ts(msg.partition(), hit.ts);
         pending.hits.push(hit);
@@ -1782,7 +1811,19 @@ mod tests {
         assert_eq!(s.detect(), DetectConfig::default());
         assert_eq!(s.detect().baseline_mode, BaselineMode::Flat);
         assert_eq!(s.drain(), DrainConfig::default());
+        assert_eq!(s.fingerprinter, "scalar");
         s.validate().unwrap();
+    }
+
+    #[test]
+    fn the_fingerprinter_setting_is_validated() {
+        let with = |f: &str| LogminerSettings {
+            fingerprinter: f.to_string(),
+            ..LogminerSettings::default()
+        };
+        assert!(with("off").validate().is_ok());
+        let e = with("simd").validate().unwrap_err().to_string();
+        assert!(e.contains("logminer.fingerprinter"), "{e}");
     }
 
     #[test]

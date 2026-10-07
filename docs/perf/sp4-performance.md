@@ -122,7 +122,26 @@ Median of `cargo bench -p tayga-drain --bench mining -- fingerprint`. Every ASCI
 
 ## Cache
 
-Filled by Task 3.
+The corpus through `Drain::add` and through `Drain::add_fingerprinted` with `fingerprint_body`. Each iteration starts with a fresh Drain, so the first sighting of every sequence is a miss. Times are criterion's point estimate, as in Benchmarks.
+
+| Bench | Elements | Time (estimate) | Throughput (estimate) |
+|---|---|---|---|
+| `cached/add` | 50,000 lines | 144.29 ms | 346.52 Kelem/s |
+| `cached/add_fingerprinted` | 50,000 lines | 20.678 ms | 2.4180 Melem/s |
+
+The cache makes mining **6.98×** faster (144.29 / 20.678). The spike measured 8.4× with the prototype crate on its main corpus (spec §2.5: 2.94 M against 352 k lines/s).
+
+**Hit rate.** `tests/differential.rs` asserts at least 95 % hits on the corpus under each of five Drain configurations. Measured: 49,716 of 50,000 lines (99.43 %) for the default, `max_clusters_per_service = 20` and `max_children = 2`; 49,715 (99.43 %) for `sim_threshold = 0.75`; 49,746 (99.49 %) for `keep_http_status = false`.
+
+**The differential test fails when invalidation is missing.** Mutations, each run with `cargo test -p tayga-drain` and then reverted:
+
+| Mutation | Failed test |
+|---|---|
+| No cache reset on generalisation (`if false && generalised …`) | `the_cache_assigns_exactly_like_drain_on_random_logs`, a `(Hit)` line with another template. Minimal case: six lines of `svc0`, `max_children = 1`, `cap = 2`, `keep = false`. Also `generalisation_empties_only_that_services_cache` |
+| A key match counts as a hit whatever its `check` | `colliding_keys_are_caught_by_the_check` |
+| `restore` keeps the service's cache | `restore_empties_the_service_cache` (unit test). The differential test does not catch this one: it restores before any line is cached |
+
+Reproduce: `cargo bench -p tayga-drain --bench mining -- cached` and `cargo test -p tayga-drain --test differential`.
 
 ## Hotspots before and after
 

@@ -62,7 +62,10 @@ services:
   tayga-logminer:
     image: tayga:dev
     command: ["tayga-logminer"]
-    environment: *tayga-env
+    environment:
+      <<: *tayga-env
+      # Sub-project 4: scalar fingerprint cache in front of Drain; LOGMINER_FINGERPRINTER=off disables it.
+      TAYGA__LOGMINER__FINGERPRINTER: ${LOGMINER_FINGERPRINTER:-scalar}
     restart: unless-stopped
     # Shutdown flushes pending work (bounded at 15 s), then runs one new-template pass bounded at 20 s.
     stop_grace_period: 40s
