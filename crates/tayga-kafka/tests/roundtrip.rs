@@ -41,10 +41,18 @@ async fn produce_consume_commit_roundtrip() {
 
     let c = consumer(&s, "tayga-it").unwrap();
     c.subscribe(&[&s.topic]).unwrap();
-    let m = tokio::time::timeout(Duration::from_secs(30), c.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    // A broker that has just started can answer the first fetches with a transient transport
+    // error; keep reading until the record arrives or the 30 s budget runs out.
+    let m = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match c.recv().await {
+                Ok(m) => break m,
+                Err(e) => eprintln!("transient consume error, retrying: {e}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(m.key(), Some(&key[..]));
     assert_eq!(m.payload(), Some(&b"hello"[..]));
     let got: Vec<(String, Vec<u8>)> = m
