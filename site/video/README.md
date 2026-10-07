@@ -25,8 +25,8 @@ Output: `site/public/media/tayga-tour.mp4`, `tayga-tour-poster.jpg` and `tayga-t
 | Voice | Matilda (`XrExE9yKIg1WjnnlVkGX`), an ElevenLabs premade voice: American English, "Knowledgable, Professional", labelled for informative and educational use |
 | Model | `eleven_v4`, the model ElevenLabs recommends for content creation and narration (checked in the ElevenLabs docs on 2026-10-07) |
 | Endpoint | `POST /v1/text-to-speech/{voice_id}/with-timestamps`, `output_format=mp3_44100_128`, `voice_settings.speed` 1.2 (the maximum; the documented range is 0.7 to 1.2), with `previous_text` and `next_text` for continuity between segments |
-| Tempo | ffmpeg `atempo=1.1` on each generated MP3 (pitch unchanged), alignment scaled to match. `eleven_v4` barely reacts to `speed`: on 2026-10-07 the same sentence came out at 9.28 s with 0.7 and 9.52 s with 1.2, and the whole narration at 1.2 was only 1 % shorter than at 1.05. |
-| Result | Narration 194.6 s (segments 1 to 9: 185.7 s, against 205.8 s at speed 1.05 and no tempo, 10 % shorter); video 3:41 (221.2 s), 27.9 MB |
+| Tempo | ffmpeg `atempo=1.14` on each generated MP3 (pitch unchanged), alignment scaled to match, so the narration runs 1.15× as fast as the earlier render at speed 1.05. `eleven_v4` barely reacts to `speed`: on 2026-10-07 the same sentence came out at 9.28 s with 0.7 and 9.52 s with 1.2, and the whole narration at 1.2 was only 1 % shorter than at 1.05. |
+| Result | Narration 187.8 s (segments 1 to 9: 179.2 s, against 205.8 s at speed 1.05 and no tempo: 1.15× as fast); video 3:34 (214.3 s), 27.9 MB, -16.3 LUFS. A speech-to-text pass (ElevenLabs `scribe_v2`) returned every word of the script. |
 
 Override with `TAYGA_VOICE_ID`, `TAYGA_TTS_MODEL`, `TAYGA_TTS_SPEED` and `TAYGA_TTS_TEMPO`. `tts.ts`
 only calls the API for segments whose text, voice, model or speed changed (or those named in
@@ -60,7 +60,7 @@ After a new narration of the same text (another speed or tempo), the clips need 
 again: `cd site && ONLY=01,03,04 node video/retime.ts && node video/assemble.ts`. `retime.ts`
 scales each clip's narration span by one rate to the new duration (a word-by-word map follows
 the alignment's jitter and makes the picture lurch); the lead-in, the tail and segment 3's
-time-lapse are kept. With the 2026-10-07 narration every cue stayed within 0.4 s of its words.
+time-lapse are kept. With the 2026-10-07 narration every cue stayed within 0.35 s of its words.
 A clip whose card or text changed has to be filmed again.
 
 Segment 3 turns on `paymentFailure`, films the Stories page until Tayga writes the story (the

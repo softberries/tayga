@@ -20,7 +20,7 @@ import { AUDIO, segments } from './segments.ts';
 export const VOICE_ID = process.env.TAYGA_VOICE_ID ?? 'XrExE9yKIg1WjnnlVkGX'; // Matilda
 export const MODEL_ID = process.env.TAYGA_TTS_MODEL ?? 'eleven_v4';
 export const SPEED = Number(process.env.TAYGA_TTS_SPEED ?? '1.2');
-export const TEMPO = Number(process.env.TAYGA_TTS_TEMPO ?? '1.1');
+export const TEMPO = Number(process.env.TAYGA_TTS_TEMPO ?? '1.14');
 
 const KEY = process.env.ELEVENLABS_API_KEY;
 const ONLY = (process.env.ONLY ?? '').split(',').map((s) => s.trim()).filter(Boolean);
