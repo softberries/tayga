@@ -4,7 +4,7 @@ use clickhouse::{Client, RowOwned, RowWrite};
 
 /// Slow stories are looked up over the baseline window plus this slack, so a trace near the
 /// window edge whose story landed slightly earlier is still excluded.
-const SLOW_STORY_LOOKBACK_SLACK_MIN: u32 = 10;
+pub const SLOW_STORY_LOOKBACK_SLACK_MIN: u32 = 10;
 
 #[derive(Clone)]
 pub struct Store {
@@ -117,6 +117,12 @@ pub struct EndpointCaps {
 /// table instead (`ORDER BY trace_id`, so the filter prunes nothing): 8.8 M rows and 478 MiB per
 /// `endpoint_stats` against 0.39 M rows and 21 MiB (sub-project 4 spec §2.7). `with_ops`
 /// carries `op_durations`, which only `op_stats` reads.
+///
+/// Two edges differ from `FINAL` (spec §3.8):
+/// - on a `span_count` tie `argMax` takes any of the tied rows, `FINAL` the last inserted; tied
+///   rows are replays of the same trace, so they are equal;
+/// - the `ts` filter runs before the dedup, so a trace whose newer version lies outside the
+///   window is still counted, by its version inside it (`FINAL` dropped it).
 fn baseline_with(with_ops: bool) -> String {
     let (ops_in, ops_out) = if with_ops {
         (", op_durations", ", tupleElement(v, 5) AS op_durations")

@@ -316,7 +316,8 @@ pub const DEFAULT_TRACE_LIMIT: u32 = 100;
 pub const HEALTH_ERROR_RATIO: f64 = 0.05;
 /// A node is `slow` when its p99 in the window exceeds this multiple of its baseline p99.
 pub const HEALTH_SLOW_FACTOR: f64 = 2.0;
-/// The baseline p99 is taken over this many seconds (24h) before the window end's minute, in its own query cached per minute (sub-project 4 spec §3.8).
+/// The baseline p99 is taken over this many seconds (24h) before the window end's minute, in its
+/// own query cached per minute (sub-project 4 spec §3.8).
 pub const HEALTH_BASELINE_SECS: u32 = 24 * 3600;
 
 /// End of the health baseline of a map window ending at `end` (unix seconds): the minute floor,

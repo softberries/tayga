@@ -730,7 +730,7 @@ impl ServiceView {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NodeRow {
     pub service: String,
     pub calls: u64,

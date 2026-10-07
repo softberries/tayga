@@ -269,10 +269,15 @@ impl ChRepo {
             .await?;
         let p99: Arc<HashMap<String, f64>> =
             Arc::new(rows.into_iter().map(|r| (r.service, r.p99_ns)).collect());
-        *self.health.lock().unwrap_or_else(PoisonError::into_inner) = Some(HealthBaseline {
-            end,
-            p99_ns: Arc::clone(&p99),
-        });
+        let mut slot = self.health.lock().unwrap_or_else(PoisonError::into_inner);
+        // Never replace a newer baseline with an older one: a past-window request (or a slow
+        // query finishing after a newer one) must not evict the live minute's entry.
+        if slot.as_ref().is_none_or(|b| end >= b.end) {
+            *slot = Some(HealthBaseline {
+                end,
+                p99_ns: Arc::clone(&p99),
+            });
+        }
         Ok(p99)
     }
 
@@ -927,21 +932,29 @@ impl Repo for ChRepo {
     }
 
     async fn service_graph(&self, window: Window) -> anyhow::Result<ServiceMapView> {
-        let edges = self.service_map(window).await?;
-        let rows: Vec<NodeWindowRow> = self
-            .client
-            .query(
-                "SELECT toString(service_name) AS service, count() AS calls, \
-                 countIf(status_code = 'error') AS errors, quantile(0.99)(duration_ns) AS p99_ns \
-                 FROM spans WHERE kind IN ('server', 'consumer') \
-                 AND start_ts >= toDateTime(?) AND start_ts < toDateTime(?) \
-                 GROUP BY service ORDER BY service LIMIT 500",
-            )
-            .bind(window.start)
-            .bind(window.end)
-            .fetch_all()
-            .await?;
-        let baseline = self.health_baseline(window.end).await?;
+        let window_rows = async {
+            let rows: Vec<NodeWindowRow> = self
+                .client
+                .query(
+                    "SELECT toString(service_name) AS service, count() AS calls, \
+                     countIf(status_code = 'error') AS errors, quantile(0.99)(duration_ns) AS p99_ns \
+                     FROM spans WHERE kind IN ('server', 'consumer') \
+                     AND start_ts >= toDateTime(?) AND start_ts < toDateTime(?) \
+                     GROUP BY service ORDER BY service LIMIT 500",
+                )
+                .bind(window.start)
+                .bind(window.end)
+                .fetch_all()
+                .await?;
+            anyhow::Ok(rows)
+        };
+        // The three queries run concurrently. A failed baseline query caches nothing; when another
+        // query fails first, `try_join!` drops the baseline future, which may or may not have cached.
+        let (edges, rows, baseline) = tokio::try_join!(
+            self.service_map(window),
+            window_rows,
+            self.health_baseline(window.end)
+        )?;
         Ok(ServiceMapView {
             edges,
             nodes: rows
@@ -1023,6 +1036,22 @@ mod tests {
         assert_eq!(health_baseline_end(1_791_310_363), 1_791_310_320);
         assert_eq!(health_baseline_end(1_791_310_320), 1_791_310_320);
         assert_eq!(health_baseline_end(1_791_310_379), 1_791_310_320);
+    }
+
+    #[tokio::test]
+    async fn a_failed_health_baseline_caches_nothing() {
+        let s = ClickHouseSettings {
+            url: "http://127.0.0.1:1".into(),
+            database: "tayga".into(),
+        };
+        let repo = ChRepo::new(&s);
+        assert!(repo.health_baseline(1_791_310_363).await.is_err());
+        assert!(
+            repo.health
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_none()
+        );
     }
 
     #[test]

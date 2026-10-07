@@ -1,7 +1,7 @@
 use tayga_store::ClickHouseSettings;
 use tayga_store::migrate::migrate;
 use tayga_store::rows::{LogRow, SpanRow};
-use tayga_store::store::{EndpointCaps, Store};
+use tayga_store::store::{EndpointCaps, SLOW_STORY_LOOKBACK_SLACK_MIN, Store};
 
 fn settings() -> ClickHouseSettings {
     let url =
@@ -525,7 +525,7 @@ async fn final_baselines(
             .query(sql)
             .bind(&caps.keys)
             .bind(&caps.caps_ns)
-            .bind(window + 10)
+            .bind(window + SLOW_STORY_LOOKBACK_SLACK_MIN)
             .bind(window)
             .bind(window)
     };
