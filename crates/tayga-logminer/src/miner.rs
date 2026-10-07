@@ -1,8 +1,10 @@
 //! Drain state plus the conversions between Drain/alert types and storage rows. Pure: no I/O.
 
 use serde_json::{Value, json};
+use std::sync::Arc;
 use tayga_drain::detect::{Alert, AlertKind};
 use tayga_drain::drain::{Assignment, Cluster, Drain, DrainConfig};
+use tayga_drain::fingerprint::{BatchFingerprinter, BodyBatch, Fingerprint, ScalarFingerprinter};
 use tayga_store::logs::{LogAlertRow, LogHitRow, LogTemplateRow};
 use tayga_store::rows::LogRow;
 
@@ -13,13 +15,34 @@ const KIND_SILENCE: i8 = 3;
 
 pub struct Miner {
     drain: Drain,
+    /// `None`: no cache, every line through the tree (`logminer.fingerprinter = "off"`).
+    fingerprinter: Option<Arc<dyn BatchFingerprinter>>,
+    /// Reused per batch.
+    batch: BodyBatch,
+    fingerprints: Vec<Option<Fingerprint>>,
 }
 
 impl Miner {
+    /// A miner with the scalar fingerprint cache (`remine`, tests).
     pub fn new(cfg: DrainConfig) -> Self {
+        Self::with_fingerprinter(cfg, Some(Arc::new(ScalarFingerprinter)))
+    }
+
+    pub fn with_fingerprinter(
+        cfg: DrainConfig,
+        fingerprinter: Option<Arc<dyn BatchFingerprinter>>,
+    ) -> Self {
         Self {
             drain: Drain::new(cfg),
+            fingerprinter,
+            batch: BodyBatch::new(),
+            fingerprints: Vec::new(),
         }
+    }
+
+    /// The backend, for the miner that replaces this one after a rebalance.
+    pub fn fingerprinter(&self) -> Option<Arc<dyn BatchFingerprinter>> {
+        self.fingerprinter.clone()
     }
 
     /// Restores persisted templates in ascending `first_seen` (then id) order, so leaf and
@@ -32,19 +55,50 @@ impl Miner {
     }
 
     pub fn mine(&mut self, log: &LogRow) -> (LogHitRow, Assignment) {
-        let a = self
-            .drain
-            .add(&log.service_name, &log.body, log.ts, log.severity_number);
-        let hit = LogHitRow {
-            log_id: log.log_id,
-            template_id: a.template_id,
-            service: log.service_name.clone(),
-            ts: log.ts,
-            severity_number: log.severity_number,
-            trace_id: log.trace_id.clone(),
-            span_id: log.span_id.clone(),
-        };
-        (hit, a)
+        self.mine_batch(std::slice::from_ref(log))
+            .pop()
+            .expect("one log, one hit")
+    }
+
+    /// Mines `logs` in order, fingerprinting their bodies as one batch first. A body that would
+    /// push the batch past `u32::MAX` bytes, and every body after it, goes without a fingerprint.
+    pub fn mine_batch(&mut self, logs: &[LogRow]) -> Vec<(LogHitRow, Assignment)> {
+        self.fingerprints.clear();
+        if let Some(f) = &self.fingerprinter {
+            self.batch.clear();
+            for log in logs {
+                if !self.batch.push(&log.body) {
+                    break;
+                }
+            }
+            let keep = self.drain.config().keep_http_status;
+            f.fingerprint(&self.batch, keep, &mut self.fingerprints);
+            debug_assert_eq!(
+                self.fingerprints.len(),
+                self.batch.len(),
+                "{}: one fingerprint per body",
+                f.name()
+            );
+        }
+        self.assign_batch(logs)
+    }
+
+    /// Assigns `logs` with `self.fingerprints` in order; a line past its end has no fingerprint
+    /// and takes the Drain tree (an oversized batch, or a backend that returned too few).
+    fn assign_batch(&mut self, logs: &[LogRow]) -> Vec<(LogHitRow, Assignment)> {
+        let mut out = Vec::with_capacity(logs.len());
+        for (i, log) in logs.iter().enumerate() {
+            let fp = self.fingerprints.get(i).copied().flatten();
+            let a = self.drain.add_fingerprinted(
+                &log.service_name,
+                &log.body,
+                fp,
+                log.ts,
+                log.severity_number,
+            );
+            out.push((hit_row(log, a.template_id), a));
+        }
+        out
     }
 
     /// Templates created or changed since the last call, versioned with `now_ns`.
@@ -83,6 +137,18 @@ impl Miner {
 
     pub fn is_empty(&self) -> bool {
         self.drain.is_empty()
+    }
+}
+
+fn hit_row(log: &LogRow, template_id: u64) -> LogHitRow {
+    LogHitRow {
+        log_id: log.log_id,
+        template_id,
+        service: log.service_name.clone(),
+        ts: log.ts,
+        severity_number: log.severity_number,
+        trace_id: log.trace_id.clone(),
+        span_id: log.span_id.clone(),
     }
 }
 
@@ -189,6 +255,7 @@ pub fn alert_json(a: &Alert) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tayga_drain::drain::Lookup;
 
     fn log(log_id: u64, body: &str, trace_id: &str) -> LogRow {
         LogRow {
@@ -415,5 +482,122 @@ mod tests {
         let mut bad = row;
         bad.kind = 0;
         assert_eq!(alert_from_row(&bad), None);
+    }
+
+    #[test]
+    fn a_batch_mines_like_one_log_at_a_time() {
+        let bodies = [
+            "Payment failed for order 1234",
+            "Payment failed for order 9876",
+            "Connection refused by upstream",
+            "Payment failed for order 5555",
+            "zażółć 7",
+        ];
+        let logs: Vec<LogRow> = bodies
+            .iter()
+            .enumerate()
+            .map(|(i, b)| log(i as u64, b, "t1"))
+            .collect();
+        let mut one = Miner::with_fingerprinter(DrainConfig::default(), None);
+        let singles: Vec<_> = logs.iter().map(|l| one.mine(l)).collect();
+        let mut batched = Miner::new(DrainConfig::default());
+        let batch = batched.mine_batch(&logs);
+        assert_eq!(batch.len(), singles.len());
+        for ((h1, a1), (h2, a2)) in singles.iter().zip(&batch) {
+            assert_eq!(h1, h2);
+            assert_eq!(
+                (a1.template_id, a1.created, a1.overflow),
+                (a2.template_id, a2.created, a2.overflow)
+            );
+        }
+        assert_eq!(
+            batch[3].1.lookup,
+            Lookup::Hit,
+            "same masked sequence as log 1"
+        );
+        assert_eq!(batch[4].1.lookup, Lookup::Unfingerprinted, "non-ASCII");
+        assert!(
+            singles
+                .iter()
+                .all(|(_, a)| a.lookup == Lookup::Unfingerprinted)
+        );
+        let sorted = |mut v: Vec<LogTemplateRow>| {
+            v.sort_by_key(|r| r.template_id);
+            v
+        };
+        assert_eq!(
+            sorted(one.dirty_templates(1)),
+            sorted(batched.dirty_templates(1))
+        );
+    }
+
+    /// A faulty backend: fingerprints only the first body of a batch.
+    struct FirstOnly;
+
+    impl BatchFingerprinter for FirstOnly {
+        fn name(&self) -> &'static str {
+            "first-only"
+        }
+
+        fn fingerprint(&self, batch: &BodyBatch, keep: bool, out: &mut Vec<Option<Fingerprint>>) {
+            ScalarFingerprinter.fingerprint(batch, keep, out);
+            out.truncate(1);
+        }
+    }
+
+    fn payment_logs() -> Vec<LogRow> {
+        [
+            "Payment failed for order 1234",
+            "Payment failed for order 9876",
+            "Payment failed for order 5555",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, b)| log(i as u64, b, "t1"))
+        .collect()
+    }
+
+    /// Release path of a backend that returns fewer entries than bodies: the lines past its
+    /// output take the Drain tree and are assigned as without a cache.
+    #[test]
+    fn lines_past_a_short_backend_output_take_the_tree() {
+        let logs = payment_logs();
+        let mut plain = Miner::with_fingerprinter(DrainConfig::default(), None);
+        let expected = plain.mine_batch(&logs);
+        let mut short =
+            Miner::with_fingerprinter(DrainConfig::default(), Some(Arc::new(FirstOnly)));
+        // `fingerprint_batch` without its alignment assert, which `mine_batch` would trip.
+        short.batch.clear();
+        for l in &logs {
+            assert!(short.batch.push(&l.body));
+        }
+        FirstOnly.fingerprint(&short.batch, true, &mut short.fingerprints);
+        assert_eq!(short.fingerprints.len(), 1);
+        let got = short.assign_batch(&logs);
+        assert_eq!(got.len(), expected.len());
+        for ((h1, a1), (h2, a2)) in expected.iter().zip(&got) {
+            assert_eq!(h1, h2);
+            assert_eq!(
+                (a1.template_id, a1.created, a1.overflow),
+                (a2.template_id, a2.created, a2.overflow)
+            );
+        }
+        let lookups: Vec<Lookup> = got.iter().map(|(_, a)| a.lookup).collect();
+        assert_eq!(
+            lookups,
+            [
+                Lookup::Miss,
+                Lookup::Unfingerprinted,
+                Lookup::Unfingerprinted
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "one fingerprint per body")]
+    fn a_short_backend_output_trips_the_debug_assert() {
+        let mut m = Miner::with_fingerprinter(DrainConfig::default(), Some(Arc::new(FirstOnly)));
+        m.mine_batch(&payment_logs());
     }
 }

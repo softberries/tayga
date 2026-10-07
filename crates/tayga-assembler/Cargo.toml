@@ -18,3 +18,11 @@ tayga-model.workspace = true
 tayga-store.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+flate2.workspace = true
+
+[[bench]]
+name = "close"
+harness = false

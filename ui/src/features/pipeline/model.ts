@@ -96,6 +96,28 @@ export const CHARTS: readonly ChartSpec[] = [
     series: [{ name: 'logs', metric: 'tayga_logminer_logs_mined_total', kind: 'rate', job: 'tayga-logminer', tone: 'accent' }],
   },
   {
+    id: 'fingerprint-cache',
+    title: 'Logminer fingerprint cache',
+    unit: 'log lines per second assigned from the cache (hits) or through Drain (misses)',
+    format: perSec,
+    minInterval: 0,
+    series: [
+      { name: 'hits', metric: 'tayga_logminer_fingerprint_cache_hits_total', kind: 'rate', job: 'tayga-logminer', tone: 'accent' },
+      { name: 'misses', metric: 'tayga_logminer_fingerprint_cache_misses_total', kind: 'rate', job: 'tayga-logminer', tone: 'slow' },
+    ],
+  },
+  {
+    id: 'mine-batch',
+    title: 'Logminer batch time',
+    unit: 'seconds to mine one Kafka record, p50 and p99',
+    format: seconds,
+    minInterval: 0,
+    series: [
+      { name: 'p50', metric: 'tayga_logminer_mine_batch_seconds', kind: 'q50', job: 'tayga-logminer', tone: 'accent' },
+      { name: 'p99', metric: 'tayga_logminer_mine_batch_seconds', kind: 'q99', job: 'tayga-logminer', tone: 'slow' },
+    ],
+  },
+  {
     id: 'open-traces',
     title: 'Open traces',
     unit: 'traces the assembler is still holding',

@@ -1806,3 +1806,54 @@ async fn overview_data_lag_is_the_slowest_replica() {
     assert_eq!(newest_tick.unwrap().data_lag_secs, Some(7.5));
     assert_eq!(per_replica.unwrap().data_lag_secs, Some(12.0));
 }
+
+/// The map's 24 h health baseline is computed once per window-end minute; the window's own
+/// counts never come from the cache (sub-project 4 spec §3.8).
+#[tokio::test]
+#[ignore = "requires ClickHouse: make it, or TAYGA_IT_CLICKHOUSE against the live stack"]
+async fn the_map_baseline_is_cached_per_minute_and_the_window_is_not() {
+    let s = settings();
+    migrate(&s).await.unwrap();
+    let store = Store::new(&s);
+    let r = ChRepo::new(&s);
+    let sec = 1_000_000_000_i64;
+    let minute = now_ns() / sec / 60 * 60;
+    let at = |offset_secs: i64| (minute + offset_secs) * sec;
+    // Baseline: 100 spans of 1 ms an hour ago; one of 10 ms two minutes ago, also in the window.
+    let mut spans: Vec<SpanRow> = (0..100)
+        .map(|_| rspan("basesvc", 2, at(-3_600), 1, false))
+        .collect();
+    spans.push(rspan("basesvc", 2, at(-120), 10, false));
+    store.insert_spans(&spans).await.unwrap();
+    let window = |end: i64| Window {
+        start: end - 900,
+        end,
+        live: false,
+    };
+    let node = |g: anyhow::Result<tayga_api::model::ServiceMapView>| {
+        g.ok().and_then(|g| {
+            g.nodes
+                .iter()
+                .find(|n| n.service == "basesvc")
+                .map(|n| (n.calls, n.baseline_p99_ns))
+        })
+    };
+    let first = node(r.service_graph(window(minute - 30)).await);
+    // 101 slow spans in the baseline and one more in the window.
+    let mut more: Vec<SpanRow> = (0..101)
+        .map(|_| rspan("basesvc", 2, at(-3_000), 10, false))
+        .collect();
+    more.push(rspan("basesvc", 2, at(-100), 10, false));
+    store.insert_spans(&more).await.unwrap();
+    // Same minute floor: the cached baseline, a fresh window.
+    let cached = node(r.service_graph(window(minute - 5)).await);
+    // The next minute recomputes it with the slow spans.
+    let next = node(r.service_graph(window(minute + 1)).await);
+    drop_database(&s).await;
+
+    let (calls, first) = first.expect("basesvc node");
+    assert_eq!(calls, 1);
+    assert_eq!(cached, Some((2, first)));
+    let (_, next) = next.expect("basesvc node");
+    assert!(next > first, "{next} > {first}");
+}

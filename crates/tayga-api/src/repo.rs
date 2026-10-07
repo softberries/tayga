@@ -3,13 +3,15 @@
 use crate::model::*;
 use crate::params::{
     AlertFilter, GroupFilter, HEALTH_BASELINE_SECS, SeriesQuery, TemplateFilter, TraceFilter,
-    Window,
+    Window, health_baseline_end, now_ms,
 };
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::sync::{Arc, Mutex, PoisonError};
 use tayga_store::ClickHouseSettings;
 use tayga_store::metrics_store::MetricPointRow;
 use tayga_store::store::Store;
+use tokio::sync::OnceCell;
 
 pub trait Repo: Send + Sync + 'static {
     fn story_groups(
@@ -180,6 +182,54 @@ const GROUP_COLUMNS: &str = "toString(fingerprint) AS fingerprint, toString(any(
 pub struct ChRepo {
     client: clickhouse::Client,
     store: Store,
+    /// The live minute's health baseline, single-flight (sub-project 4 spec §3.8).
+    health: HealthCache,
+}
+
+/// Per-service p99 over `[end - HEALTH_BASELINE_SECS, end)`.
+type Baseline = Arc<HashMap<String, f64>>;
+
+/// One health baseline, by its end, behind a single-flight cell: concurrent requests for the
+/// same end run one query and share its result (sub-project 4 spec §3.8).
+///
+/// The std mutex is held only to pick or install the cell, never across an `.await` (spec §6).
+/// The query runs inside the caller's future, not a spawned task, so the request timeout still
+/// bounds it; if that future is dropped (client gone, timeout, `try_join!` failure), the cell
+/// releases its permit and the next waiter runs the query. An `Err` stores nothing, and the
+/// caller whose query failed gets the original error (so a ClickHouse timeout still maps to 504).
+#[derive(Default)]
+struct HealthCache {
+    slot: Mutex<Option<(i64, Arc<OnceCell<Baseline>>)>>,
+}
+
+impl HealthCache {
+    /// The baseline ending at `end`, loading it with `load` unless the slot's cell for `end`
+    /// already holds it or another caller is loading it.
+    /// - The slot's end: share its cell.
+    /// - A newer end, or an empty slot: install a new cell (the slot only moves forward).
+    /// - An older end (a past window): a local cell, never installed, so the live minute stays.
+    async fn get<F, Fut>(&self, end: i64, load: F) -> anyhow::Result<Baseline>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = anyhow::Result<HashMap<String, f64>>>,
+    {
+        let cell = {
+            let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+            match slot.as_ref() {
+                Some((e, cell)) if *e == end => Arc::clone(cell),
+                Some((e, _)) if *e > end => Arc::new(OnceCell::new()),
+                _ => {
+                    let cell = Arc::new(OnceCell::new());
+                    *slot = Some((end, Arc::clone(&cell)));
+                    cell
+                }
+            }
+        };
+        let p99 = cell
+            .get_or_try_init(|| async { load().await.map(Arc::new) })
+            .await?;
+        Ok(Arc::clone(p99))
+    }
 }
 
 /// Search results per kind (⌘K).
@@ -210,6 +260,7 @@ impl ChRepo {
                 .with_url(&s.url)
                 .with_database(&s.database),
             store: Store::new(s),
+            health: HealthCache::default(),
         }
     }
 
@@ -225,7 +276,33 @@ impl ChRepo {
                 .client
                 .with_setting("max_execution_time", value.as_str()),
             store: self.store.with_setting("max_execution_time", &value),
+            health: self.health,
         }
+    }
+
+    /// The map's health baseline for a window ending at `window_end`: per service, the p99 of
+    /// the server and consumer spans of the `HEALTH_BASELINE_SECS` before the minute floor of the
+    /// earlier of the end and now. Kept for that minute and computed once per minute however many
+    /// requests ask at once (sub-project 4 spec §3.8). A failed query caches nothing.
+    async fn health_baseline(&self, window_end: i64) -> anyhow::Result<Baseline> {
+        let end = health_baseline_end(window_end, now_ms().div_euclid(1000));
+        self.health
+            .get(end, || async {
+                let rows: Vec<BaselineRow> = self
+                    .client
+                    .query(
+                        "SELECT toString(service_name) AS service, quantile(0.99)(duration_ns) AS p99_ns \
+                         FROM spans WHERE kind IN ('server', 'consumer') \
+                         AND start_ts >= toDateTime(?) AND start_ts < toDateTime(?) \
+                         GROUP BY service",
+                    )
+                    .bind(end - i64::from(HEALTH_BASELINE_SECS))
+                    .bind(end)
+                    .fetch_all()
+                    .await?;
+                Ok(rows.into_iter().map(|r| (r.service, r.p99_ns)).collect())
+            })
+            .await
     }
 
     /// Stories per bucket and kind under a group filter.
@@ -879,34 +956,44 @@ impl Repo for ChRepo {
     }
 
     async fn service_graph(&self, window: Window) -> anyhow::Result<ServiceMapView> {
-        let edges = self.service_map(window).await?;
-        // The window and the 24h baseline before its end in one scan over the longer of the two.
-        let baseline_start = window.end - i64::from(HEALTH_BASELINE_SECS);
-        let rows: Vec<NodeRow> = self
-            .client
-            .query(
-                "SELECT toString(service_name) AS service, \
-                 countIf(start_ts >= toDateTime(?)) AS calls, \
-                 countIf(start_ts >= toDateTime(?) AND status_code = 'error') AS errors, \
-                 quantileIf(0.99)(duration_ns, start_ts >= toDateTime(?)) AS p99_ns, \
-                 quantileIf(0.99)(duration_ns, start_ts >= toDateTime(?)) AS baseline_p99_ns \
-                 FROM spans WHERE kind IN ('server', 'consumer') \
-                 AND start_ts >= toDateTime(?) AND start_ts < toDateTime(?) \
-                 GROUP BY service HAVING calls > 0 ORDER BY service LIMIT 500",
-            )
-            .bind(window.start)
-            .bind(window.start)
-            .bind(window.start)
-            .bind(baseline_start)
-            .bind(window.start.min(baseline_start))
-            .bind(window.end)
-            .fetch_all()
-            .await?;
+        let window_rows = async {
+            let rows: Vec<NodeWindowRow> = self
+                .client
+                .query(
+                    "SELECT toString(service_name) AS service, count() AS calls, \
+                     countIf(status_code = 'error') AS errors, quantile(0.99)(duration_ns) AS p99_ns \
+                     FROM spans WHERE kind IN ('server', 'consumer') \
+                     AND start_ts >= toDateTime(?) AND start_ts < toDateTime(?) \
+                     GROUP BY service ORDER BY service LIMIT 500",
+                )
+                .bind(window.start)
+                .bind(window.end)
+                .fetch_all()
+                .await?;
+            anyhow::Ok(rows)
+        };
+        // The three queries run concurrently. A failed baseline query caches nothing; when another
+        // query fails first, `try_join!` drops the baseline future, and a waiter on the same
+        // minute (if any) runs the baseline query instead.
+        let (edges, rows, baseline) = tokio::try_join!(
+            self.service_map(window),
+            window_rows,
+            self.health_baseline(window.end)
+        )?;
         Ok(ServiceMapView {
             edges,
             nodes: rows
                 .into_iter()
-                .map(|r| NodeView::from_row(r, window.secs()))
+                .map(|r| {
+                    let row = NodeRow {
+                        baseline_p99_ns: baseline.get(&r.service).copied().unwrap_or(0.0),
+                        service: r.service,
+                        calls: r.calls,
+                        errors: r.errors,
+                        p99_ns: r.p99_ns,
+                    };
+                    NodeView::from_row(row, window.secs())
+                })
                 .collect(),
         })
     }
@@ -968,6 +1055,153 @@ impl Repo for ChRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_health_baseline_ends_at_the_minute_floor() {
+        let now = 1_791_310_400;
+        assert_eq!(health_baseline_end(1_791_310_363, now), 1_791_310_320);
+        assert_eq!(health_baseline_end(1_791_310_320, now), 1_791_310_320);
+        assert_eq!(health_baseline_end(1_791_310_379, now), 1_791_310_320);
+    }
+
+    #[test]
+    fn a_window_ending_ahead_of_now_keys_the_current_minute() {
+        // `until` may run up to 60 s ahead; its minute must not key next minute's baseline.
+        let now = 1_791_310_363;
+        assert_eq!(health_baseline_end(now + 30, now), 1_791_310_320);
+        assert_eq!(health_baseline_end(now + 60, now), 1_791_310_320);
+        assert_eq!(health_baseline_end(now, now), 1_791_310_320);
+    }
+
+    #[tokio::test]
+    async fn a_failed_health_baseline_caches_nothing() {
+        let s = ClickHouseSettings {
+            url: "http://127.0.0.1:1".into(),
+            database: "tayga".into(),
+        };
+        let repo = ChRepo::new(&s);
+        assert!(repo.health_baseline(1_791_310_363).await.is_err());
+        let slot = repo
+            .health
+            .slot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        assert!(slot.as_ref().is_none_or(|(_, cell)| !cell.initialized()));
+    }
+
+    mod health_cache {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        const END: i64 = 1_791_310_320;
+        const QUERY: Duration = Duration::from_secs(5);
+
+        type Load =
+            std::pin::Pin<Box<dyn Future<Output = anyhow::Result<HashMap<String, f64>>> + Send>>;
+
+        /// A loader that counts its runs and takes `QUERY` to answer `{"svc": end}`.
+        fn loader(loads: &Arc<AtomicUsize>, end: i64) -> impl FnOnce() -> Load + Send + 'static {
+            let loads = Arc::clone(loads);
+            move || {
+                Box::pin(async move {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(QUERY).await;
+                    Ok(HashMap::from([("svc".to_string(), end as f64)]))
+                })
+            }
+        }
+
+        fn slot_end(cache: &HealthCache) -> Option<i64> {
+            cache
+                .slot
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .map(|(e, _)| *e)
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn concurrent_calls_for_one_end_load_once() {
+            let cache = HealthCache::default();
+            let loads = Arc::new(AtomicUsize::new(0));
+            let (a, b, c) = tokio::join!(
+                cache.get(END, loader(&loads, END)),
+                cache.get(END, loader(&loads, END)),
+                cache.get(END, loader(&loads, END)),
+            );
+            let (a, b, c) = (a.unwrap(), b.unwrap(), c.unwrap());
+            assert_eq!(loads.load(Ordering::SeqCst), 1);
+            assert!(Arc::ptr_eq(&a, &b) && Arc::ptr_eq(&b, &c));
+            assert_eq!(a.get("svc"), Some(&(END as f64)));
+            // Later calls in the minute reuse it.
+            cache.get(END, loader(&loads, END)).await.unwrap();
+            assert_eq!(loads.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_failed_load_caches_nothing_and_keeps_the_error() {
+            let cache = HealthCache::default();
+            let loads = Arc::new(AtomicUsize::new(0));
+            let failing = {
+                let loads = Arc::clone(&loads);
+                move || async move {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(QUERY).await;
+                    Err(anyhow::Error::new(std::io::Error::other("boom")))
+                }
+            };
+            let err = cache.get(END, failing).await.unwrap_err();
+            // The original error, so the route's timeout downcast still works.
+            assert!(err.downcast_ref::<std::io::Error>().is_some());
+            assert_eq!(loads.load(Ordering::SeqCst), 1);
+            cache.get(END, loader(&loads, END)).await.unwrap();
+            assert_eq!(loads.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn an_aborted_leader_lets_a_waiter_load() {
+            let cache = Arc::new(HealthCache::default());
+            let loads = Arc::new(AtomicUsize::new(0));
+            let leader = tokio::spawn({
+                let (cache, load) = (Arc::clone(&cache), loader(&loads, END));
+                async move { cache.get(END, load).await }
+            });
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            let waiter = tokio::spawn({
+                let (cache, load) = (Arc::clone(&cache), loader(&loads, END));
+                async move { cache.get(END, load).await }
+            });
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            assert_eq!(loads.load(Ordering::SeqCst), 1, "the waiter waits");
+            leader.abort();
+            assert!(leader.await.unwrap_err().is_cancelled());
+            let p99 = waiter.await.unwrap().unwrap();
+            assert_eq!(p99.get("svc"), Some(&(END as f64)));
+            assert_eq!(loads.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn an_older_end_never_replaces_the_slot_and_a_newer_one_does() {
+            let cache = HealthCache::default();
+            let loads = Arc::new(AtomicUsize::new(0));
+            cache.get(END, loader(&loads, END)).await.unwrap();
+            assert_eq!(slot_end(&cache), Some(END));
+
+            let older = cache.get(END - 60, loader(&loads, END - 60)).await.unwrap();
+            assert_eq!(older.get("svc"), Some(&((END - 60) as f64)));
+            assert_eq!(loads.load(Ordering::SeqCst), 2);
+            assert_eq!(slot_end(&cache), Some(END));
+            cache.get(END, loader(&loads, END)).await.unwrap();
+            assert_eq!(loads.load(Ordering::SeqCst), 2, "the live minute stayed");
+
+            cache.get(END + 60, loader(&loads, END + 60)).await.unwrap();
+            assert_eq!(loads.load(Ordering::SeqCst), 3);
+            assert_eq!(slot_end(&cache), Some(END + 60));
+            cache.get(END + 60, loader(&loads, END + 60)).await.unwrap();
+            assert_eq!(loads.load(Ordering::SeqCst), 3);
+        }
+    }
 
     #[test]
     fn max_execution_time_is_sent_with_every_query_unless_zero() {

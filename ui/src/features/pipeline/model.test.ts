@@ -69,6 +69,13 @@ describe('labels', () => {
 })
 
 describe('chart specs', () => {
+  it('charts the fingerprint cache and the logminer batch time', () => {
+    const cache = CHARTS.find((c) => c.id === 'fingerprint-cache')
+    expect(cache?.series.map((s) => s.metric)).toEqual(['tayga_logminer_fingerprint_cache_hits_total', 'tayga_logminer_fingerprint_cache_misses_total'])
+    expect(CHARTS.find((c) => c.id === 'mine-batch')?.series.map((s) => s.kind)).toEqual(['q50', 'q99'])
+    expect(CHARTS).toHaveLength(12)
+  })
+
   it('query only valid metric names and k=v labels', () => {
     for (const c of CHARTS) {
       for (const s of c.series) {

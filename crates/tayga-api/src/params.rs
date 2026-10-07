@@ -316,8 +316,18 @@ pub const DEFAULT_TRACE_LIMIT: u32 = 100;
 pub const HEALTH_ERROR_RATIO: f64 = 0.05;
 /// A node is `slow` when its p99 in the window exceeds this multiple of its baseline p99.
 pub const HEALTH_SLOW_FACTOR: f64 = 2.0;
-/// The baseline p99 is taken over this many seconds (24h), in the same query as the window.
+/// The baseline p99 is taken over this many seconds (24h) before the window end's minute, in its
+/// own query cached per minute (sub-project 4 spec §3.8).
 pub const HEALTH_BASELINE_SECS: u32 = 24 * 3600;
+
+/// End of the health baseline of a map window ending at `window_end`, at `now` (both unix
+/// seconds): the minute floor of the earlier of the two, so every refresh within a minute shares
+/// one cached baseline, and a window ending up to `MAX_UNTIL_AHEAD_SECS` ahead never keys (and
+/// caches) next minute's baseline before its data exists (sub-project 4 spec §3.8).
+pub fn health_baseline_end(window_end: i64, now: i64) -> i64 {
+    let end = window_end.min(now);
+    end - end.rem_euclid(60)
+}
 
 /// Node health from its window error ratio and p99 against the baseline p99 (`ok`, `slow` or
 /// `error`; `error` wins). A zero baseline never reads as slow.

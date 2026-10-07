@@ -730,13 +730,30 @@ impl ServiceView {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NodeRow {
     pub service: String,
     pub calls: u64,
     pub errors: u64,
     pub p99_ns: f64,
     pub baseline_p99_ns: f64,
+}
+
+/// A service's RED over its server and consumer spans in the map window, before the health
+/// baseline is joined.
+#[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
+pub struct NodeWindowRow {
+    pub service: String,
+    pub calls: u64,
+    pub errors: u64,
+    pub p99_ns: f64,
+}
+
+/// A service's p99 over the health baseline (`params::HEALTH_BASELINE_SECS`).
+#[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
+pub struct BaselineRow {
+    pub service: String,
+    pub p99_ns: f64,
 }
 
 /// A service-map node: RED over its server and consumer spans in the window.
