@@ -3,3 +3,6 @@
 .env.local
 /fixtures/*.tmp
 .superpowers/
+
+# Internal strategy document, never commit
+docs/Product_Strategy.docx
