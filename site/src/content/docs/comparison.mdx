@@ -1,5 +1,6 @@
 ---
 title: "Comparison"
+tableOfContents: false
 description: "How Tayga compares with Jaeger, the Grafana stack, SigNoz, Coroot, OpenObserve, ClickStack, Datadog, Dynatrace and New Relic, with a source for every cell."
 ---
 
@@ -22,6 +23,8 @@ Every competitor fact comes from a primary source: the vendor's docs, pricing pa
 
 "S" = analysis while data streams in (at ingest). "Q" = analysis at query time.
 
+<div class="tg-wide tg-matrix">
+
 | Product | Analysis | Automatic RCA / error explanation | LLM in RCA? | Log template mining | Self-host | License | Pricing model | Instrumentation |
 |---|---|---|---|---|---|---|---|---|
 | **Tayga** | S [^t1] | Yes, per request: error and slow stories [^t2] | No, deterministic rules [^t3] | Yes: Drain at ingest, with new/spike/silence alerts [^t4] | Yes: Docker Compose and Helm (see [Install](/tayga/install/docker-compose/)) [^t5] | AGPL-3.0-only [^t6] | Free core; enterprise on request [^t7] | OTel (OTLP) [^t8] |
@@ -31,9 +34,11 @@ Every competitor fact comes from a primary source: the vendor's docs, pricing pa
 | Coroot | Logs S on the node; RCA per investigation [^c1] | Yes: AI-powered RCA [^c2] | Hybrid: non-LLM analysis, then an LLM summary [^c3] | Yes, on the node agent [^c4] | Yes [^c5] | Apache-2.0 [^c6] | Per CPU core (Enterprise) [^c7] | eBPF plus OTel [^c8] |
 | OpenObserve | Q [^o1] | SRE Agent (Enterprise) [^o2] | Yes (LLM providers) [^o3] | Yes, Log Patterns (Enterprise) [^o4] | Yes [^o5] | AGPL-3.0 [^o6] | Per GB ingested and queried [^o7] | OTel [^o8] |
 | ClickStack / HyperDX | Q [^k1] | Not stated (AI Notebooks beta, MCP server) [^k2] | AI Notebooks (prompts) [^k3] | Yes: Drain3, query time, sampled [^k4] | Yes [^k5] | MIT (HyperDX), Apache-2.0 (ClickHouse) [^k6] | Managed: compute plus storage [^k7] | OTel [^k8] |
-| Datadog | Logs: Watchdog at intake; otherwise not stated [^d1][^d9] | Watchdog RCA (needs APM); Bits AI [^d2] | Bits AI is an AI agent; Watchdog's method is not stated [^d3] | Yes: Patterns, Q, 10,000 samples [^d4]; Watchdog Log Anomaly Detection at intake, with new-pattern and spike alerts (Watchdog logs monitor) [^d9] | Not stated [^d5] | Proprietary [^d6] | Per host, per GB, per indexed event [^d7] | Agent or OTel [^d8] |
+| Datadog | Logs: Watchdog at intake; otherwise not stated [^d1], [^d9] | Watchdog RCA (needs APM); Bits AI [^d2] | Bits AI is an AI agent; Watchdog's method is not stated [^d3] | Yes: Patterns, Q, 10,000 samples [^d4]; Watchdog Log Anomaly Detection at intake, with new-pattern and spike alerts (Watchdog logs monitor) [^d9] | Not stated [^d5] | Proprietary [^d6] | Per host, per GB, per indexed event [^d7] | Agent or OTel [^d8] |
 | Dynatrace | Not stated [^y1] | Causal AI RCA [^y2] | RCA page: no LLM mentioned; a separate GenAI assistant [^y3] | Yes, Q (Preview) [^y4] | Yes (Managed) [^y5] | Proprietary [^y6] | Platform subscription; per host-hour, per GiB [^y7] | OneAgent or OTel [^y8] |
 | New Relic | Not stated [^n1] | Autopilot [^n2] | Yes (GenAI terms) [^n3] | Yes: ML model per account; NRQL and anomaly alerts on patterns [^n4] | Not stated [^n5] | Proprietary [^n6] | Per GB plus per user, or compute [^n7] | APM agents or OTel [^n8] |
+
+</div>
 
 ## Where Tayga is the better fit
 

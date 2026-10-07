@@ -73,7 +73,7 @@
 	--sl-color-accent: #3d8bdb;
 	--sl-color-accent-high: #7cc4ff;
 
-	--sl-color-bg-nav: rgba(10, 16, 32, 0.82);
+	--sl-color-bg-nav: rgba(10, 16, 32, 0.95);
 	--sl-color-bg-sidebar: #080d1a;
 	--sl-color-bg-inline-code: #132038;
 	--sl-color-hairline-light: #1c2944;
@@ -143,7 +143,7 @@
 	--sl-color-accent: #1c69c7;
 	--sl-color-accent-high: #134f99;
 
-	--sl-color-bg-nav: rgba(255, 255, 255, 0.85);
+	--sl-color-bg-nav: rgba(255, 255, 255, 0.95);
 	--sl-color-bg-sidebar: #f7f9fc;
 	--sl-color-bg-inline-code: #eaf0f8;
 	--sl-color-hairline-light: #e1e7f0;
@@ -250,6 +250,9 @@ h1#_top:not(.tg-hero__title) {
 	-webkit-background-clip: text;
 	background-clip: text;
 	color: transparent;
+	/* Each wrapped line gets the whole gradient, so a word does not fade out across a line break. */
+	-webkit-box-decoration-break: clone;
+	box-decoration-break: clone;
 }
 
 /* Links in content: accent with a soft underline. */
@@ -280,11 +283,72 @@ h1#_top:not(.tg-hero__title) {
 	/* Starlight makes tables blocks; scroll a wide one inside its rounded panel instead of clipping it. */
 	overflow-x: auto;
 }
-/* On narrow screens long identifiers in cells (env vars, ids) may break, so tables stay readable. */
+/*
+ * Scroll affordance for every wide table: a soft shadow at an edge while there is more to scroll
+ * that way. The "local" covers move with the content and hide the "scroll" shadows at the ends.
+ */
+.sl-markdown-content table:not(:where(.not-content *)) {
+	--tg-table-bg: var(--sl-color-bg);
+	/* Dark theme: a pale glow reads better than a shadow on the near-black ground. */
+	--tg-table-shade: rgba(124, 196, 255, 0.22);
+	background:
+		linear-gradient(to right, var(--tg-table-bg) 30%, transparent) left center / 2.5rem 100% no-repeat local,
+		linear-gradient(to left, var(--tg-table-bg) 30%, transparent) right center / 2.5rem 100% no-repeat local,
+		radial-gradient(farthest-side at 0 50%, var(--tg-table-shade), transparent) left center / 1.25rem 100% no-repeat scroll,
+		radial-gradient(farthest-side at 100% 50%, var(--tg-table-shade), transparent) right center / 1.25rem 100% no-repeat scroll;
+	background-color: var(--tg-table-bg);
+}
+:root[data-theme='light'] .sl-markdown-content table:not(:where(.not-content *)) {
+	--tg-table-shade: rgba(14, 26, 46, 0.28);
+}
+/*
+ * On narrow screens a table scrolls sideways rather than breaking identifiers mid-token: the first
+ * column (setting names, env vars, routes) never wraps inside a code span, and the last column
+ * keeps a readable width.
+ */
 @media (max-width: 50rem) {
-	.sl-markdown-content td code:not(:where(.not-content *)) {
-		overflow-wrap: anywhere;
+	.sl-markdown-content td:first-child code:not(:where(.not-content *)) {
+		white-space: nowrap;
 	}
+	.sl-markdown-content td:last-child:not(:where(.not-content *)):not(:first-child) {
+		min-width: 15rem;
+	}
+}
+
+/*
+ * Wide pages (the comparison matrix): the matrix uses the full width beside the sidebar while the
+ * prose keeps its reading measure, and the product column stays put while the rest scrolls.
+ */
+:root:has(.tg-wide) {
+	--sl-content-width: 80rem;
+}
+:root:has(.tg-wide) .sl-markdown-content > :not(.tg-wide),
+:root:has(.tg-wide) .content-panel:first-of-type .sl-container > * {
+	max-width: 47rem;
+}
+.sl-markdown-content .tg-matrix table:not(:where(.not-content *)) {
+	font-size: 0.8125rem;
+}
+.sl-markdown-content .tg-matrix :is(th, td):first-child:not(:where(.not-content *)) {
+	position: sticky;
+	left: 0;
+	z-index: 1;
+	min-width: 8.5rem;
+	background: var(--sl-color-bg);
+	box-shadow: 1px 0 0 var(--sl-color-hairline-light), 6px 0 10px -6px var(--tg-table-shade);
+}
+.sl-markdown-content .tg-matrix th:first-child:not(:where(.not-content *)) {
+	background: var(--sl-color-gray-6);
+}
+:root[data-theme='light'] .sl-markdown-content .tg-matrix th:first-child:not(:where(.not-content *)) {
+	background: var(--sl-color-gray-7);
+}
+.sl-markdown-content .tg-matrix :is(th, td):not(:first-child):not(:where(.not-content *)) {
+	min-width: 6.5rem;
+}
+.sl-markdown-content .tg-matrix :is(th, td):not(:where(.not-content *)),
+.sl-markdown-content .tg-matrix :is(th, td):is(:first-child, :last-child):not(:where(.not-content *)) {
+	padding: 0.6rem 0.7rem;
 }
 .sl-markdown-content :is(th, td):not(:where(.not-content *)) {
 	border-bottom: 1px solid var(--sl-color-hairline-light);
