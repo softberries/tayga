@@ -192,6 +192,7 @@ Issues and pull requests are welcome on [GitHub](https://github.com/softberries/
 
 - Build and test with the commands in [From source](https://softberries.github.io/tayga/install/from-source/#developer-commands): `cargo test --workspace` for the unit tests, `make it` for the integration tests, and `make up` plus `make e2e` for the end-to-end scenarios against the OpenTelemetry demo.
 - CI runs `cargo fmt --check`, `cargo clippy -D warnings`, the tests, and the web app's lint, typecheck and unit tests on every pull request.
+- **Releases.** The go-live and release checklist is in [`.github/RELEASING.md`](.github/RELEASING.md).
 - **Contributor License Agreement.** Because Tayga is offered under the AGPLv3 and under a commercial license, contributions may require you to sign a CLA. See [LICENSING.md](LICENSING.md).
 
 ## License
