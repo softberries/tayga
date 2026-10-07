@@ -1,0 +1,79 @@
+---
+title: "Sign-in"
+description: "The sign-in page and the user menu, when authentication is turned on."
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Screenshot from '../../../components/Screenshot.astro';
+
+The sign-in page answers **"who may see this Tayga?"** It appears only when your operator has turned authentication on. Tayga has one account, set in its configuration; there are no roles. With authentication off, which is the default, there is no sign-in and `/login` just opens the Stories page.
+
+To turn it on, see [Authentication](/tayga/operations/authentication/).
+
+<Screenshot name="login" eager caption="The sign-in page." />
+
+## Signing in
+
+<Steps>
+
+1. Open any Tayga page. Without a session, you are sent to `/login`, and the page remembers where you were going.
+
+2. Enter the **Username** (the field has focus already) and the **Password**.
+
+3. Select **Sign in** or press <kbd>Enter</kbd>. The button says "Signing in…" while it waits.
+
+4. Tayga opens the page you were going to, or the Stories page.
+
+</Steps>
+
+The page has no rail or header, only the form and a [theme switch](/tayga/guide/theme/) in the top right corner.
+
+## When sign-in fails
+
+<Screenshot name="login-error" caption="The form after a wrong username or password." />
+
+The form shows the reason in red under the fields, clears the password and puts the cursor back in it; the username stays. The card shakes briefly, unless your system asks for reduced motion.
+
+| Message | Meaning |
+|---|---|
+| Wrong username or password. | The credentials do not match. |
+| Too many attempts, try again in N s | Too many failed attempts from your address: Tayga allows 5 failed attempts per 5 minutes, then waits. |
+| Cannot reach Tayga. Check the connection and try again. | The browser could not reach the API. |
+| Sign-in failed (HTTP N). Try again. | Any other error from the API. |
+
+## Your session
+
+A session lasts 12 hours by default; your operator can change that with `auth.session_ttl`. When it expires, or is revoked, the next request sends you to the sign-in page, and back to the same page after you sign in again. If you open `/login` while you are signed in, you go straight on.
+
+## The user menu
+
+With authentication on, the header ends with a chip showing your username (only the icon on a phone). Select it to open the menu:
+
+- **Signed in as** your username;
+- **Sign out**: ends the session and opens the sign-in page. If it fails, the menu says "Couldn't sign out, try again" and you stay signed in.
+
+The [command palette](/tayga/guide/command-palette/) has the same **Sign out** action.
+
+<Aside type="note">
+No screenshot of the user menu is included yet: the screenshot stack runs with authentication off.
+</Aside>
+
+## URL parameters
+
+| Parameter | Values | Meaning |
+|---|---|---|
+| `next` | a path on the same Tayga, such as `/map?service=payment` | Where to go after signing in. Anything that is not a path on the same site is ignored, and you land on the Stories page. |
+
+## Tips
+
+- Bookmark pages as usual: when your session has expired, the bookmark goes through the sign-in page and then to the page itself.
+- Use a password manager: the fields are marked as username and current password, so it can fill them in.
+
+## Related
+
+- [Authentication](/tayga/operations/authentication/)
+- [Error stories](/tayga/concepts/error-stories/)
+- [Root cause and critical path](/tayga/concepts/root-cause-critical-path/)
+- [Baselines](/tayga/concepts/baselines/)
+- [Log templates](/tayga/concepts/log-templates/)
+- [Log alerts](/tayga/concepts/log-alerts/)

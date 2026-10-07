@@ -1,0 +1,98 @@
+---
+title: "Command palette and keyboard shortcuts"
+description: "Jump to any page, service, trace, story group or template with ⌘K or Ctrl+K, and the keyboard shortcuts."
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Screenshot from '../../../components/Screenshot.astro';
+
+The command palette answers **"how do I get there fast?"** Type part of a service name, a story summary, a log line or a trace id, and jump straight to it. It also switches the theme and the time range. Keyboard shortcuts take you to each section without the mouse.
+
+## Opening the palette
+
+Press <kbd>⌘</kbd>+<kbd>K</kbd> or <kbd>Ctrl</kbd>+<kbd>K</kbd> on any page (either works on every system), or select the search field in the header, "Jump to service, trace id, template…". Press the shortcut again or <kbd>Esc</kbd> to close it.
+
+<Screenshot name="palette-open" eager caption="The command palette open over the Stories page." />
+
+## Before you type
+
+<Screenshot name="palette" caption="The palette with an empty query." />
+
+- **Search input** (1): type here; up to 200 characters.
+- **Recent**: the last items you opened from the palette (pages, services, story groups, templates and traces), newest first, up to 10. They are kept in your browser.
+- **Pages** (2): **Stories**, **Traces**, **Service map**, **Log alerts**, **Log templates** and **Pipeline health**, with their keyboard shortcut.
+- **Actions** (3):
+  - **Theme: Light**, **Theme: Dark**, **Theme: System**;
+  - **Time range: 15m**, **1h**, **24h**, **7d**, which end a custom range;
+  - **Time range: Custom range…**, which opens the header's [custom range](/tayga/guide/time-range/#custom-range) popover;
+  - **Sign out**, only when sign-in is turned on. If it fails, the palette says "Couldn't sign out, try again".
+
+## Searching
+
+<Screenshot name="palette-results" caption="Results for “checkout”." />
+
+As you type, Pages and Actions narrow to the ones whose name contains the text, and Tayga searches the server (shortly after you stop typing). It shows up to eight of each:
+
+| Group | Matches | Opens |
+|---|---|---|
+| **Trace** | A 32-character hex trace id, as typed or pasted | The [trace view](/tayga/guide/traces/#trace-view). |
+| **Services** | Services whose name contains the text, among those seen in the last 24 hours | The [service map](/tayga/guide/service-map/#the-service-drawer) with the service's drawer open. |
+| **Story groups** | Groups whose story summary contains the text, from the last 7 days, most stories first. The hint gives the kind and the count. | The [Stories](/tayga/guide/stories/) page with the group selected. |
+| **Templates** | Log templates whose text contains the text. The hint gives the service. | The [template page](/tayga/guide/logs/#template-detail). |
+
+The search ignores case. While it runs, the palette says "Searching…"; "No matches for “…”" when nothing matches; and "Search is unavailable." if the server cannot answer. Pages and actions still work then.
+
+Everything you open from the palette keeps the current time range.
+
+### Moving in the palette
+
+<kbd>↑</kbd> and <kbd>↓</kbd> move through the list (it wraps around), <kbd>Enter</kbd> opens the highlighted item, and <kbd>Esc</kbd> closes the palette and returns focus to where you were. The footer of the palette repeats these keys.
+
+## Keyboard shortcuts
+
+Press <kbd>?</kbd> on any page to see this list in the app.
+
+<Screenshot name="shell-shortcuts" caption="The keyboard shortcuts dialog." />
+
+| Keys | Action |
+|---|---|
+| <kbd>⌘</kbd>+<kbd>K</kbd> or <kbd>Ctrl</kbd>+<kbd>K</kbd> | Open the command palette |
+| <kbd>g</kbd> then <kbd>s</kbd> | Go to Stories |
+| <kbd>g</kbd> then <kbd>t</kbd> | Go to Traces |
+| <kbd>g</kbd> then <kbd>m</kbd> | Go to the Service map |
+| <kbd>g</kbd> then <kbd>l</kbd> | Go to Log alerts |
+| <kbd>g</kbd> then <kbd>p</kbd> | Go to Pipeline health |
+| <kbd>?</kbd> | Show the list of shortcuts |
+| <kbd>Esc</kbd> | Close a dialog or the palette |
+
+Press <kbd>g</kbd>, release it, then press the letter within one second. The "go to" shortcuts keep the time range.
+
+<Aside type="note" title="When shortcuts do not fire">
+The <kbd>g</kbd> and <kbd>?</kbd> shortcuts are ignored while you type in a field, while <kbd>⌘</kbd>, <kbd>Ctrl</kbd> or <kbd>Alt</kbd> is held, and while a dialog or menu is open, so the palette's input gets every key. <kbd>⌘</kbd>+<kbd>K</kbd> does not open the palette over another dialog.
+</Aside>
+
+### Keys on specific pages
+
+| Where | Keys |
+|---|---|
+| [Story groups table](/tayga/guide/stories/#selecting-and-opening-a-group) | <kbd>↑</kbd> <kbd>↓</kbd> select, <kbd>Home</kbd> <kbd>End</kbd> first and last, <kbd>Enter</kbd> open the story |
+| [Waterfall](/tayga/guide/story-detail/#keyboard) | Arrows move, collapse and expand; <kbd>Enter</kbd> opens the span; <kbd>Z</kbd> zooms to it; <kbd>Esc</kbd> resets the zoom |
+| [Trace overview strip](/tayga/guide/story-detail/#trace-overview) | <kbd>←</kbd> <kbd>→</kbd> pan, <kbd>+</kbd> <kbd>-</kbd> zoom, <kbd>Esc</kbd> or <kbd>0</kbd> reset |
+| [Service map search](/tayga/guide/service-map/#toolbar) | <kbd>Enter</kbd> zooms to the matching services |
+| Traces, templates and alerts tables | <kbd>PageUp</kbd> <kbd>PageDown</kbd> <kbd>Home</kbd> <kbd>End</kbd> scroll the focused table |
+| [Custom time range](/tayga/guide/time-range/#custom-range) | <kbd>Enter</kbd> applies, <kbd>Esc</kbd> cancels |
+
+## Tips
+
+- Paste a trace id from a log line or another tool straight into the palette: it opens the trace without a search.
+- Typing part of an error message finds both the story groups and the log templates that contain it.
+- Recent items make the palette a quick way back to the service or template you were just looking at.
+
+## Related
+
+- [Error stories](/tayga/concepts/error-stories/)
+- [Story groups and fingerprints](/tayga/concepts/story-groups/)
+- [Root cause and critical path](/tayga/concepts/root-cause-critical-path/)
+- [Baselines](/tayga/concepts/baselines/)
+- [Log templates](/tayga/concepts/log-templates/)
+- [Log alerts](/tayga/concepts/log-alerts/)

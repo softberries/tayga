@@ -1,0 +1,95 @@
+---
+title: "Time range and live mode"
+description: "The header's time range presets, a custom past window, and live refresh."
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Screenshot from '../../../components/Screenshot.astro';
+
+The time range answers **"which window am I looking at?"** One range, set in the header, applies to every page, and Live decides whether the page keeps up with new data on its own.
+
+<Screenshot name="shell-header" eager caption="The header on every page." />
+
+The time range controls are items 3 and 4 in the header; Live is item 5. The rest of the header is described in the [Tour of the app](/tayga/guide/tour/#the-header).
+
+## Presets
+
+The presets are **15m**, **1h**, **24h** and **7d**: the last 15 minutes, hour, day or week, ending now. **1h** is the default. The selected preset is highlighted. Choosing a preset also ends a custom range.
+
+Tayga keeps data for 7 days, so **7d** is the longest range.
+
+## Custom range
+
+A custom range is a fixed window in the past, for example the hour of last night's incident.
+
+<Screenshot name="shell-custom-range" caption="The custom time range popover." />
+
+<Steps>
+
+1. Select **Custom…** in the header. In the [command palette](/tayga/guide/command-palette/), the action **Time range: Custom range…** opens the same popover.
+
+2. Set **From** and **To**. The fields are in your local time and start from the range on screen.
+
+3. Select **Apply**. **Cancel**, or <kbd>Esc</kbd>, closes the popover without a change.
+
+</Steps>
+
+The button then shows the window, for example `Oct 4 12:00 – 14:00` (with the end date when the range spans two days), and stays highlighted. Choose a preset to go back to a range that ends now.
+
+**Apply** refuses a range the API would reject, and says why under the fields:
+
+| Message | Rule |
+|---|---|
+| Enter a start. / Enter an end. | Both fields are required. |
+| The end must be after the start. | |
+| The end must not be in the future. | The end may be at most 60 seconds ahead of your clock. |
+| A range can be at most 7 days long. | |
+| A range must be at least 1 second long. | |
+| The start must be within the last 7 days (data retention). | |
+
+<Aside type="note" title="Old bookmarks">
+A custom range ages. When a bookmarked range starts more than 7 days ago, the panels say "This range is older than the 7-day data retention" and offer **Show last 1h**, which switches back to the default range.
+</Aside>
+
+## Live mode
+
+**Live** refreshes the data on the page every 10 seconds. It is on by default, and your choice is stored in your browser.
+
+- The dot beside the label pulses while Live is on.
+- Hover over the button to see its state: "Refreshing every 10 s", "Paused while the tab is hidden" or "Auto-refresh is off".
+- Live pauses while the browser tab is hidden and resumes when you come back.
+- With a custom range, Live is off and the button is greyed out ("Live is off for a past range"): a window with a fixed end has no new data.
+
+Some views always show the current state, whatever the range, and keep refreshing while Live is on even during a custom range:
+
+- the **services degraded** badge in the header, which covers the last 15 minutes (see the [Tour](/tayga/guide/tour/#the-header));
+- the job status strip and the consumer lag on the [Pipeline](/tayga/guide/pipeline/) page.
+
+## How the range travels
+
+The range stays the same when you move around: through the navigation rail, the command palette, the keyboard shortcuts and the links between pages. Page filters do not travel: a service filter on the Traces page does not follow you to the Stories page.
+
+A story page shows its group trend over the header range, widened to the shortest preset that contains the story when the story is older than the range, so an older story still shows its group.
+
+## URL parameters
+
+The range is part of every page's URL, so a shared link shows the same window.
+
+| Parameter | Values | Meaning |
+|---|---|---|
+| `since` | `15m`, `24h`, `7d` | A preset ending now. Absent means the default, `1h`. |
+| `since` + `until` | `since` any length from `1s` to `7d` (`<n>s`, `m`, `h` or `d`); `until` an RFC 3339 time in UTC, such as `2026-10-04T14:00:00Z`, or Unix seconds | A custom range: the `since`-long window ending at `until`. |
+
+For example, `/traces?since=2h&until=2026-10-04T14:00:00Z` shows the traces between 12:00 and 14:00 UTC on 4 October. An `until` without `since` uses the default length, 1 hour. An invalid `until` or `since` is ignored, and the page falls back to a preset.
+
+## Tips
+
+- During an incident, keep **15m** and Live on. Afterwards, set a custom range around the incident and share the URL in the postmortem: the link keeps showing that window until it ages past 7 days.
+- The KPI tiles on the [Stories](/tayga/guide/stories/) page compare the range with the window before it, so **1h** compares this hour with the previous hour.
+
+## Related
+
+- [Error stories](/tayga/concepts/error-stories/)
+- [Baselines](/tayga/concepts/baselines/)
+- [Log templates](/tayga/concepts/log-templates/)
+- [Log alerts](/tayga/concepts/log-alerts/)

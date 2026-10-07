@@ -1,0 +1,81 @@
+---
+title: "Tour of the app"
+description: "A short tour of Tayga's web app: the navigation rail, the header, and what each page is for."
+---
+
+import { CardGrid, LinkCard, Steps } from '@astrojs/starlight/components';
+import Screenshot from '../../../components/Screenshot.astro';
+
+This page answers **"where do I find what?"** It walks through the parts every page shares, the navigation rail and the header, and says what each page is for, with a link to its full guide.
+
+<Screenshot name="stories-home" eager caption="The Stories page, the home of the app, with the rail on the left and the header at the top." />
+
+## A typical investigation
+
+<Steps>
+
+1. Open **Stories** and pick the top story group: the problem that produced the most failing or slow requests in the range.
+
+2. Read its latest story in the inspector, then select **Open story** to see the root cause, the waterfall, the comparison with normal and the logs.
+
+3. From the story, follow the root-cause service to the **Service map** to see its health and its callers, or a log line to its **log template** to see how often that line appears and whether it alerted.
+
+4. Use **Traces** to find other requests like it, and **Alerts** to see what the logs flagged around the same time.
+
+</Steps>
+
+## The navigation rail
+
+<Screenshot name="shell-rail" caption="The navigation rail." />
+
+The rail on the left links to the five sections. Hover over an icon, or focus it, to see its name. The section you are in is highlighted. On a phone the rail becomes a bar at the bottom of the screen.
+
+The links keep the current [time range](/tayga/guide/time-range/), and leave page filters behind. **Logs and templates** opens the log alerts; the templates are one link away from there.
+
+## The header
+
+<Screenshot name="shell-header" caption="The header, shown on every page." />
+
+- **Page title and breadcrumb** (1): where you are, for example `Logs / Templates / Template 5461…7332`. Long ids are shortened to their first and last four characters.
+- **Services degraded**: a red or amber pill, such as `2 services degraded`, appears beside the title when services had errors or ran slow in the last 15 minutes, whatever the page's range. Hover over it to see their names; select it to open the service map over the last 15 minutes. It is hidden while every service is healthy. (Not numbered in the screenshot.)
+- **Command palette** (2): "Jump to service, trace id, template…". Select it or press <kbd>⌘</kbd>+<kbd>K</kbd> or <kbd>Ctrl</kbd>+<kbd>K</kbd> to jump anywhere. See [Command palette and keyboard shortcuts](/tayga/guide/command-palette/).
+- **Time range presets** (3) and **Custom…** (4): the window every page shows. See [Time range and live mode](/tayga/guide/time-range/).
+- **Live** (5): refreshes the page every 10 seconds.
+- **Theme switch** (6): cycles light, dark and system. See [Theme](/tayga/guide/theme/).
+- **User menu**: only when sign-in is turned on. See [Sign-in](/tayga/guide/login/).
+
+Press <kbd>Tab</kbd> once on any page to reveal a **Skip to content** link that jumps past the rail and the header.
+
+## The pages
+
+<CardGrid>
+	<LinkCard title="Stories" href="/tayga/guide/stories/" description="What is failing or slow now: story groups ranked by count, with the latest story beside them." />
+	<LinkCard title="Story detail" href="/tayga/guide/story-detail/" description="One request explained: root cause, request path, waterfall, comparison with normal and logs." />
+	<LinkCard title="Traces" href="/tayga/guide/traces/" description="Search traces by service, endpoint, duration and errors; open any trace as a waterfall." />
+	<LinkCard title="Service map" href="/tayga/guide/service-map/" description="Services and their calls with health, rate, errors and p99; a drawer per service." />
+	<LinkCard title="Logs and templates" href="/tayga/guide/logs/" description="Log lines grouped into templates, with hits over time and the silence alert setting." />
+	<LinkCard title="Alerts" href="/tayga/guide/alerts/" description="New, spike and silence alerts on log templates, with example traces." />
+	<LinkCard title="Pipeline" href="/tayga/guide/pipeline/" description="Whether Tayga itself is healthy: job status, throughput charts and consumer lag." />
+	<LinkCard title="Command palette and shortcuts" href="/tayga/guide/command-palette/" description="Jump to a page, service, trace, story group or template from the keyboard." />
+</CardGrid>
+
+## States you will see on every page
+
+- **Loading**: grey placeholders in the shape of the content.
+- **A panel that failed**: a red banner, "Could not load …", with the HTTP status, the message and **Try again**. Other panels keep working.
+- **A refresh that failed**: the panel keeps its last data and says "Refresh failed · showing data from 14:03:07", with **Try again**.
+- **Storage unavailable**: a red banner under the header while the database cannot be reached, with "Retrying on the next refresh." It clears on its own when a request succeeds.
+- **Page not found**: an address that matches no page shows "Page not found" with **Go to stories**. The rail and the header stay usable.
+
+## Tips
+
+- Every view's state (filters, selection, open drawer, time range) is in its URL. Copy the address to share exactly what you see.
+- Press <kbd>?</kbd> on any page for the list of keyboard shortcuts.
+
+## Related
+
+- [Error stories](/tayga/concepts/error-stories/)
+- [Root cause and critical path](/tayga/concepts/root-cause-critical-path/)
+- [Baselines](/tayga/concepts/baselines/)
+- [Log templates](/tayga/concepts/log-templates/)
+- [Log alerts](/tayga/concepts/log-alerts/)

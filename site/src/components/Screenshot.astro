@@ -1,0 +1,300 @@
+---
+/**
+ * A screenshot of the app in both themes: the light or dark capture is shown to match the site
+ * theme (Starlight's `data-theme` on <html>). Sized and lazy-loaded by Astro's <Image>. A click
+ * (or Enter) opens it enlarged in a modal <dialog>, closed with Escape, the close button or a
+ * click outside. A shot with callouts gets its numbered legend from the manifest; a shot taken
+ * with mocked API responses says so in its caption.
+ */
+import { Image } from 'astro:assets';
+import Callouts from './Callouts.astro';
+import { shot, widthsFor } from './screens';
+import type { Shot } from './screens';
+
+interface Props {
+	/** Base name in `src/assets/screens`, e.g. `stories-home-full` (both `-dark` and `-light` must exist). */
+	name: string;
+	/** Caption; defaults to the manifest description. */
+	caption?: string;
+	/** Alt text; defaults to the manifest description. */
+	alt?: string;
+	/** Show the numbered legend when the shot has callouts (default true). */
+	legend?: boolean;
+	/** Crop a tall shot to this height (CSS length); the enlarged view shows all of it. */
+	maxHeight?: string;
+	/** Load at once instead of lazily (for a shot at the top of a page). */
+	eager?: boolean;
+	/** Offer the enlarged view (default true). */
+	zoom?: boolean;
+}
+
+const { name, caption, alt, legend = true, maxHeight, eager = false, zoom = true } = Astro.props;
+const { dark, light } = shot(name);
+const entry = dark.entry;
+const text = alt ?? caption ?? entry.description;
+const mocked = dark.entry.data === 'mocked' || light.entry.data === 'mocked';
+const hasLegend = legend && entry.callouts.length > 0;
+const side = hasLegend && entry.cssWidth <= 560;
+const id = `shot-${name}-${Math.random().toString(36).slice(2, 8)}`;
+const sizes = (s: Shot) => `(min-width: 72rem) min(${s.entry.cssWidth}px, 47rem), min(${s.entry.cssWidth}px, calc(100vw - 2rem))`;
+const zoomSizes = (s: Shot) => `min(${s.entry.cssWidth}px, 94vw)`;
+const variants = [
+	{ s: light, cls: 'tg-shot__light' },
+	{ s: dark, cls: 'tg-shot__dark' },
+];
+---
+
+<figure class:list={['tg-shot', 'not-content', { 'tg-shot--side': side }]} style={side ? `--tg-shot-w:${entry.cssWidth}px` : undefined}>
+	<div class="tg-shot__media">
+		{
+			zoom ? (
+				<button
+					type="button"
+					class:list={['tg-shot__frame', { 'tg-shot__frame--crop': maxHeight }]}
+					style={`max-inline-size:min(100%, ${entry.cssWidth}px);${maxHeight ? `--tg-shot-max:${maxHeight}` : ''}`}
+					data-shot-open={id}
+					aria-haspopup="dialog"
+					aria-label={`Enlarge screenshot: ${caption ?? entry.description}`}
+				>
+					{variants.map(({ s, cls }) => (
+						<Image
+							src={s.image}
+							alt={text}
+							widths={widthsFor(s.entry.cssWidth, s.entry.width)}
+							sizes={sizes(s)}
+							loading={eager ? 'eager' : 'lazy'}
+							decoding="async"
+							class:list={['tg-shot__img', cls]}
+							style="width:100%"
+						/>
+					))}
+					{maxHeight ? <span class="tg-shot__more">Select to see the whole page</span> : null}
+				</button>
+			) : (
+				<div class="tg-shot__frame" style={`max-inline-size:min(100%, ${entry.cssWidth}px)`}>
+					{variants.map(({ s, cls }) => (
+						<Image
+							src={s.image}
+							alt={text}
+							widths={widthsFor(s.entry.cssWidth, s.entry.width)}
+							sizes={sizes(s)}
+							loading={eager ? 'eager' : 'lazy'}
+							decoding="async"
+							class:list={['tg-shot__img', cls]}
+							style="width:100%"
+						/>
+					))}
+				</div>
+			)
+		}
+	</div>
+	{hasLegend ? <Callouts name={name} label={`Callouts: ${caption ?? entry.description}`} /> : null}
+	<figcaption>
+		{mocked ? <span class="tg-shot__sample">Sample data</span> : null}
+		{caption ?? entry.description}
+		{mocked ? ' This shot shows the state with sample data (mocked API responses), not a live stack.' : null}
+	</figcaption>
+	{
+		zoom ? (
+			<dialog id={id} class="tg-shot__dialog" aria-label={caption ?? entry.description} style={`--tg-zoom-w:${entry.cssWidth}px`}>
+				<div class="tg-shot__dialog-bar">
+					<span class="tg-shot__dialog-title">{caption ?? entry.description}</span>
+					<button type="button" class="tg-shot__close" data-shot-close aria-label="Close enlarged screenshot">
+						<svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+							<path d="M18 6 6 18M6 6l12 12" />
+						</svg>
+					</button>
+				</div>
+				<div class="tg-shot__dialog-body">
+					{variants.map(({ s, cls }) => (
+						<Image
+							src={s.image}
+							alt={text}
+							widths={widthsFor(s.entry.cssWidth, s.entry.width)}
+							sizes={zoomSizes(s)}
+							loading="lazy"
+							decoding="async"
+							class:list={['tg-shot__zoomed', cls]}
+							style={`width:min(${s.entry.cssWidth}px, 100%)`}
+						/>
+					))}
+				</div>
+			</dialog>
+		) : null
+	}
+</figure>
+
+<script>
+	function setup() {
+		for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-shot-open]')) {
+			if (btn.dataset.shotReady) continue;
+			btn.dataset.shotReady = '1';
+			const dialog = document.getElementById(btn.dataset.shotOpen ?? '');
+			if (!(dialog instanceof HTMLDialogElement)) continue;
+			btn.addEventListener('click', () => dialog.showModal());
+			dialog.querySelector('[data-shot-close]')?.addEventListener('click', () => dialog.close());
+			// A click on the backdrop (the dialog element itself, outside its content) closes it.
+			dialog.addEventListener('click', (e) => {
+				if (e.target === dialog) dialog.close();
+			});
+		}
+	}
+	setup();
+	document.addEventListener('astro:page-load', setup);
+</script>
+
+<style>
+	.tg-shot {
+		margin-block: 1.5rem;
+		display: grid;
+		gap: 0.75rem;
+	}
+	.tg-shot--side {
+		grid-template-columns: minmax(0, var(--tg-shot-w)) minmax(12rem, 1fr);
+		align-items: start;
+		column-gap: 1.5rem;
+	}
+	.tg-shot--side figcaption {
+		grid-column: 1 / -1;
+	}
+	@media (max-width: 40rem) {
+		.tg-shot--side {
+			grid-template-columns: minmax(0, 1fr);
+		}
+	}
+	.tg-shot__media {
+		min-width: 0;
+	}
+	.tg-shot__frame {
+		position: relative;
+		display: block;
+		inline-size: 100%;
+		padding: 0;
+		border: 1px solid var(--sl-color-hairline-light);
+		border-radius: 10px;
+		overflow: hidden;
+		background: var(--sl-color-bg-nav);
+		box-shadow: 0 8px 24px -16px rgb(0 0 0 / 0.45);
+		font: inherit;
+		color: inherit;
+	}
+	button.tg-shot__frame {
+		cursor: zoom-in;
+	}
+	button.tg-shot__frame:focus-visible {
+		outline: 2px solid var(--sl-color-accent);
+		outline-offset: 3px;
+	}
+	.tg-shot__frame--crop {
+		max-block-size: var(--tg-shot-max);
+	}
+	.tg-shot__frame--crop::after {
+		content: '';
+		position: absolute;
+		inset-inline: 0;
+		inset-block-end: 0;
+		block-size: 6rem;
+		background: linear-gradient(to bottom, transparent, var(--sl-color-bg));
+		pointer-events: none;
+	}
+	.tg-shot__more {
+		position: absolute;
+		z-index: 1;
+		inset-block-end: 0.75rem;
+		inset-inline-start: 50%;
+		transform: translateX(-50%);
+		padding: 0.3rem 0.8rem;
+		border-radius: 999px;
+		background: var(--sl-color-accent);
+		color: var(--sl-color-black);
+		font-size: var(--sl-text-xs);
+		font-weight: 600;
+		white-space: nowrap;
+	}
+	:global(.tg-shot__img) {
+		display: block;
+		block-size: auto;
+	}
+	:global(:root:not([data-theme='light']) .tg-shot__light),
+	:global(:root[data-theme='light'] .tg-shot__dark) {
+		display: none;
+	}
+	figcaption {
+		font-size: var(--sl-text-sm);
+		color: var(--sl-color-gray-3);
+		line-height: 1.5;
+	}
+	.tg-shot__sample {
+		display: inline-block;
+		margin-inline-end: 0.4rem;
+		padding: 0.05rem 0.45rem;
+		border: 1px solid var(--sl-color-orange);
+		border-radius: 999px;
+		color: var(--sl-color-orange-high);
+		font-size: var(--sl-text-xs);
+		font-weight: 600;
+	}
+	.tg-shot__dialog {
+		position: fixed;
+		inset: 0;
+		margin: auto;
+		inline-size: min(96vw, max(calc(var(--tg-zoom-w) + 2rem + 2px), 24rem));
+		block-size: fit-content;
+		max-inline-size: 96vw;
+		max-block-size: 94dvh;
+		padding: 0;
+		border: 1px solid var(--sl-color-hairline-light);
+		border-radius: 12px;
+		background: var(--sl-color-bg);
+		color: var(--sl-color-white);
+	}
+	.tg-shot__dialog[open] {
+		display: flex;
+		flex-direction: column;
+	}
+	.tg-shot__dialog::backdrop {
+		background: rgb(0 0 0 / 0.7);
+	}
+	.tg-shot__dialog-bar {
+		display: flex;
+		align-items: center;
+		gap: 1rem;
+		padding: 0.6rem 0.75rem 0.6rem 1rem;
+		border-block-end: 1px solid var(--sl-color-hairline-light);
+	}
+	.tg-shot__dialog-title {
+		flex: 1;
+		min-inline-size: 0;
+		font-size: var(--sl-text-sm);
+		color: var(--sl-color-gray-2);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.tg-shot__close {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		inline-size: 2.25rem;
+		block-size: 2.25rem;
+		border: 1px solid var(--sl-color-hairline-light);
+		border-radius: 8px;
+		background: transparent;
+		color: inherit;
+		cursor: pointer;
+	}
+	.tg-shot__close:focus-visible {
+		outline: 2px solid var(--sl-color-accent);
+		outline-offset: 2px;
+	}
+	.tg-shot__dialog-body {
+		overflow: auto;
+		padding: 1rem;
+		text-align: center;
+	}
+	:global(.tg-shot__zoomed) {
+		display: inline-block;
+		block-size: auto;
+		max-inline-size: none;
+	}
+</style>

@@ -1,0 +1,190 @@
+---
+title: "Story detail"
+description: "One story: root cause, request path, group trend, comparison with normal, the waterfall, the span drawer, the logs and related alerts."
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+import Screenshot from '../../../components/Screenshot.astro';
+
+A story page answers **"why did this request fail, or why was it slow?"** It names the span where the problem started, shows the path the request took to get there, where the time went, what was different from a normal request to the same endpoint, and the logs the request wrote.
+
+You reach it from a story group on the [Stories](/tayga/guide/stories/) page, a story link in [Traces](/tayga/guide/traces/), an example trace on the [Alerts](/tayga/guide/alerts/) page, or a link someone sent you. Its address is `/stories/<story id>`.
+
+<Screenshot name="story-detail-full" eager maxHeight="42rem" caption="An error story: the payment service rejected a charge." />
+
+From top to bottom the page has: the [header](#header-and-root-cause), the [group trend](#group-trend) and [compared with normal](#compared-with-normal) side by side, the [waterfall](#waterfall), the [logs](#logs) and the [related log alerts](#related-log-alerts). A **Back to stories** link at the bottom returns to the Stories page with the same time range.
+
+## Header and root cause
+
+<Screenshot name="story-root-cause" caption="The header card of an error story." />
+
+- **Kind and endpoint** (1): an **Error story** or **Slow story** badge, and the endpoint (service and operation) the request entered through.
+- **Open in Jaeger** and **Open trace** (2). **Open trace** opens the same trace in Tayga's [trace view](/tayga/guide/traces/#trace-view). **Open in Jaeger** opens it in a new tab in Jaeger; it appears only when the API is configured with a Jaeger URL (see [Configuration](/tayga/operations/configuration/)).
+- **Summary** (3): one sentence that says what happened, for example "payment charge failed: Payment request failed. Invalid token." For a slow story it gives the duration, the endpoint's p99 and where most of the time went.
+- **Root cause** (4): "Root cause in" the service and span where the problem started, and the exception type when the span recorded one.
+- **Request path** (5): the services from the entry point to the root cause. The last one is highlighted red (error) or amber (slow).
+- **Facts** (6): **Time** of the request, **Root span** duration, number of **Spans** and **Services**, and the shortened **Trace** id.
+
+Amber flag badges under the facts warn when Tayga could not see the whole trace: `truncated` when the assembler closed the trace early at its span or memory limit, `incomplete` when spans had missing parents, several roots or a cycle.
+
+How the root cause and the path are chosen is explained in [Root cause and critical path](/tayga/concepts/root-cause-critical-path/).
+
+## Group trend
+
+<Screenshot name="story-group-trend" caption="How often this group occurred over the range." />
+
+A bar chart of the stories in this story's group over the time range, with a marker labelled **this story**. The heading says the total, for example `15 stories · 1h`. Hover over the chart to see the count per bucket.
+
+If the story is older than the header's range, the chart widens the range to the shortest preset that contains it, so you always see the story's own moment. When the group has no stories in the range, it says "No stories of this group in the range" and suggests a longer range.
+
+## Compared with normal
+
+<Tabs>
+<TabItem label="Error story">
+<Screenshot name="story-baseline" caption="Compared with normal on an error story." />
+</TabItem>
+<TabItem label="Slow story">
+<Screenshot name="story-slow-baseline" caption="Compared with normal on a slow story." />
+</TabItem>
+</Tabs>
+
+This panel compares the request with the endpoint's baseline: what a normal request to the same endpoint looks like.
+
+- **Slower than usual**: an operation and its duration here against its usual p95, shown as `<operation> <duration> vs p95 <duration>`.
+- **New operation**: an operation this request ran that normal requests do not.
+- **Usually present, missing here**: operations normal requests run that this one skipped, often because it failed before reaching them.
+- **Also failed**: other spans with errors, besides the root cause.
+- **Where the time went (critical path)**: the five spans on the critical path with the most self time (time not spent waiting for children), with bars to compare them.
+
+"Every operation ran as usual for this endpoint." means nothing differed. "No baseline for this endpoint yet." means Tayga has not seen enough normal requests to this endpoint; see [Baselines](/tayga/concepts/baselines/).
+
+## Waterfall
+
+<Screenshot name="story-waterfall" caption="The waterfall, zoomed to the critical path." />
+
+The waterfall shows every span of the trace as a row, indented under its parent, with a bar on a shared time axis. On the story page it opens zoomed to the critical path (the toolbar says "Showing the critical path"), with the root-cause row selected and scrolled into view.
+
+### Toolbar
+
+- **Search spans** (1): matches the service, the span name and the span's attribute keys and values. Matching rows show with their parents for context; the parents are dimmed.
+- **All spans**, **Errors**, **Critical path** (2): show every span, only spans with an error status, or only the critical path. The counter says `12 of 111 spans` while a search or filter is on.
+- **Reset zoom**: shows the whole trace again. It appears while you are zoomed in.
+- **Expand all** and **Collapse all**: open or close every span that has children. They are disabled while a search or filter is on, since those show a flat list.
+
+### Trace overview
+
+The strip above the rows (3) draws every span of the trace in miniature: critical-path spans in the accent colour, errors in red. Drag across it to zoom the waterfall to that stretch of time; the parts outside the zoom are dimmed. With the strip focused, <kbd>←</kbd> and <kbd>→</kbd> pan, <kbd>+</kbd> and <kbd>-</kbd> zoom in and out, and <kbd>Esc</kbd> or <kbd>0</kbd> resets.
+
+### Rows
+
+<Screenshot name="story-waterfall-row" caption="The root-cause row." />
+
+Each row has:
+
+- a chevron to collapse or expand the span's children. Deep spans stop indenting after 10 levels and show the extra depth as `+3`;
+- a coloured dot per service, the service name (muted) and the span name;
+- a red error icon when the span has an error status;
+- the bar: accent for the critical path, red for errors, grey otherwise. Red diamonds on a bar mark `exception` events. Hover over a bar to see the span, its duration and when it started;
+- the duration in milliseconds.
+
+The root-cause row (4) is tinted red and its bar glows. The selected row has an accent edge on the left.
+
+Click a row, or press <kbd>Enter</kbd> or <kbd>Space</kbd>, to open the [span drawer](#span-drawer).
+
+### Keyboard
+
+With the waterfall focused:
+
+| Key | Action |
+|---|---|
+| <kbd>↑</kbd> <kbd>↓</kbd> | Move the selection |
+| <kbd>PageUp</kbd> <kbd>PageDown</kbd>, <kbd>Home</kbd> <kbd>End</kbd> | Move by a page, or to the first or last row |
+| <kbd>←</kbd> <kbd>→</kbd> | <kbd>←</kbd> collapses an open span, or moves to the parent; <kbd>→</kbd> expands a closed span, or moves to its first child |
+| <kbd>Enter</kbd> or <kbd>Space</kbd> | Open the span drawer |
+| <kbd>Z</kbd> | Zoom to the selected span |
+| <kbd>Esc</kbd> | Reset the zoom |
+
+When a search or filter matches nothing, the waterfall says "No spans match" with **Clear filters**. When the trace has expired, it says "The trace is no longer stored"; the summary above still applies.
+
+### Span drawer
+
+<Screenshot name="story-span-drawer" caption="The span drawer open on the root-cause span." />
+
+The drawer opens on the right and leaves the waterfall usable beside it. Drag its left edge to resize it (the width is remembered), and close it with the **×** button or <kbd>Esc</kbd>.
+
+<Screenshot name="story-span-drawer-panel" caption="The span drawer." />
+
+- The title is the span name. Under it: the service (select it to open the service on the [Service map](/tayga/guide/service-map/)), the span kind, the duration, and badges for **error**, **root cause** and **critical path**.
+- The span id and its parent id (or "root"), and the status message in red when the span has one.
+- Tabs, each with a count:
+  - **Attributes** and **Resource**: key and value tables with a search field, and a copy button on each row.
+  - **Events**: each event with its time from the span start. An `exception` event shows its type, message and stack trace.
+  - **Logs**: the span's logs with time, severity, body and their log template, linked to the [template page](/tayga/guide/logs/#template-detail). A **new** or **spike** badge means the template had an active alert at the time.
+  - **Timing**: start offset from the trace start, duration, self time (with its share of the span), the span's share of the trace window, and a bar showing its position in the trace.
+
+## Logs
+
+<Screenshot name="story-logs" caption="The logs of the story's trace." />
+
+All logs the trace wrote, oldest first. The heading says how many, for example `42 in this trace`.
+
+- **Service chips** (1): **all** or one service, each with its count. Select a chip again to go back to all.
+- **Minimum severity**: **All**, **Info+**, **Warn+** or **Error+**.
+- **The table** (2): **Time** (with milliseconds), **Service**, **Span** (select it to open that span in the drawer), **Severity**, **Body**, and **Template**: the log template the line belongs to, linked to its page, with a **new** or **spike** badge when the template was alerting.
+
+"No logs for this trace" means none of its spans wrote a log. "No logs match" means the filters hide them all. On a phone, each log stacks into three lines.
+
+The inspector on the Stories page links straight here: its **N logs · M services** button opens the story at this section (`#logs`).
+
+## Related log alerts
+
+<Screenshot name="story-related-alerts" caption="Log alerts on templates this trace emitted." />
+
+Log alerts from the last 7 days on any template this trace wrote a line for, or that list this trace as an example. Each row shows the kind, the service, the template (linked to its page), when the alert started, the peak against the baseline per window, and **active** or **ended**. With none, it says "No log alert in the last 7 days involves this story's logs."
+
+## A slow story
+
+<Screenshot name="story-slow-full" maxHeight="42rem" caption="A slow story: 5 seconds against a p99 of 127 ms, almost all of it in the shipping service." />
+
+A slow story has the same layout. The summary gives the duration against the endpoint's p99 and the span where most of the critical-path time went, and the comparison lists the operations slower than their usual p95.
+
+## When the story does not exist
+
+<Screenshot name="story-not-found" caption="A story id that is not stored." />
+
+"Story not found" means there is no story with that id: it has expired, or the link is wrong. **Go to stories** returns to the Stories page.
+
+## On a phone
+
+<Screenshot name="mobile-story" caption="A story on a phone." />
+
+## URL parameters
+
+| Parameter | Values | Meaning |
+|---|---|---|
+| `span` | 16 hex characters | The span open in the drawer. |
+| `q` | text, up to 200 characters | The waterfall search. |
+| `only` | `errors`, `critical` | The waterfall filter. Absent: all spans. |
+| `log_service` | a service name | The logs' service chip. |
+| `sev` | `info`, `warn`, `error` | The logs' minimum severity. |
+| `since`, `until` | see [Time range](/tayga/guide/time-range/#url-parameters) | The range of the group trend. |
+
+Opening a span adds a browser history entry, so **Back** closes the drawer. For example, `/stories/<id>?only=errors&sev=error` shows only the failing spans and the error logs.
+
+## Tips
+
+<Aside type="tip">
+Select **Errors** in the waterfall to see the failing chain from the entry span down to the root cause, then open the root-cause span and read its **Events** tab for the exception and stack trace.
+</Aside>
+
+- For a slow story, start with **Where the time went**: the span at the top is usually the one to fix.
+- "Usually present, missing here" often tells you how far the request got before it failed.
+- Select a template in the logs to see whether the same line is appearing in other requests, and whether it spiked.
+
+## Related
+
+- [Error stories](/tayga/concepts/error-stories/)
+- [Root cause and critical path](/tayga/concepts/root-cause-critical-path/)
+- [Baselines](/tayga/concepts/baselines/)
+- [Log templates](/tayga/concepts/log-templates/)
+- [Log alerts](/tayga/concepts/log-alerts/)

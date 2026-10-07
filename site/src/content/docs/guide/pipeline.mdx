@@ -1,0 +1,94 @@
+---
+title: "Pipeline"
+description: "The Pipeline page: job status, the metric charts and consumer lag."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Screenshot from '../../../components/Screenshot.astro';
+
+The Pipeline page answers **"is Tayga itself keeping up?"** It shows whether each of Tayga's services is up, how much each stage processes, where it fails, and how far behind the Kafka consumers are. Check it when stories or logs seem to be missing or late.
+
+The page is at `/pipeline`. The **Pipeline health** icon in the rail and <kbd>g</kbd> then <kbd>p</kbd> open it.
+
+<Screenshot name="pipeline-full" eager maxHeight="42rem" caption="The Pipeline page over the last hour." />
+
+The data comes from a recorder inside the API: every 15 seconds it reads each service's `/metrics` endpoint and stores the samples in ClickHouse, so the page needs no Prometheus. See [Metrics and Grafana](/tayga/operations/metrics-grafana/) for the metrics themselves.
+
+## Status strip
+
+<Screenshot name="pipeline-status" caption="The status strip." />
+
+One chip per job, in pipeline order: **ingest**, **writer**, **assembler**, **logminer**, **notifier** and **api**.
+
+- **up** (green): the latest scrape answered.
+- **down** (red, glowing and pulsing): the latest scrape failed, or no sample arrived in the last 3 minutes, which means the recorder itself is not running.
+- **no data** (grey): no sample yet.
+
+Under each chip, `scraped within the last minute` (or `… last 4 min`) says how fresh the latest sample is, or `no samples yet`. The strip always covers the last 15 minutes, whatever the time range, and keeps refreshing while Live is on.
+
+With several replicas of a service, its chip is up while any replica answers.
+
+## Charts
+
+<Screenshot name="pipeline-chart-ingest" caption="Ingest records per second, by kind." />
+
+The charts follow the time range. Each shows one or more lines; hover over a chart for the values at a moment, and use the legend of a chart with several lines to tell them apart.
+
+| Chart | What it shows |
+|---|---|
+| **Ingest records** | Records published per second, traces and logs. |
+| **Writer rows** | Rows committed to ClickHouse per second. |
+| **Assembler output** | Closed traces, error stories and slow stories per second. |
+| **Logminer throughput** | Logs mined per second. |
+| **Logminer fingerprint cache** | Log lines per second matched from the cache (hits) or run through Drain (misses). |
+| **Logminer batch time** | Seconds to mine one Kafka record, p50 and p99. |
+| **Open traces** | Traces the assembler is still holding open. |
+| **Buffered bytes** | Bytes held by the assembler. |
+| **Writer batch latency** | Seconds per batch insert, p50 and p99. |
+| **Logminer data lag** | Seconds between a log and its mining. |
+| **Commit failures** | Refused Kafka offset commits per minute, for the writer and the logminer. The records are read again. |
+| **Errors** | Failures per minute: insert failures, assembler and logminer write failures, ingest publish failures, assembler analysis panics and the recorder's scrape failures. |
+
+<Screenshot name="pipeline-chart-assembler" caption="Assembler output: closed traces and stories per second." />
+
+When you run several replicas of a service, the charts add them up: rates and most gauges are summed over replicas, and the percentiles are computed over all of them. The data lag is the slowest replica's.
+
+The newest point of a rate chart is left out while its bucket is still filling, so the line does not dip at the right edge.
+
+## Consumer lag
+
+<Screenshot name="pipeline-lag" caption="Consumer lag per group and topic." />
+
+How many messages each Kafka consumer group has yet to commit, read live from Kafka, whatever the time range. Each row shows the group, its topic, the committed and end offsets, a bar and the count, for example `1.2k messages behind`.
+
+The bars are scaled per topic, against the largest lag on that topic but at least 1,000 messages (10 on `tayga.alerts`, whose records are single alerts), so a trickle of lag does not fill the bar. An empty bar means no lag. "No consumer groups." means Kafka reported none.
+
+## Empty, loading and error states
+
+- "Collecting… first points in 15 s" when nothing has been recorded yet, for example just after the stack started. The charts fill in as history builds up.
+- A chart that could not load one of its lines says so ("… is missing from this chart, not zero") with **Try again**.
+- "Could not load job status." or "Could not load consumer lag." with **Try again**. A Kafka failure affects only the lag section.
+
+<Aside type="tip">
+A growing consumer lag with a steady ingest rate means a consumer cannot keep up. For the logminer, see [Scaling logminer replicas](/tayga/operations/scaling-logminer/) and [Performance tuning](/tayga/operations/performance-tuning/).
+</Aside>
+
+## URL parameters
+
+The page has no parameters of its own; `since` and `until` set the charts' range (see [Time range](/tayga/guide/time-range/#url-parameters)).
+
+## Tips
+
+- If stories stop appearing, check **ingest** and **assembler** in the status strip, then **Assembler output** and **Open traces**.
+- **Logminer data lag** is the same number as the `lag` note on the **Spans / s** tile on the Stories page; a rising value means templates and alerts arrive late.
+- **Commit failures** above zero mean some records are read again; see [Troubleshooting](/tayga/operations/troubleshooting/) if they persist.
+
+## Related
+
+- [Log templates](/tayga/concepts/log-templates/)
+- [Log alerts](/tayga/concepts/log-alerts/)
+- [Error stories](/tayga/concepts/error-stories/)
+- [Root cause and critical path](/tayga/concepts/root-cause-critical-path/)
+- [Baselines](/tayga/concepts/baselines/)
+- [Replicas and partitioning](/tayga/concepts/replicas/)
+- [Troubleshooting](/tayga/operations/troubleshooting/)
