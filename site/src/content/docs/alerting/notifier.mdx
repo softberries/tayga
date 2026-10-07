@@ -1,0 +1,112 @@
+---
+title: "The notifier"
+description: "tayga-notifier: delivering log alerts to webhook and Slack targets, and how to configure it."
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+import RefShot from '../../../components/RefShot.astro';
+
+`tayga-notifier` reads [log alerts](/tayga/concepts/log-alerts/) from the topic `tayga.alerts` (consumer group `tayga-notifier`) and delivers `new`, `spike` and `silence` alerts to **webhook** and **Slack** targets. Each alert goes to each target once, with retries; see [Delivery semantics](/tayga/alerting/delivery/).
+
+The notifier always runs. With no targets, the default, it logs `delivery disabled: no targets` once and keeps committing offsets, so turning delivery on later does not replay a backlog older than `max_age_secs`.
+
+<RefShot
+	name="alerts"
+	alt="The Log alerts page: filters, alerts over time by kind, and the list of new, spike and silence alerts with example traces."
+	caption="The alerts the notifier delivers are the ones on the Alerts page."
+/>
+
+## Configuration
+
+The settings live in the `[notifier]` section of a TOML file named by `TAYGA_CONFIG`. Scalar keys can also be set with `TAYGA__NOTIFIER__*` environment variables, but `targets` and `kinds` are lists, so they can only be set in the file. Settings are read at startup: restart the notifier after an edit.
+
+| Key | Environment variable | Default | Meaning |
+|---|---|---|---|
+| `targets` | file only | none | One `{name, kind, url}` table per target. `kind` is `"webhook"` or `"slack"`. `name` is 1 to 64 of `[A-Za-z0-9._-]` and unique; it names the target in logs, metrics and `notifier_deliveries`. `url` is an http(s) URL. |
+| `public_url` | `TAYGA__NOTIFIER__PUBLIC_URL` | `http://localhost:8090` | Base of the links back into the app. Slack readers must be able to open it, so `localhost` only works on the machine running Tayga. |
+| `kinds` | file only | `["new", "spike", "silence"]` | Alert kinds to deliver. Other kinds are skipped and their offsets committed. |
+| `max_attempts` | `TAYGA__NOTIFIER__MAX_ATTEMPTS` | `8` | Attempts per alert and target, the first included. Must be positive. |
+| `timeout_secs` | `TAYGA__NOTIFIER__TIMEOUT_SECS` | `10` | Timeout of one request, 1 to 15. |
+| `max_age_secs` | `TAYGA__NOTIFIER__MAX_AGE_SECS` | `3600` | Alerts whose `last_at` is older are skipped (`result="stale"`) and committed, so a first start with targets does not deliver the retained backlog. |
+| `breaker_cooldown_secs` | `TAYGA__NOTIFIER__BREAKER_COOLDOWN_SECS` | `300` | How long a target's circuit breaker stays open after it gave up on a retryable error. Must be positive. |
+| `alerts_topic` | `TAYGA__NOTIFIER__ALERTS_TOPIC` | `tayga.alerts` | Topic to read. |
+| `metrics_addr` | `TAYGA__NOTIFIER__METRICS_ADDR` | `0.0.0.0:9100` | Prometheus `/metrics` listener. |
+
+The notifier also needs `[kafka]` and `[clickhouse]` (see the [configuration reference](/tayga/operations/configuration/)). An invalid value stops it at startup, with an error that names the target by its `name`, never by its URL.
+
+### Adding a target
+
+<Tabs>
+<TabItem label="Slack">
+
+<Steps>
+
+1. Create a Slack app with **Incoming Webhooks** turned on, and add a webhook for the channel.
+
+2. Add a target to the notifier's config file:
+
+   ```toml title="notifier.toml"
+   [notifier]
+   public_url = "https://tayga.example.internal"
+
+   [[notifier.targets]]
+   name = "ops-slack"
+   kind = "slack"
+   url = "https://hooks.slack.com/services/…"
+   ```
+
+3. Restart the notifier: `docker compose restart tayga-notifier` in the standalone bundle, or `docker restart tayga-notifier` next to the OpenTelemetry demo.
+
+</Steps>
+
+</TabItem>
+<TabItem label="Webhook">
+
+<Steps>
+
+1. Run an HTTP endpoint that accepts a `POST` with a JSON body and answers 2xx. The body is described in [Webhook and Slack formats](/tayga/alerting/formats/).
+
+2. Add a target:
+
+   ```toml title="notifier.toml"
+   [[notifier.targets]]
+   name = "incident-bridge"
+   kind = "webhook"
+   url = "https://hooks.example.internal/tayga"
+   ```
+
+3. Restart the notifier.
+
+</Steps>
+
+</TabItem>
+</Tabs>
+
+The file is `notifier.toml` in the standalone bundle and `deploy/tayga-notifier.toml` next to the OpenTelemetry demo; both are mounted read-only at `/etc/tayga/notifier.toml`. Several targets of either kind can be listed. On start the notifier logs `tayga-notifier consuming` with a `targets` field listing the target names (an empty list reads `"targets":"[]"`).
+
+## Keeping webhook URLs secret
+
+A webhook URL, and a Slack one in particular, is a credential: whoever has it can post to the channel.
+
+- The notifier never logs a URL, never uses it as a metric label and never stores it. Logs, metrics and `notifier_deliveries` name the target by its `name`.
+- Debug output prints `<redacted>`, and every `http(s)://…` inside an error text is replaced with `<redacted>` before it is logged or stored.
+- `deploy/tayga-notifier.toml` is tracked by git in the repository. Keep a real URL out of commits: either keep the edit local, or mount an untracked file through a Compose override, as `deploy/compose.notifier-e2e.yaml` does.
+
+## Metrics
+
+The notifier serves Prometheus metrics on port 9100 inside the network (not published). The API's recorder scrapes them, and the Pipeline page shows the notifier as a job with its consumer lag on `tayga.alerts`.
+
+| Metric | Meaning |
+|---|---|
+| `tayga_notifier_deliveries_total{target,result}` | Outcomes. `result` is `delivered`, `failed`, `retry`, `duplicate` (a re-published alert already resolved; nothing sent), `stale` (older than `max_age_secs`) or `breaker` (an attempt made while the target's breaker was open; its outcome is also counted as `delivered` or `failed`). |
+| `tayga_notifier_delivery_seconds` | Histogram of each HTTP attempt. |
+| `tayga_notifier_pending` | Deliveries started and not yet resolved. |
+| `tayga_notifier_breaker_open{target}` | 1 while the target's breaker is open, else 0. Updated when an alert is handled for the target, so after an idle cooldown it can read 1 until the next alert. |
+
+## Testing delivery without an outside service
+
+From a source checkout next to the OpenTelemetry demo, `make e2e-notifier` points the notifier at a mock webhook on the host, waits for a real silence alert, checks that the mock received it exactly once (also after `docker restart tayga-notifier` while the logminer keeps re-publishing it), and then puts the target-less config back. It passed on 2026-10-06 in 310.9 s.
+
+<Aside type="note">
+The open-source notifier delivers to webhooks and Slack. Other integrations are not part of it; a generic webhook can feed most incident tools.
+</Aside>

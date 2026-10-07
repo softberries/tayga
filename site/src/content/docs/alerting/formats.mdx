@@ -1,0 +1,141 @@
+---
+title: "Webhook and Slack formats"
+description: "The JSON body a webhook target receives and the Slack message, field by field, with real examples."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Both formats are built from the same alert and the notifier's `public_url`, by pure functions in `crates/tayga-notifier/src/payload.rs`.
+
+## Webhook
+
+A webhook target receives an HTTP `POST` with `Content-Type: application/json`, one request per alert. Redirects are not followed.
+
+### Example: a silence alert
+
+This body was captured by the mock webhook in the live `make e2e-notifier` run on 2026-10-06 (the template is shortened):
+
+```json title="POST <webhook url>"
+{"alert_id":"fe0492738da0b683","kind":"silence","service":"tayga-e2e-probe",
+ "template_id":"2340958801421686365","template":"xzwoppcincbw probe … probe marker",
+ "started_at":"2026-10-06T05:40:40.946Z","last_at":"2026-10-06T05:43:20.029Z",
+ "count":0,"baseline":0.0,
+ "summary":"xzwoppcincbw probe … probe marker has been silent for 2 min in tayga-e2e-probe",
+ "example_trace_ids":[],
+ "links":{"template":"http://localhost:8090/logs/templates/2340958801421686365","traces":[]}}
+```
+
+### Example: a spike alert
+
+The same format applied to the live spike alert `b8b44f4f67291acc` as it was stored at 13:34 UTC on 2026-10-07 (the demo's `paymentFailure` flag was on). A delivered message carries the values the alert had when the notifier first saw it, which can be lower than these.
+
+```json title="POST <webhook url>"
+{
+  "alert_id": "b8b44f4f67291acc",
+  "kind": "spike",
+  "service": "payment",
+  "template_id": "5461860963333777332",
+  "template": "Payment request failed. Invalid token. demo.user_context.loyalty_level=gold",
+  "started_at": "2026-10-07T13:25:05.064Z",
+  "last_at": "2026-10-07T13:34:04.792Z",
+  "count": 14,
+  "baseline": 2.0833333333333335,
+  "summary": "Payment request failed. Invalid token. demo.user_context.loyalty_level=gold spiked to 14 per window in payment (baseline 2.1)",
+  "example_trace_ids": [
+    "2b061ed5d124c26643e501e934cb4267",
+    "00889c9f23ffd1d6d176a40c0357c177",
+    "8efefe39f0440a55bd99451b810949f0",
+    "f8c5fe9a9b7e899a081fb814b5f8573d",
+    "6386ff10754144abbe0091b8678c0315"
+  ],
+  "links": {
+    "template": "http://localhost:8090/logs/templates/5461860963333777332",
+    "traces": [
+      "http://localhost:8090/traces/2b061ed5d124c26643e501e934cb4267",
+      "http://localhost:8090/traces/00889c9f23ffd1d6d176a40c0357c177",
+      "http://localhost:8090/traces/8efefe39f0440a55bd99451b810949f0"
+    ]
+  }
+}
+```
+
+### Fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `alert_id` | string | Deterministic id (16 hex characters). Deduplicate on it. |
+| `kind` | string | `new`, `spike` or `silence`. |
+| `service` | string | The service of the template. |
+| `template_id` | string | The template id, a `u64` as a decimal string. |
+| `template` | string | The template text, unescaped. |
+| `started_at` | string | RFC 3339 UTC with milliseconds. A new template's first log, a spike's start, or for a silence the template's last log. |
+| `last_at` | string | The alert's latest update, same format. |
+| `count` | number | The alert's `window_count`: a spike's count in the spike window. 0 for `new` and `silence`. |
+| `baseline` | number | A spike's baseline per window (`baseline_per_window`). 0 for `new` and `silence`. |
+| `summary` | string | One unescaped line, the same text as Slack's fallback (below). |
+| `example_trace_ids` | string array | Every example trace id of the alert (up to 5, newest first). Empty for a silence. |
+| `links.template` | string | The template page in the app. |
+| `links.traces` | string array | Trace pages for at most 3 of the example traces. |
+
+The `summary` per kind:
+
+| Kind | Summary |
+|---|---|
+| `new` | `New log template in <service>: <template>` |
+| `spike` | `<template> spiked to <count> per window in <service> (baseline <b>)`, the baseline with one decimal |
+| `silence` | `<template> has been silent for <N> min in <service>`, whole minutes of `last_at − started_at` |
+
+The seasonal comparators (`baseline_day`, `baseline_week`) are not part of the webhook body.
+
+## Slack
+
+A Slack target receives an [incoming-webhook](https://api.slack.com/messaging/webhooks) message built from blocks:
+
+1. a **header**: "Log spike in payment", "Log silence in cart" or "New log template in ad" (at most 150 characters);
+2. the **template** in a code block;
+3. **fields**: for a spike the count, the baseline and the start; for a silence how long it has been silent, the last hit and the baseline; for a new template when it was first seen;
+4. **buttons**: "Open template", and "Trace 1" to "Trace 3" for up to three example traces.
+
+The top-level `text` is the summary, which Slack shows in notifications and in clients that do not render blocks.
+
+### Example
+
+The Slack message for the same spike alert:
+
+```json title="POST https://hooks.slack.com/services/…"
+{
+  "text": "Payment request failed. Invalid token. demo.user_context.loyalty_level=gold spiked to 14 per window in payment (baseline 2.1)",
+  "blocks": [
+    { "type": "header", "text": { "type": "plain_text", "text": "Log spike in payment" } },
+    { "type": "section", "text": { "type": "mrkdwn",
+      "text": "```Payment request failed. Invalid token. demo.user_context.loyalty_level=gold```" } },
+    { "type": "section", "fields": [
+      { "type": "mrkdwn", "text": "*Count*\n14 per window" },
+      { "type": "mrkdwn", "text": "*Baseline*\n2.1 per window" },
+      { "type": "mrkdwn", "text": "*Started*\n2026-10-07T13:25:05.064Z" }
+    ] },
+    { "type": "actions", "elements": [
+      { "type": "button", "action_id": "template", "text": { "type": "plain_text", "text": "Open template" },
+        "url": "http://localhost:8090/logs/templates/5461860963333777332" },
+      { "type": "button", "action_id": "trace-1", "text": { "type": "plain_text", "text": "Trace 1" },
+        "url": "http://localhost:8090/traces/2b061ed5d124c26643e501e934cb4267" },
+      { "type": "button", "action_id": "trace-2", "text": { "type": "plain_text", "text": "Trace 2" },
+        "url": "http://localhost:8090/traces/00889c9f23ffd1d6d176a40c0357c177" },
+      { "type": "button", "action_id": "trace-3", "text": { "type": "plain_text", "text": "Trace 3" },
+        "url": "http://localhost:8090/traces/8efefe39f0440a55bd99451b810949f0" }
+    ] }
+  ]
+}
+```
+
+### Escaping and limits
+
+- In the code block and the `text` fallback, `&`, `<` and `>` are escaped as `&amp;`, `&lt;` and `&gt;`, so a template's `<*>` is not read as a Slack link. An escape is never cut in half.
+- Backticks in the template are replaced with `ˋ` (U+02CB), so a template cannot close the code block.
+- The template is cut at 2,800 characters and the fallback at 3,000, each ending with `…` when cut. Slack's own limits are 150 characters for a header and 3,000 for a section.
+
+Tayga only posts to Slack; it reads nothing back.
+
+<Aside type="tip">
+Point `public_url` at an address your Slack readers can open. With the default `http://localhost:8090`, the buttons work only on the machine that runs Tayga.
+</Aside>
