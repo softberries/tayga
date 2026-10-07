@@ -100,7 +100,7 @@ async fn migrate_is_idempotent_and_rows_roundtrip() {
     assert_eq!(logs_back, [log], "every LogRow field round-trips");
 }
 
-use tayga_store::rows::{ServiceEdgeRow, StoryRow, TraceSummaryRow};
+use tayga_store::rows::{EndpointStatsRow, OpStatsRow, ServiceEdgeRow, StoryRow, TraceSummaryRow};
 
 fn summary_row(i: u64, op_present: bool) -> TraceSummaryRow {
     let mut ops = vec![("frontend:GET".to_string(), 1_000 + i)];
@@ -438,6 +438,303 @@ async fn one_outlier_does_not_raise_p99_with_previous_cap() {
         .execute()
         .await
         .unwrap();
+}
+
+/// Without `FINAL`, the baselines still read one version per trace: the highest `span_count`,
+/// whichever part it was inserted in (sub-project 4 spec §3.8).
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn baselines_read_the_newest_version_of_each_trace() {
+    let s = settings();
+    migrate(&s).await.unwrap();
+    let store = Store::new(&s);
+    // t7: a later version, longer and with another op duration. t8: now an error.
+    let t7_old = TraceSummaryRow {
+        span_count: 2,
+        ..summary_row(7, false)
+    };
+    let t7_new = TraceSummaryRow {
+        span_count: 3,
+        duration_ns: 5_000,
+        op_durations: vec![("frontend:GET".to_string(), 4_000)],
+        ..summary_row(7, false)
+    };
+    let t8_old = TraceSummaryRow {
+        span_count: 1,
+        ..summary_row(8, false)
+    };
+    let t8_new = TraceSummaryRow {
+        span_count: 4,
+        is_error: 1,
+        ..summary_row(8, false)
+    };
+    for part in [[t7_old, t8_old], [t7_new, t8_new]] {
+        store.insert_rows("trace_summaries", &part).await.unwrap();
+    }
+    let eps = store.endpoint_stats(60, &EndpointCaps::default()).await;
+    let ops = store.op_stats(60, &EndpointCaps::default()).await;
+    drop_db(&s, &store).await;
+    let (eps, ops) = (eps.unwrap(), ops.unwrap());
+    assert_eq!(eps.len(), 1);
+    assert_eq!(
+        (eps[0].seen, eps[0].kept),
+        (1, 1),
+        "t8's newest version is an error"
+    );
+    assert_eq!(eps[0].p50, 5_000.0);
+    assert_eq!(ops.len(), 1);
+    assert_eq!(
+        (ops[0].op.as_str(), ops[0].present, ops[0].p95),
+        ("frontend:GET", 1, 4_000.0)
+    );
+}
+
+/// The baseline queries as they were before sub-project 4: `trace_summaries FINAL`, the `ts`
+/// filter applied to the newest version. Kept here as the reference the `argMax` rewrite is
+/// compared with. Bound parameters: cap keys, cap values, slow-story lookback, window, window.
+const FINAL_BASELINE_WITH: &str = "WITH CAST(? AS Array(String)) AS cap_keys, \
+     CAST(? AS Array(UInt64)) AS cap_vals, \
+     slow_ids AS (SELECT trace_id FROM error_stories \
+     WHERE kind = 'slow' AND ts > now() - INTERVAL ? MINUTE), \
+     p50s AS (SELECT endpoint_service, endpoint_name, quantile(0.5)(duration_ns) AS p50 \
+     FROM trace_summaries FINAL WHERE ts > now() - INTERVAL ? MINUTE AND is_error = 0 \
+     AND trace_id NOT IN (SELECT trace_id FROM slow_ids) \
+     GROUP BY endpoint_service, endpoint_name)";
+const FINAL_BASELINE_CANDIDATES: &str = "SELECT t.endpoint_service AS endpoint_service, \
+     t.endpoint_name AS endpoint_name, t.duration_ns AS duration_ns, t.op_durations AS op_durations, \
+     indexOf(cap_keys, concat(t.endpoint_service, '\\0', t.endpoint_name)) AS cap_idx, \
+     if(cap_idx > 0, arrayElement(cap_vals, cap_idx), toUInt64(ceil(10 * p50s.p50))) AS cap_ns, \
+     t.trace_id IN (SELECT trace_id FROM slow_ids) AS has_slow, \
+     NOT has_slow AND t.duration_ns <= cap_ns AS is_kept, \
+     NOT has_slow AND t.duration_ns > cap_ns AS is_capped \
+     FROM trace_summaries AS t FINAL \
+     LEFT JOIN p50s ON t.endpoint_service = p50s.endpoint_service AND t.endpoint_name = p50s.endpoint_name \
+     WHERE t.ts > now() - INTERVAL ? MINUTE AND t.is_error = 0";
+
+type Baselines = (Vec<EndpointStatsRow>, Vec<OpStatsRow>);
+
+/// `endpoint_stats` and `op_stats` through the `FINAL` reference, sorted.
+async fn final_baselines(
+    store: &Store,
+    window: u32,
+    caps: &EndpointCaps,
+) -> clickhouse::error::Result<Baselines> {
+    let bind = |sql: &str| {
+        store
+            .client()
+            .query(sql)
+            .bind(&caps.keys)
+            .bind(&caps.caps_ns)
+            .bind(window + 10)
+            .bind(window)
+            .bind(window)
+    };
+    let eps = bind(&format!(
+        "{FINAL_BASELINE_WITH} \
+         SELECT endpoint_service, endpoint_name, count() AS seen, \
+         countIf(is_kept) AS kept, countIf(is_capped) AS excluded, \
+         quantileIf(0.5)(duration_ns, is_kept) AS p50, \
+         quantileIf(0.95)(duration_ns, is_kept) AS p95, \
+         quantileIf(0.99)(duration_ns, is_kept) AS p99 \
+         FROM ({FINAL_BASELINE_CANDIDATES}) GROUP BY endpoint_service, endpoint_name"
+    ))
+    .fetch_all()
+    .await?;
+    let ops = bind(&format!(
+        "{FINAL_BASELINE_WITH} \
+         SELECT endpoint_service, endpoint_name, op, count() AS present, quantile(0.95)(d) AS p95 \
+         FROM (SELECT endpoint_service, endpoint_name, op_durations \
+         FROM ({FINAL_BASELINE_CANDIDATES}) WHERE is_kept) \
+         ARRAY JOIN mapKeys(op_durations) AS op, mapValues(op_durations) AS d \
+         GROUP BY endpoint_service, endpoint_name, op"
+    ))
+    .fetch_all()
+    .await?;
+    Ok(sorted((eps, ops)))
+}
+
+/// `endpoint_stats` and `op_stats` as shipped (the `argMax` dedup), sorted.
+async fn argmax_baselines(
+    store: &Store,
+    window: u32,
+    caps: &EndpointCaps,
+) -> clickhouse::error::Result<Baselines> {
+    let eps = store.endpoint_stats(window, caps).await?;
+    let ops = store.op_stats(window, caps).await?;
+    Ok(sorted((eps, ops)))
+}
+
+fn sorted((mut eps, mut ops): Baselines) -> Baselines {
+    eps.sort_by(|a, b| {
+        (&a.endpoint_service, &a.endpoint_name).cmp(&(&b.endpoint_service, &b.endpoint_name))
+    });
+    ops.sort_by(|a, b| {
+        (&a.endpoint_service, &a.endpoint_name, &a.op).cmp(&(
+            &b.endpoint_service,
+            &b.endpoint_name,
+            &b.op,
+        ))
+    });
+    (eps, ops)
+}
+
+/// The `argMax` baselines equal the `FINAL` ones over deliberate duplicates: several versions of
+/// one trace in separate parts (the newest moving it to another endpoint, or making it an
+/// error), a version tie (an identical replay), a newer version that moves a trace into the
+/// window, slow stories and caps. The one documented difference (spec §3.8): a newer version
+/// that moves a trace out of the window. `FINAL` drops the trace; the `argMax` dedup runs after
+/// the `ts` filter and counts the version inside the window.
+#[tokio::test]
+#[ignore = "requires ClickHouse: run against the live stack"]
+async fn argmax_baselines_equal_final_over_duplicates() {
+    let s = settings();
+    migrate(&s).await.unwrap();
+    let store = Store::new(&s);
+    let two_hours_ago = now_ns() - 2 * 3_600 * 1_000_000_000;
+    // 40 single-version traces; t0..t39 with the cart op on even ids.
+    let base: Vec<TraceSummaryRow> = (0..40).map(|i| summary_row(i, i % 2 == 0)).collect();
+    // t100: three versions, the last on another endpoint.
+    let t100 = [
+        TraceSummaryRow {
+            span_count: 1,
+            ..summary_row(100, false)
+        },
+        TraceSummaryRow {
+            span_count: 2,
+            is_error: 1,
+            ..summary_row(100, true)
+        },
+        TraceSummaryRow {
+            span_count: 3,
+            endpoint_service: "cart".into(),
+            endpoint_name: "Get".into(),
+            duration_ns: 50_000,
+            op_durations: vec![("cart:op".to_string(), 20_000)],
+            ..summary_row(100, false)
+        },
+    ];
+    // t101: the newest version is an error, so neither query counts it.
+    let t101 = [
+        TraceSummaryRow {
+            span_count: 1,
+            ..summary_row(101, true)
+        },
+        TraceSummaryRow {
+            span_count: 3,
+            is_error: 1,
+            ..summary_row(101, true)
+        },
+    ];
+    // t102: a version tie, an identical replay.
+    let t102 = TraceSummaryRow {
+        span_count: 2,
+        ..summary_row(102, true)
+    };
+    // t103: the old version is outside the window, the newer one moves it in.
+    let t103 = [
+        TraceSummaryRow {
+            ts: two_hours_ago,
+            span_count: 1,
+            duration_ns: 7_777,
+            ..summary_row(103, false)
+        },
+        TraceSummaryRow {
+            span_count: 2,
+            ..summary_row(103, true)
+        },
+    ];
+    // t104: a single version far above 10 x p50, so the bootstrap cap excludes it.
+    let t104 = TraceSummaryRow {
+        duration_ns: 10_000_000,
+        ..summary_row(104, true)
+    };
+    let parts: [Vec<TraceSummaryRow>; 3] = [
+        base.into_iter()
+            .chain([t100[0].clone(), t101[0].clone(), t102.clone()])
+            .collect(),
+        vec![t100[1].clone(), t102, t103[0].clone(), t104],
+        vec![t100[2].clone(), t101[1].clone(), t103[1].clone()],
+    ];
+    for part in &parts {
+        store.insert_rows("trace_summaries", part).await.unwrap();
+    }
+    // t5 produced a slow story: it leaves the kept set and the bootstrap p50.
+    store
+        .insert_rows(
+            "error_stories",
+            &[StoryRow {
+                kind: 2,
+                ..story_row("t5")
+            }],
+        )
+        .await
+        .unwrap();
+    let caps = EndpointCaps {
+        keys: vec!["frontend\0GET /".into()],
+        caps_ns: vec![1_030],
+    };
+    let none = EndpointCaps::default();
+    let mut runs = Vec::new();
+    for c in [&none, &caps] {
+        runs.push((
+            argmax_baselines(&store, 60, c).await,
+            final_baselines(&store, 60, c).await,
+        ));
+    }
+    // t200: in the window, then a newer version outside it.
+    let t200 = |ts: i64, span_count: u32| TraceSummaryRow {
+        trace_id: "t200".into(),
+        ts,
+        endpoint_service: "straddle".into(),
+        endpoint_name: "GET /gone".into(),
+        duration_ns: 3_000,
+        is_error: 0,
+        op_durations: vec![("straddle:op".to_string(), 1_000)],
+        span_count,
+    };
+    for v in [t200(now_ns(), 1), t200(two_hours_ago, 2)] {
+        store.insert_rows("trace_summaries", &[v]).await.unwrap();
+    }
+    let straddled = (
+        argmax_baselines(&store, 60, &none).await,
+        final_baselines(&store, 60, &none).await,
+    );
+    drop_db(&s, &store).await;
+
+    for (i, (argmax, fin)) in runs.into_iter().enumerate() {
+        let (argmax, fin) = (argmax.unwrap(), fin.unwrap());
+        assert_eq!(argmax, fin, "run {i}");
+        let (eps, ops) = argmax;
+        let frontend = stats_of(&eps, "frontend");
+        // 40 base traces, t102, t103 and t104; t100 moved to cart, t101 is an error.
+        assert_eq!(frontend.seen, 43, "run {i}");
+        assert_eq!(stats_of(&eps, "cart").seen, 1, "run {i}");
+        assert!(ops.iter().any(|o| o.op == "cart:op"), "run {i}");
+        if i == 0 {
+            // No cap: t5 (slow story) and t104 (above 10 x p50) leave the kept set.
+            assert_eq!((frontend.kept, frontend.excluded), (41, 1));
+        } else {
+            // A 1,030 ns cap keeps t0..t30 minus t5; t31..t39, t102, t103 and t104 are above it.
+            assert_eq!((frontend.kept, frontend.excluded), (30, 12));
+        }
+    }
+    let ((mut eps, mut ops), (fin_eps, fin_ops)) = (straddled.0.unwrap(), straddled.1.unwrap());
+    let gone = eps
+        .iter()
+        .position(|e| e.endpoint_service == "straddle")
+        .expect("argMax counts the in-window version");
+    let gone = eps.remove(gone);
+    assert_eq!((gone.seen, gone.kept, gone.p50), (1, 1, 3_000.0));
+    let gone_op = ops
+        .iter()
+        .position(|o| o.endpoint_service == "straddle")
+        .expect("and its ops");
+    assert_eq!(ops.remove(gone_op).op, "straddle:op");
+    assert_eq!(
+        (eps, ops),
+        (fin_eps, fin_ops),
+        "FINAL drops t200; everything else is equal"
+    );
 }
 
 /// A brand-new endpoint has no previous limit: its first baseline is capped at 10 x p50.

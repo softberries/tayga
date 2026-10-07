@@ -154,7 +154,64 @@ Reproduce: `cargo bench -p tayga-drain --bench mining -- cached` and `cargo test
 
 ## Hotspots before and after
 
-Filled by Task 6/7.
+The fixes are spec §3.8:
+- the service map's 24 h baseline is its own query, ending at the window end's minute floor and cached for that minute (up to 60 s stale);
+- `endpoint_stats` and `op_stats` deduplicate with `argMax(…, span_count) GROUP BY trace_id` over the `ts`-filtered rows instead of `trace_summaries FINAL`.
+
+"Before" is spec §2.7, from the 2026-10-06 `system.query_log` hour. Task 7 adds the live "after" columns.
+
+| Query | Before: runs/h | Before: CPU s/h | Before: read per run | After (live, Task 7) |
+|---|---|---|---|---|
+| service map nodes (`service_graph`) | 1,006 | 558 | 10.0 M rows, 162 MiB | Task 7 |
+| `op_stats` | 60 | 97 | 8.6 M rows, 1.22 GiB | Task 7 |
+| `endpoint_stats` | 60 | 70 | 8.6 M rows, 468 MiB | Task 7 |
+
+Isolated variants before the fix (spec §2.7, read-only, `use_query_cache=0`, best of 3):
+
+| Variant | ms | CPU ms | Rows read | Bytes read |
+|---|---|---|---|---|
+| `endpoint_stats` as deployed | 114 | 999 | 8.79 M | 478 MiB |
+| `endpoint_stats` with the `argMax` dedup | 70 | 265 | 0.39 M | 21 MiB |
+| `op_stats` as deployed | 154 | 1,511 | 8.55 M | 1.21 GiB |
+| the `argMax` dedup carrying `op_durations` | 141 | 538 | 0.38 M | 91 MiB |
+| service map as deployed (15 min window + 24 h baseline) | 31 | 269 | 9.81 M | 163 MiB |
+| service map, window part only | 8 | 12 | 0.19 M | 3.3 MiB |
+
+### Task 6: the shipped queries on live data
+
+Re-run on 2026-10-07 around 02:20 UTC against the live `tayga` database. The settings were `readonly=2` and `use_query_cache=0`, with no caps (`[]`, the bootstrap path). Each query ran 3 times. The figures come from `system.query_log` (`QueryFinish`): best wall ms, best and mean `ProfileEvents['OSCPUVirtualTimeMicroseconds']`, then `read_rows` and `read_bytes`. "Before" is the pre-Task-6 SQL; "after" is the SQL of this commit.
+
+| Query | Wall ms | CPU ms, best (mean) | Rows read | Bytes read | Result rows |
+|---|---|---|---|---|---|
+| `endpoint_stats` before | 89 | 818 (921) | 8.81 M | 478.9 MiB | 68 |
+| `endpoint_stats` after | 51 | 127 (134) | 0.36 M | 19.5 MiB | 68 |
+| `op_stats` before | 125 | 1,302 (1,340) | 8.81 M | 1.25 GiB | 453 |
+| `op_stats` after | 148 | 373 (383) | 0.36 M | 83.8 MiB | 453 |
+| service map before (15 min window + 24 h baseline, one query) | 28 | 235 (257) | 10.60 M | 165.3 MiB | 17 |
+| service map after: window query, every request | 7 | 9.8 (11) | 0.16 M | 2.7 MiB | 17 |
+| service map after: baseline query, once per minute | 28 | 216 (225) | 10.60 M | 165.9 MiB | 17 |
+
+- **The cost moves out of the per-refresh path.** At spec §2.7's rate of 1,006 map runs/h and one baseline a minute, the estimate is 1,006 × 9.8 ms + 60 × 216 ms, about **23 CPU s/h** instead of 558. Live tabs share it, since their window ends fall in the same minute. The cache holds one entry, so requests for a past window (another minute floor) recompute it and evict the live one. This is an estimate from isolated runs; Task 7 measures it live.
+- **The baselines' CPU falls by 6.4x and 3.5x.** At 60 runs/h, `endpoint_stats` drops to about 8 CPU s/h (was 70) and `op_stats` to about 22 (was 97). These are estimates from isolated runs.
+- **`op_stats` wall time is not lower** (148 against 125 ms best of 3) even though CPU falls 3.5x. The cause was not investigated. CPU and bytes read are what the stack pays for.
+
+**Equivalence on live data.**
+- **Setup.** The comparison pinned `now()` to a fixed instant 5 minutes earlier and added `ts <= that instant` to every `ts` filter, in both versions, so ingest during the runs could not move the window. It ran before, after, then before again as a control.
+- **As shipped:**
+  - the same 67 endpoints and 450 ops;
+  - `seen` equal everywhere;
+  - 1 endpoint and 2 ops differ in `kept`/`excluded`/`present`, while the before/before control differs in 0.
+  - The cause is the bootstrap cap, 10 × `quantile(0.5)`. `quantile` samples, and the two versions feed it rows in a different order.
+- **With `quantileExact` for the p50** (both versions): every `seen`, `kept`, `excluded` and `present` is equal. The remaining quantile differences are 2 endpoint rows and 5 op rows, the same number as the before/before control.
+
+The integration test `argmax_baselines_equal_final_over_duplicates` (`crates/tayga-store/tests/store_it.rs`) pins the semantics on deliberate duplicates. It compares the shipped queries with the `FINAL` reference over:
+- several versions in separate parts;
+- a newer version that changes the endpoint or turns the trace into an error;
+- a version tie;
+- a newer version that moves a trace into the window;
+- slow stories and caps.
+
+It also pins the documented difference: a newer version that moves a trace out of the window. `FINAL` drops that trace; the `argMax` dedup counts its in-window version.
 
 ## Decisions
 

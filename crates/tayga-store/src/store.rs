@@ -63,13 +63,15 @@ impl Store {
         caps: &EndpointCaps,
     ) -> clickhouse::error::Result<Vec<EndpointStatsRow>> {
         let sql = format!(
-            "{BASELINE_WITH} \
+            "{} \
              SELECT endpoint_service, endpoint_name, count() AS seen, \
              countIf(is_kept) AS kept, countIf(is_capped) AS excluded, \
              quantileIf(0.5)(duration_ns, is_kept) AS p50, \
              quantileIf(0.95)(duration_ns, is_kept) AS p95, \
              quantileIf(0.99)(duration_ns, is_kept) AS p99 \
-             FROM ({BASELINE_CANDIDATES}) GROUP BY endpoint_service, endpoint_name"
+             FROM ({}) GROUP BY endpoint_service, endpoint_name",
+            baseline_with(false),
+            baseline_candidates(false)
         );
         bind_baseline(self.client.query(&sql), window_minutes, caps)
             .fetch_all()
@@ -84,12 +86,14 @@ impl Store {
         caps: &EndpointCaps,
     ) -> clickhouse::error::Result<Vec<OpStatsRow>> {
         let sql = format!(
-            "{BASELINE_WITH} \
+            "{} \
              SELECT endpoint_service, endpoint_name, op, count() AS present, quantile(0.95)(d) AS p95 \
              FROM (SELECT endpoint_service, endpoint_name, op_durations \
-             FROM ({BASELINE_CANDIDATES}) WHERE is_kept) \
+             FROM ({}) WHERE is_kept) \
              ARRAY JOIN mapKeys(op_durations) AS op, mapValues(op_durations) AS d \
-             GROUP BY endpoint_service, endpoint_name, op"
+             GROUP BY endpoint_service, endpoint_name, op",
+            baseline_with(true),
+            baseline_candidates(true)
         );
         bind_baseline(self.client.query(&sql), window_minutes, caps)
             .fetch_all()
@@ -105,30 +109,60 @@ pub struct EndpointCaps {
     pub caps_ns: Vec<u64>,
 }
 
-/// Bound parameters, in order: cap keys, cap values, slow-story lookback, window (p50
-/// subquery), window (candidates).
-const BASELINE_WITH: &str = "WITH CAST(? AS Array(String)) AS cap_keys, \
-     CAST(? AS Array(UInt64)) AS cap_vals, \
-     slow_ids AS (SELECT trace_id FROM error_stories \
-     WHERE kind = 'slow' AND ts > now() - INTERVAL ? MINUTE), \
-     p50s AS (SELECT endpoint_service, endpoint_name, quantile(0.5)(duration_ns) AS p50 \
-     FROM trace_summaries FINAL WHERE ts > now() - INTERVAL ? MINUTE AND is_error = 0 \
-     AND trace_id NOT IN (SELECT trace_id FROM slow_ids) \
-     GROUP BY endpoint_service, endpoint_name)";
+/// The `WITH` clause of the baseline queries. Bound parameters, in order: cap keys, cap values,
+/// window, slow-story lookback.
+///
+/// `latest` is the newest version of every trace of the window: `argMax` by `span_count`, the
+/// `ReplacingMergeTree` version, over the rows the `ts` filter keeps. `FINAL` read the whole
+/// table instead (`ORDER BY trace_id`, so the filter prunes nothing): 8.8 M rows and 478 MiB per
+/// `endpoint_stats` against 0.39 M rows and 21 MiB (sub-project 4 spec §2.7). `with_ops`
+/// carries `op_durations`, which only `op_stats` reads.
+fn baseline_with(with_ops: bool) -> String {
+    let (ops_in, ops_out) = if with_ops {
+        (", op_durations", ", tupleElement(v, 5) AS op_durations")
+    } else {
+        ("", "")
+    };
+    format!(
+        "WITH CAST(? AS Array(String)) AS cap_keys, \
+         CAST(? AS Array(UInt64)) AS cap_vals, \
+         latest AS (SELECT trace_id, tupleElement(v, 1) AS endpoint_service, \
+         tupleElement(v, 2) AS endpoint_name, tupleElement(v, 3) AS duration_ns, \
+         tupleElement(v, 4) AS is_error{ops_out} \
+         FROM (SELECT trace_id, \
+         argMax((endpoint_service, endpoint_name, duration_ns, is_error{ops_in}), span_count) AS v \
+         FROM trace_summaries WHERE ts > now() - INTERVAL ? MINUTE GROUP BY trace_id)), \
+         slow_ids AS (SELECT trace_id FROM error_stories \
+         WHERE kind = 'slow' AND ts > now() - INTERVAL ? MINUTE), \
+         p50s AS (SELECT endpoint_service, endpoint_name, quantile(0.5)(duration_ns) AS p50 \
+         FROM latest WHERE is_error = 0 AND trace_id NOT IN (SELECT trace_id FROM slow_ids) \
+         GROUP BY endpoint_service, endpoint_name)"
+    )
+}
 
 /// Every non-error trace of the window with its endpoint's cap: the previous limit when there
 /// is one, otherwise 10 x the p50 of the window's slow-story-free traces (bootstrap).
 /// `is_kept`: no slow story and within the cap. `is_capped`: no slow story but above the cap.
-const BASELINE_CANDIDATES: &str = "SELECT t.endpoint_service AS endpoint_service, \
-     t.endpoint_name AS endpoint_name, t.duration_ns AS duration_ns, t.op_durations AS op_durations, \
-     indexOf(cap_keys, concat(t.endpoint_service, '\\0', t.endpoint_name)) AS cap_idx, \
-     if(cap_idx > 0, arrayElement(cap_vals, cap_idx), toUInt64(ceil(10 * p50s.p50))) AS cap_ns, \
-     t.trace_id IN (SELECT trace_id FROM slow_ids) AS has_slow, \
-     NOT has_slow AND t.duration_ns <= cap_ns AS is_kept, \
-     NOT has_slow AND t.duration_ns > cap_ns AS is_capped \
-     FROM trace_summaries AS t FINAL \
-     LEFT JOIN p50s ON t.endpoint_service = p50s.endpoint_service AND t.endpoint_name = p50s.endpoint_name \
-     WHERE t.ts > now() - INTERVAL ? MINUTE AND t.is_error = 0";
+fn baseline_candidates(with_ops: bool) -> String {
+    let ops = if with_ops {
+        "t.op_durations AS op_durations, "
+    } else {
+        ""
+    };
+    format!(
+        "SELECT t.endpoint_service AS endpoint_service, \
+         t.endpoint_name AS endpoint_name, t.duration_ns AS duration_ns, {ops}\
+         indexOf(cap_keys, concat(t.endpoint_service, '\\0', t.endpoint_name)) AS cap_idx, \
+         if(cap_idx > 0, arrayElement(cap_vals, cap_idx), toUInt64(ceil(10 * p50s.p50))) AS cap_ns, \
+         t.trace_id IN (SELECT trace_id FROM slow_ids) AS has_slow, \
+         NOT has_slow AND t.duration_ns <= cap_ns AS is_kept, \
+         NOT has_slow AND t.duration_ns > cap_ns AS is_capped \
+         FROM latest AS t \
+         LEFT JOIN p50s ON t.endpoint_service = p50s.endpoint_service \
+         AND t.endpoint_name = p50s.endpoint_name \
+         WHERE t.is_error = 0"
+    )
+}
 
 fn bind_baseline(
     q: clickhouse::query::Query,
@@ -137,7 +171,21 @@ fn bind_baseline(
 ) -> clickhouse::query::Query {
     q.bind(&caps.keys)
         .bind(&caps.caps_ns)
+        .bind(window_minutes)
         .bind(window_minutes.saturating_add(SLOW_STORY_LOOKBACK_SLACK_MIN))
-        .bind(window_minutes)
-        .bind(window_minutes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn baseline_sql_reads_no_final_and_binds_four_values() {
+        for ops in [false, true] {
+            let sql = format!("{} {}", baseline_with(ops), baseline_candidates(ops));
+            assert!(!sql.contains("FINAL"), "{sql}");
+            assert_eq!(sql.matches('?').count(), 4, "{sql}");
+            assert_eq!(sql.contains("op_durations"), ops, "{sql}");
+        }
+    }
 }

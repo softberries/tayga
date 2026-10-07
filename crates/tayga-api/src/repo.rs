@@ -3,10 +3,11 @@
 use crate::model::*;
 use crate::params::{
     AlertFilter, GroupFilter, HEALTH_BASELINE_SECS, SeriesQuery, TemplateFilter, TraceFilter,
-    Window,
+    Window, health_baseline_end,
 };
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::sync::{Arc, Mutex, PoisonError};
 use tayga_store::ClickHouseSettings;
 use tayga_store::metrics_store::MetricPointRow;
 use tayga_store::store::Store;
@@ -180,6 +181,14 @@ const GROUP_COLUMNS: &str = "toString(fingerprint) AS fingerprint, toString(any(
 pub struct ChRepo {
     client: clickhouse::Client,
     store: Store,
+    /// The last health baseline computed, by its end (sub-project 4 spec §3.8).
+    health: Mutex<Option<HealthBaseline>>,
+}
+
+/// Per-service p99 over `[end - HEALTH_BASELINE_SECS, end)`.
+struct HealthBaseline {
+    end: i64,
+    p99_ns: Arc<HashMap<String, f64>>,
 }
 
 /// Search results per kind (⌘K).
@@ -210,6 +219,7 @@ impl ChRepo {
                 .with_url(&s.url)
                 .with_database(&s.database),
             store: Store::new(s),
+            health: Mutex::new(None),
         }
     }
 
@@ -225,7 +235,45 @@ impl ChRepo {
                 .client
                 .with_setting("max_execution_time", value.as_str()),
             store: self.store.with_setting("max_execution_time", &value),
+            health: self.health,
         }
+    }
+
+    /// The map's health baseline for a window ending at `window_end`: per service, the p99 of
+    /// the server and consumer spans of the `HEALTH_BASELINE_SECS` before the end's minute
+    /// floor. Kept for that minute, so live refreshes compute it once a minute (sub-project 4
+    /// spec §3.8). A failed query caches nothing.
+    async fn health_baseline(&self, window_end: i64) -> anyhow::Result<Arc<HashMap<String, f64>>> {
+        let end = health_baseline_end(window_end);
+        let cached = self
+            .health
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .filter(|b| b.end == end)
+            .map(|b| Arc::clone(&b.p99_ns));
+        if let Some(p99) = cached {
+            return Ok(p99);
+        }
+        let rows: Vec<BaselineRow> = self
+            .client
+            .query(
+                "SELECT toString(service_name) AS service, quantile(0.99)(duration_ns) AS p99_ns \
+                 FROM spans WHERE kind IN ('server', 'consumer') \
+                 AND start_ts >= toDateTime(?) AND start_ts < toDateTime(?) \
+                 GROUP BY service",
+            )
+            .bind(end - i64::from(HEALTH_BASELINE_SECS))
+            .bind(end)
+            .fetch_all()
+            .await?;
+        let p99: Arc<HashMap<String, f64>> =
+            Arc::new(rows.into_iter().map(|r| (r.service, r.p99_ns)).collect());
+        *self.health.lock().unwrap_or_else(PoisonError::into_inner) = Some(HealthBaseline {
+            end,
+            p99_ns: Arc::clone(&p99),
+        });
+        Ok(p99)
     }
 
     /// Stories per bucket and kind under a group filter.
@@ -880,33 +928,34 @@ impl Repo for ChRepo {
 
     async fn service_graph(&self, window: Window) -> anyhow::Result<ServiceMapView> {
         let edges = self.service_map(window).await?;
-        // The window and the 24h baseline before its end in one scan over the longer of the two.
-        let baseline_start = window.end - i64::from(HEALTH_BASELINE_SECS);
-        let rows: Vec<NodeRow> = self
+        let rows: Vec<NodeWindowRow> = self
             .client
             .query(
-                "SELECT toString(service_name) AS service, \
-                 countIf(start_ts >= toDateTime(?)) AS calls, \
-                 countIf(start_ts >= toDateTime(?) AND status_code = 'error') AS errors, \
-                 quantileIf(0.99)(duration_ns, start_ts >= toDateTime(?)) AS p99_ns, \
-                 quantileIf(0.99)(duration_ns, start_ts >= toDateTime(?)) AS baseline_p99_ns \
+                "SELECT toString(service_name) AS service, count() AS calls, \
+                 countIf(status_code = 'error') AS errors, quantile(0.99)(duration_ns) AS p99_ns \
                  FROM spans WHERE kind IN ('server', 'consumer') \
                  AND start_ts >= toDateTime(?) AND start_ts < toDateTime(?) \
-                 GROUP BY service HAVING calls > 0 ORDER BY service LIMIT 500",
+                 GROUP BY service ORDER BY service LIMIT 500",
             )
             .bind(window.start)
-            .bind(window.start)
-            .bind(window.start)
-            .bind(baseline_start)
-            .bind(window.start.min(baseline_start))
             .bind(window.end)
             .fetch_all()
             .await?;
+        let baseline = self.health_baseline(window.end).await?;
         Ok(ServiceMapView {
             edges,
             nodes: rows
                 .into_iter()
-                .map(|r| NodeView::from_row(r, window.secs()))
+                .map(|r| {
+                    let row = NodeRow {
+                        baseline_p99_ns: baseline.get(&r.service).copied().unwrap_or(0.0),
+                        service: r.service,
+                        calls: r.calls,
+                        errors: r.errors,
+                        p99_ns: r.p99_ns,
+                    };
+                    NodeView::from_row(row, window.secs())
+                })
                 .collect(),
         })
     }
@@ -968,6 +1017,13 @@ impl Repo for ChRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_health_baseline_ends_at_the_minute_floor() {
+        assert_eq!(health_baseline_end(1_791_310_363), 1_791_310_320);
+        assert_eq!(health_baseline_end(1_791_310_320), 1_791_310_320);
+        assert_eq!(health_baseline_end(1_791_310_379), 1_791_310_320);
+    }
 
     #[test]
     fn max_execution_time_is_sent_with_every_query_unless_zero() {
