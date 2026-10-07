@@ -2609,6 +2609,7 @@ dependencies = [
  "criterion",
  "flate2",
  "proptest",
+ "rayon",
  "serde",
  "serde_json",
  "tayga-analysis",

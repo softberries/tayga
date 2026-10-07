@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 tayga-analysis.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

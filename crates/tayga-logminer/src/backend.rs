@@ -3,12 +3,14 @@
 use std::str::FromStr;
 use std::sync::Arc;
 use tayga_drain::fingerprint::{BatchFingerprinter, ScalarFingerprinter};
+use tayga_drain::parallel::ParallelFingerprinter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     /// No cache: every line through the Drain tree (the kill switch).
     Off,
     Scalar,
+    Parallel,
 }
 
 impl FromStr for Backend {
@@ -18,8 +20,9 @@ impl FromStr for Backend {
         match s {
             "off" => Ok(Self::Off),
             "scalar" => Ok(Self::Scalar),
+            "parallel" => Ok(Self::Parallel),
             other => Err(format!(
-                "unknown fingerprinter {other:?}: expected off or scalar"
+                "unknown fingerprinter {other:?}: expected off, scalar or parallel"
             )),
         }
     }
@@ -31,6 +34,7 @@ impl Backend {
         match self {
             Self::Off => (None, "off"),
             Self::Scalar => (Some(Arc::new(ScalarFingerprinter)), "scalar"),
+            Self::Parallel => (Some(Arc::new(ParallelFingerprinter)), "parallel"),
         }
     }
 }
@@ -41,16 +45,23 @@ mod tests {
 
     #[test]
     fn parses_the_backends_and_names_the_allowed_ones() {
-        assert_eq!("off".parse::<Backend>(), Ok(Backend::Off));
-        assert_eq!("scalar".parse::<Backend>(), Ok(Backend::Scalar));
+        for (s, b) in [
+            ("off", Backend::Off),
+            ("scalar", Backend::Scalar),
+            ("parallel", Backend::Parallel),
+        ] {
+            assert_eq!(s.parse::<Backend>(), Ok(b));
+        }
         let e = "simd".parse::<Backend>().unwrap_err();
-        assert!(e.contains("off or scalar"), "{e}");
+        assert!(e.contains("off, scalar or parallel"), "{e}");
     }
 
     #[test]
-    fn off_builds_nothing_and_scalar_builds_itself() {
+    fn off_builds_nothing_and_the_cpu_backends_build_themselves() {
         assert!(Backend::Off.build().0.is_none());
-        let (f, used) = Backend::Scalar.build();
-        assert_eq!((f.map(|f| f.name()), used), (Some("scalar"), "scalar"));
+        for (b, name) in [(Backend::Scalar, "scalar"), (Backend::Parallel, "parallel")] {
+            let (f, used) = b.build();
+            assert_eq!((f.map(|f| f.name()), used), (Some(name), name));
+        }
     }
 }

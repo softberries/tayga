@@ -83,7 +83,7 @@ struct LogminerSettings {
     baseline_mode: String,
     alerts_topic: String,
     metrics_addr: SocketAddr,
-    /// Fingerprint backend in front of Drain: `off`, `scalar`, `parallel` or `gpu`.
+    /// Fingerprint backend in front of Drain: `off`, `scalar` or `parallel`.
     fingerprinter: String,
 }
 
@@ -1822,6 +1822,7 @@ mod tests {
             ..LogminerSettings::default()
         };
         assert!(with("off").validate().is_ok());
+        assert!(with("parallel").validate().is_ok());
         let e = with("simd").validate().unwrap_err().to_string();
         assert!(e.contains("logminer.fingerprinter"), "{e}");
     }

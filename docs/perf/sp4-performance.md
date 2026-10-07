@@ -109,16 +109,16 @@ Spike (spec §2.3): masking 70 %, tree 11 %. Masking dominates, as in the spike.
 
 ## Fingerprint backends
 
-| Batch | scalar |
-|---|---|
-| 5 | 1.95 µs (2.57 Melem/s) |
-| 64 | 16.8 µs (3.80 Melem/s) |
-| 512 | 148 µs (3.45 Melem/s) |
-| 2,048 | 566 µs (3.62 Melem/s) |
-| 5,000 | 1.36 ms (3.67 Melem/s) |
-| 50,000 | 13.8 ms (3.64 Melem/s) |
+| Batch | scalar | parallel | parallel / scalar |
+|---|---|---|---|
+| 5 | 2.38 µs (2.11 Melem/s) | 2.39 µs (2.09 Melem/s) | 0.99× |
+| 64 | 20.7 µs (3.09 Melem/s) | 20.6 µs (3.10 Melem/s) | 1.00× |
+| 512 | 179 µs (2.86 Melem/s) | 99.5 µs (5.15 Melem/s) | 1.80× |
+| 2,048 | 681 µs (3.01 Melem/s) | 158 µs (12.96 Melem/s) | 4.31× |
+| 5,000 | 1.68 ms (2.98 Melem/s) | 257 µs (19.44 Melem/s) | 6.52× |
+| 50,000 | 16.7 ms (2.99 Melem/s) | 1.74 ms (28.76 Melem/s) | 9.60× |
 
-Median of `cargo bench -p tayga-drain --bench mining -- fingerprint`. Every ASCII body equals `reference_fingerprint` (`tests/fingerprint.rs`); non-ASCII bodies take the Drain path.
+Criterion's median estimate of `cargo bench -p tayga-drain --bench mining -- fingerprint`, scalar and parallel from one run (a later run than the first scalar-only table: the machine was about 21 % slower on scalar, so compare ratios, not absolute times). Batches below 512 bodies run on the calling thread (`PAR_MIN_BATCH`), so 5 and 64 equal scalar. `parallel` equals `ScalarFingerprinter` on the corpus, on NUL and non-ASCII edge cases either side of 512, and on random batches (`tests/backends.rs`). Every ASCII body equals `reference_fingerprint` (`tests/fingerprint.rs`); non-ASCII bodies take the Drain path.
 
 ## Cache
 

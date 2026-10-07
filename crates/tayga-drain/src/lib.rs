@@ -3,4 +3,5 @@
 pub mod detect;
 pub mod drain;
 pub mod fingerprint;
+pub mod parallel;
 pub mod preprocess;

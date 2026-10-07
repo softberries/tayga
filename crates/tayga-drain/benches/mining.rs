@@ -7,6 +7,7 @@ use tayga_drain::drain::{Drain, DrainConfig};
 use tayga_drain::fingerprint::{
     BatchFingerprinter, BodyBatch, ScalarFingerprinter, fingerprint_body,
 };
+use tayga_drain::parallel::ParallelFingerprinter;
 use tayga_drain::preprocess::{MAX_TOKENS, tokens};
 
 #[path = "../tests/corpus/mod.rs"]
@@ -49,7 +50,10 @@ fn stages(c: &mut Criterion) {
     g.finish();
 }
 fn backends() -> Vec<Box<dyn BatchFingerprinter>> {
-    vec![Box::new(ScalarFingerprinter)]
+    vec![
+        Box::new(ScalarFingerprinter),
+        Box::new(ParallelFingerprinter),
+    ]
 }
 
 /// Every backend at the batch sizes of spec §2.5.
