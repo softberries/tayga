@@ -120,12 +120,18 @@ Spike (spec §2.3): masking 70 %, tree 11 %. Masking dominates, as in the spike.
 
 Criterion's point estimate of `cargo bench -p tayga-drain --bench mining --features gpu -- fingerprint`, all three backends from one run on 2026-10-07 (this run replaces the earlier scalar/parallel-only table; its scalar times were within 3 % of it). `gpu` is `GpuFingerprinter` on the M3 Max through Metal (wgpu 30.0.1).
 
+- **`parallel` uses rayon's global pool**, which by default has one thread per logical CPU: 14 on this host (`hw.ncpu` 14).
+- **The spike's parallel numbers were not reproduced.** The spike (spec §2.5) measured 23.4 M elem/s at 5,000 bodies and 36.7 M at 50,000, and the Task 4 brief estimated parallel above 10× scalar from 5,000 bodies. Measured: 19.44 M (6.52×) at 5,000 and 28.76 M (9.60×) at 50,000 in the Task 4 run (`cb51bf4`, scalar and parallel only), and 19.84 M (6.71×) and 25.66 M (8.54×) in the table above. The ratio is the comparable figure: the Task 4 run's scalar was about 21 % slower than the first scalar-only run, so its absolute times are not.
 - **Below `GPU_MIN_BATCH` (2,048) the GPU backend runs scalar**, so 5, 64 and 512 equal scalar. Batches under 512 run on the calling thread for `parallel` too (`PAR_MIN_BATCH`).
 - **The GPU is slower than `parallel` at every size**: 5.0× slower at 2,048, 3.7× at 5,000, 1.6× at 50,000.
 - **Against one thread** the GPU is 4 % slower at 2,048 (its first GPU size), 1.83× faster at 5,000 and 5.37× faster at 50,000. The spike (spec §2.5) measured 5.6 and 15.6 M elem/s at 5,000 and 50,000; this run measured 5.41 and 16.14.
 - **Fixed dispatch cost: 279 µs** (criterion point estimate; interval 276–284 µs), from `fingerprint_gpu_dispatch`: 2,048 empty bodies, so the kernel does almost nothing and buffer creation, upload, dispatch and readback dominate. That is 40 % of the 725 µs at 2,048. A line through the 5,000 and 50,000 points has an intercept of about 680 µs, so the per-body cost is not linear at small batches; the 279 µs is the direct measurement.
 
 Correctness: `parallel` and `gpu` equal `ScalarFingerprinter` on the corpus (50,000 bodies), on NUL, non-ASCII and empty edge cases either side of their thresholds (for `gpu` also 2,048 + 1, + 63, + 64, + 65, which end inside, at and past a 64-invocation workgroup), and on random batches (`tests/backends.rs`; the GPU proptest has 32 cases of up to 3,000 bodies). `gpu::tests::the_kernel_equals_fingerprint_body_on_small_batches` runs the kernel itself, without the CPU threshold, on batches of 1, 2, 63, 64, 65 and 129 bodies; it fails when the kernel's NUL rule is removed (checked by mutation, then reverted). Every ASCII body equals `reference_fingerprint` (`tests/fingerprint.rs`); NUL and non-ASCII bodies take the Drain path.
+
+**`mine_batch` blocks the calling thread.** The logminer calls `Miner::mine_batch` synchronously inside its consume loop (`on_message` in `crates/tayga-logminer/src/main.rs`), on a tokio worker thread. `parallel` waits there for rayon's pool to finish the batch; `gpu` waits for the readback, at most `POLL_TIMEOUT` (5 s) before the batch falls back to scalar. At the live batch of about 5 bodies both run on the calling thread anyway, so this matters only for the opt-in backends at large batches.
+
+**The GPU backend is opt-in.** It is compiled only with `--features gpu` (`tayga-drain`, forwarded by `tayga-logminer`), the Docker images build default features and do not contain it, and it is slower than `parallel` at every measured size. Two of its fallbacks are untested: the 5 s poll timeout (a hang cannot be forced) and the no-adapter path of `GpuFingerprinter::new` (this Mac always has an adapter). `TAYGA_REQUIRE_GPU=1` makes the GPU tests fail instead of skipping when there is no adapter.
 
 Reproduce (GPU rows need a build with the feature and an adapter): `cargo bench -p tayga-drain --bench mining --features gpu -- fingerprint` and `TAYGA_REQUIRE_GPU=1 cargo test -p tayga-drain --features gpu` (without `TAYGA_REQUIRE_GPU=1` the GPU tests skip when no adapter exists).
 
@@ -152,21 +158,60 @@ The cache makes mining **6.98×** faster (144.29 / 20.678). The spike measured 8
 
 Reproduce: `cargo bench -p tayga-drain --bench mining -- cached` and `cargo test -p tayga-drain --test differential`.
 
+### The cache live (Task 7, 2026-10-07)
+
+Deploy at 04:30:52 UTC with the default `scalar` backend; readings of the logminer's `/metrics`:
+
+| Measure | Value |
+|---|---|
+| Lines mined in the first 30 minutes (04:30:50 to 05:01:14) | 69,569: 69,359 cache hits, 210 misses, so **99.70 % hits** |
+| Collisions, cache resets | 0; 0 `generalised`, 0 `full` |
+| Templates created | 0 (control window before the deploy, 10 min 38 s: also 0) |
+| Records mined | 13,470, so 5.16 logs per record |
+| Mean `mine_batch` time, `scalar` | 0.10756 s / 13,470 = **8.0 µs per record** (Pipeline chart p50 8.6–9.9 µs, p99 57–61 µs) |
+| Mean `mine_batch` time, `off` (kill switch, 05:37:24 to about 05:40:05) | 0.043595 s / 1,251 = **34.8 µs per record** |
+
+The live gain, 34.8 against 8.0 µs per record (4.4×), is a mean over two different short windows, not a controlled benchmark. Either way mining stays a negligible share of a core at about 40 lines/s.
+
+Real-data differential: the last hour of `logs` exported at 04:31:37 UTC (130,378 lines, 17 services, 03:31:37 to 04:31:36) passed `TAYGA_CORPUS=<file> cargo test -p tayga-drain --release --test differential --test fingerprint` (5 and 2 tests).
+
 ## Hotspots before and after
 
 The fixes are spec §3.8:
 - the service map's 24 h baseline is its own query, ending at the window end's minute floor and cached for that minute (up to 60 s stale);
 - `endpoint_stats` and `op_stats` deduplicate with `argMax(…, span_count) GROUP BY trace_id` over the `ts`-filtered rows instead of `trace_summaries FINAL`.
 
-"Before" is spec §2.7, from the 2026-10-06 `system.query_log` hour. Task 7 adds the live "after" columns.
+Each figure below is labelled by its source, and comparisons are made only within one source:
+- **live 10-06**: the 2026-10-06 `system.query_log` hour of spec §2.7 (old code, real UI tabs: 1,006 map runs/h, about 3 tabs);
+- **isolated**: Task 6's back-to-back runs of the old and new SQL on 2026-10-07 around 02:20 UTC (best of 3, `use_query_cache=0`), multiplied by the spec §2.7 run rates (1,006 map runs/h, 60 baseline runs/h). These are estimates;
+- **live 10-07**: Task 7's `system.query_log` on the running stack, old code before the deploy at 04:30:52 UTC and new code after it, with the same synthetic map load.
 
-| Query | Before: runs/h | Before: CPU s/h | Before: read per run | After (live, Task 7) |
-|---|---|---|---|---|
-| service map nodes (`service_graph`) | 1,006 | 558 | 10.0 M rows, 162 MiB | Task 7 |
-| `op_stats` | 60 | 97 | 8.6 M rows, 1.22 GiB | Task 7 |
-| `endpoint_stats` | 60 | 70 | 8.6 M rows, 468 MiB | Task 7 |
+**Like for like, isolated (estimates).**
 
-Isolated variants before the fix (spec §2.7, read-only, `use_query_cache=0`, best of 3):
+| Query | Before: CPU s/h | After: CPU s/h | Ratio |
+|---|---|---|---|
+| service map | 236 (1,006 × 235 ms) | 23 (1,006 × 9.8 ms + 60 × 216 ms) | 10× |
+| `endpoint_stats` | 49 (60 × 818 ms) | 8 (60 × 127 ms) | 6.4× |
+| `op_stats` | 78 (60 × 1,302 ms) | 22 (60 × 373 ms) | 3.5× |
+
+The live 10-06 figures (558, 70 and 97 CPU s/h) are higher than the isolated "before" estimates. The isolated figures are best of 3, while live runs share ClickHouse with ingest and the other queries; that is the likely cause, not investigated. Comparing live 10-06 with isolated "after" (558 against 23) would overstate the gain.
+
+**Like for like, live 10-07 (measured).** The service map ran only when requested, and no UI tab was open, so Task 7 generated the map load itself: `GET /api/v1/service-map` (default window) from a script on the host.
+- **Synchronised load:** 3 requests at once every 10 s, as three tabs refreshing in step. Old code 04:19:42–04:29:42; new code over the hour to 05:31:03.
+- **Staggered load:** three loops each every 10 s, offset by 0, 3.3 and 6.6 s, as three tabs opened at different times. New code 05:38–05:52 (the old code's cost per refresh does not depend on timing: it has no cache).
+
+| Query | Old code, live 10-07 | New code, live 10-07 | Ratio |
+|---|---|---|---|
+| service map, synchronised load | 180 runs in 10 min, 291.5 CPU ms per refresh, 165.3 MiB read: 315 CPU s/h at 1,080 runs/h | 1,070 window runs (24.9 ms, 8.3 MiB) and 177 baseline runs (280.1 ms, 165.4 MiB) in the hour: 76.3 CPU s/h, 71.3 ms per refresh | **4.1×**: below the 5× target |
+| service map, staggered load | 291.5 CPU ms per refresh (as above) | 250 window runs (23.6 ms, 8.7 MiB) and 14 baseline runs (312.5 ms, 165.7 MiB) in 14 min: 41.1 ms per refresh, about 44 CPU s/h at 1,071 runs/h | **7.1×** |
+| `endpoint_stats` | 60 runs/h, 70.9 CPU s/h, 505.7 MiB per run (hour to 04:19:15) | 60 runs/h, 15.2 CPU s/h, 18.3 MiB and 0.34 M rows per run (hour to 05:31:03) | CPU 4.7×, read **27.7×** |
+| `op_stats` | 60 runs/h, 98.5 CPU s/h, 1.32 GiB per run | 60 runs/h, 31.2 CPU s/h, 79.3 MiB and 0.34 M rows per run | CPU 3.2×, read **17.0×** |
+
+- **Why the synchronised load misses 5×.** The baseline ran 177 times in the hour, not about 60. Three requests that arrive together at a minute rollover all miss the one-entry cache and each computes the baseline: there is no single-flight (Task 6 concern 3). With staggered requests the baseline ran once a minute (14 runs in 14 minutes) and the ratio is 7.1×. Not tuned in this sub-project.
+- **The window query costs more live than isolated**: 23.6–24.9 CPU ms per run against 9.8 ms, with 8.3–8.7 MiB read against 2.7 MiB.
+- **`endpoint_stats` and `op_stats` read 17–28× fewer bytes per run**, past the 4× target. Their CPU falls less (4.7× and 3.2×), close to the isolated 6.4× and 3.5×.
+
+Isolated variants before the fix (spec §2.7, read-only, `use_query_cache=0`, best of 3, on 2026-10-06):
 
 | Variant | ms | CPU ms | Rows read | Bytes read |
 |---|---|---|---|---|
@@ -191,8 +236,8 @@ Re-run on 2026-10-07 around 02:20 UTC against the live `tayga` database. The set
 | service map after: window query, every request | 7 | 9.8 (11) | 0.16 M | 2.7 MiB | 17 |
 | service map after: baseline query, once per minute | 28 | 216 (225) | 10.60 M | 165.9 MiB | 17 |
 
-- **The cost moves out of the per-refresh path.** At spec §2.7's rate of 1,006 map runs/h and one baseline a minute, the estimate is 1,006 × 9.8 ms + 60 × 216 ms, about **23 CPU s/h** instead of 558. Live tabs share it, since their window ends fall in the same minute. The cache holds one entry, so requests for a past window (another minute floor) recompute it and evict the live one. This is an estimate from isolated runs; Task 7 measures it live.
-- **The baselines' CPU falls by 6.4x and 3.5x.** At 60 runs/h, `endpoint_stats` drops to about 8 CPU s/h (was 70) and `op_stats` to about 22 (was 97). These are estimates from isolated runs.
+- **The cost moves out of the per-refresh path (isolated estimate).** At spec §2.7's rate of 1,006 map runs/h and one baseline a minute, the estimate is 1,006 × 9.8 ms + 60 × 216 ms, about **23 CPU s/h**, against 236 for the old query at the same rate and from the same isolated runs (the live 10-06 hour measured 558). Live tabs share it, since their window ends fall in the same minute. The cache holds one entry, so a request for a past window (another minute floor) computes its own baseline; since `1e2ade7` it does not replace a newer cached one. The live measurement is in "Like for like, live 10-07" above.
+- **The baselines' CPU falls by 6.4x and 3.5x (isolated estimate).** At 60 runs/h, `endpoint_stats` drops from about 49 to about 8 CPU s/h and `op_stats` from about 78 to about 22 (the live 10-06 hour measured 70 and 97).
 - **`op_stats` wall time is not lower** (148 against 125 ms best of 3) even though CPU falls 3.5x. The cause was not investigated. CPU and bytes read are what the stack pays for.
 
 **Equivalence on live data.**
