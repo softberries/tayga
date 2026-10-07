@@ -14,7 +14,7 @@ A commercial license removes the AGPL obligations, including the source-offering
 
 ## Contributions
 
-Contributions may require you to sign a Contributor License Agreement (CLA), so that the project can offer the code under both the AGPL and a commercial license.
+To contribute, you sign the [Tayga Individual Contributor License Agreement](https://gist.github.com/softberries/3c14d313877887e1afdeaff78af08e09) (CLA), so that the project can offer the code under both the AGPL and a commercial license. You keep the copyright in your contributions; you grant SOFTBERRIES Krzysztof Grajek a license to use and relicense them, and every contribution that is included stays available under the AGPLv3 or another OSI-approved license. CLA assistant asks you to sign on your first pull request. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
