@@ -20,7 +20,7 @@
   "dependencies": {
     "@tanstack/react-query": "5.104.1",
     "@tanstack/react-router": "1.170.41",
-    "@tanstack/react-table": "9.2.5",
+    "@tanstack/react-table": "9.2.6",
     "@tanstack/react-virtual": "3.14.13",
     "@xyflow/react": "12.12.0",
     "cmdk": "1.1.1",
