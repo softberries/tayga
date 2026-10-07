@@ -1,0 +1,54 @@
+name: Bug report
+description: Something in Tayga does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check [Troubleshooting](https://softberries.github.io/tayga/operations/troubleshooting/) and the existing issues first. Report security issues privately, not here.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Tayga version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: How Tayga is deployed
+      options:
+        - Docker Compose (installer or standalone bundle)
+        - Helm on Kubernetes
+        - From source
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant output from the Tayga services. Remove secrets and personal data first.
+      render: text
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Collector setup, ClickHouse or Kafka versions, screenshots.
