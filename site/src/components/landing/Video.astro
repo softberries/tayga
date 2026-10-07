@@ -148,6 +148,11 @@ const hasCaptions = existsSync(media('tayga-tour.vtt'));
 		font: inherit;
 		cursor: pointer;
 	}
+	/* `display: grid` above would otherwise win over the `hidden` attribute and leave the button
+	   covering the native controls after playback starts. */
+	.tg-video__start[hidden] {
+		display: none;
+	}
 	.tg-video__play--lg {
 		width: 5.5rem;
 		height: 5.5rem;
