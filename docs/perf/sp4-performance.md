@@ -257,7 +257,7 @@ The integration test `argmax_baselines_equal_final_over_duplicates` (`crates/tay
 - a newer version that moves a trace into the window;
 - slow stories and caps.
 
-It also pins the documented difference: a newer version that moves a trace out of the window. `FINAL` drops that trace; the `argMax` dedup counts its in-window version.
+Since plan 10 it stops merges on its own `trace_summaries` first, and asserts that the duplicates were still unmerged when it compared (50 rows of 45 traces). Without that, a background merge could collapse them before the queries ran, and the comparison would prove nothing. The `argMin` mutation of `baseline_with` fails it. It also pins the documented difference: a newer version that moves a trace out of the window. `FINAL` drops that trace; the `argMax` dedup counts its in-window version.
 
 ## Plan 10: trace search
 
@@ -296,7 +296,7 @@ Sources, compared only within one source:
 | `limit=500` | 422 | 95 + 76 | 4.80 M / 0.34 + 3.64 M | 251.0 / 18.7 + 121.5 MiB | 500, same set |
 
 - **The post-lookup is the larger part of the cost.** Each id reads about one 8,192-row granule of `trace_id` per part, and the table had 12 parts with 499 marks. 100 ids read 276 marks (73.6 MiB) and 550 ids read 450 (121.1 MiB): most of the `trace_id` column.
-- **The main query alone reads 13.4× less than `FINAL`** (18.7 against 251.0 MiB). With the post-lookup, the default request reads 2.4× less (103.0 MiB) and uses 3.3× less CPU (146 against 477 ms). **The 4× bytes target is not met with the post-lookup.**
+- **The main query alone reads 13.4× less than `FINAL`** (18.7 against 251.0 MiB). With the post-lookup, the default request reads 2.4× less (103.0 MiB) and uses 3.3× less CPU (146 against 477 ms). **The 4× bytes target is missed: 2.4× with the post-lookup.** The controller accepted this on 2026-10-07: correctness comes first. The options to close the gap are an open idea in `docs/superpowers/followups.md`.
 - **The query condition cache.** ClickHouse's query condition cache, on by default, makes a repeated post-lookup with the same ids read about 700 rows (3 ms). A search whose ids change, as they do while traces arrive, does not get that benefit. The table above has the cache off.
 - **Results.** Every request returned the same rows as `FINAL`. Three came back in another order: the default, `service=frontend-web` and `limit=500`. In each case only rows with an equal `ts` swapped places. The `ts` lists are identical, and so are the results once ties are sorted by `trace_id`. The post-lookup dropped 0 rows in these windows.
 - **The `ec70b40f` check** (isolated at 10:15:44 UTC, window 09:20 to 09:40 UTC, `service=payment`, limit 500). `FINAL` returned 0 rows. The main query returned 1 row: the fragment, which the first version of the rewrite showed. The post-lookup dropped it, so the search returned 0 rows. The same request against the deployed API (`since=20m&until=2026-10-07T09:40:00Z`) returned `[]`.
