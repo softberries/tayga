@@ -1944,11 +1944,16 @@ fn version(
 /// - a newer version changing every filtered field (endpoint, duration, error flag);
 /// - newer versions moving a trace into the window and out of it, past either edge;
 /// - version ties: an identical replay, and a later insert with a later `ts`;
-/// - five traces sharing one `ts` at the top, cut by `LIMIT 3`, and other limits.
+/// - five traces sharing one `ts`, cut by `LIMIT 3`, and other limits;
+/// - versions further apart than the scan slack, the newest (most spans) outside the window: a
+///   long-lived trace whose late 2-span fragment is the window's newest row, and a trace whose
+///   newest version is two hours earlier. The post-lookup drops their in-window rows, and the
+///   extra rows keep `LIMIT 1` full.
 ///
 /// For every filter the new result is the old unlimited result, ordered `ts DESC, trace_id`,
 /// cut at the limit; the old limited result has the same `ts` list and only rows of that set.
-/// The documented difference (versions further apart than the scan slack) is asserted last.
+/// The documented tie edges (`FINAL` keeps the last insert, the search the newer `ts`) are
+/// asserted last, in both directions.
 #[tokio::test]
 #[ignore = "requires ClickHouse: make it, or TAYGA_IT_CLICKHOUSE against the live stack"]
 async fn argmax_trace_search_equals_final_over_duplicates() {
@@ -1956,6 +1961,14 @@ async fn argmax_trace_search_equals_final_over_duplicates() {
     migrate(&s).await.unwrap();
     let store = Store::new(&s);
     let r = ChRepo::new(&s);
+    // Keep every version in its own part: a background merge would collapse the duplicates (to
+    // the last insert) before the queries run.
+    store
+        .client()
+        .query("SYSTEM STOP MERGES trace_summaries")
+        .execute()
+        .await
+        .unwrap();
     let sec = 1_000_000_000_i64;
     let w = last(3600);
     // A distinct in-window ts per slot, 10 s apart from 100 s before the end.
@@ -2017,6 +2030,33 @@ async fn argmax_trace_search_equals_final_over_duplicates() {
         version(&h, at(16, 8), front, 8, true, 1),
         version(&h, at(16, 9), front, 8, false, 2),
     ];
+    // x1: a long-lived trace (as the payment flagd `EventStream` of a checkout): the 85-span
+    // version 20 minutes before the window, beyond the scan slack, and a 2-span error fragment
+    // assembled later at the window's newest ts. x2: the newest version two hours earlier.
+    let x1 = hex32();
+    let x1_v = [
+        version(
+            &x1,
+            (w.start - 1_200) * sec,
+            ("load-generator", "user_checkout"),
+            900,
+            false,
+            85,
+        ),
+        version(
+            &x1,
+            (w.end - 10) * sec,
+            ("payment", "flagd.evaluation.v2.Service/EventStream"),
+            600_000,
+            true,
+            2,
+        ),
+    ];
+    let x2 = hex32();
+    let x2_v = [
+        version(&x2, at(8, 10), front, 9, false, 1),
+        version(&x2, (w.start - 2 * 3600) * sec, front, 9, false, 2),
+    ];
     let parts: [Vec<TraceSummaryRow>; 3] = [
         base.iter()
             .chain(&tied)
@@ -2030,6 +2070,8 @@ async fn argmax_trace_search_equals_final_over_duplicates() {
                 f.clone(),
                 g_v[0].clone(),
                 h_v[0].clone(),
+                x1_v[0].clone(),
+                x2_v[0].clone(),
             ])
             .collect(),
         vec![
@@ -2039,8 +2081,9 @@ async fn argmax_trace_search_equals_final_over_duplicates() {
             c_v[1].clone(),
             d_v[1].clone(),
             h_v[1].clone(),
+            x2_v[1].clone(),
         ],
-        vec![f.clone(), g_v[1].clone()],
+        vec![f.clone(), g_v[1].clone(), x1_v[1].clone()],
     ];
     for part in &parts {
         store.insert_rows("trace_summaries", part).await.unwrap();
@@ -2175,15 +2218,32 @@ async fn argmax_trace_search_equals_final_over_duplicates() {
             final_traces(&store, &unlimited).await,
         ));
     }
-    // x: versions two hours apart, beyond the scan slack; the newest is outside the window.
-    let x = hex32();
-    for v in [
-        version(&x, at(8, 10), front, 9, false, 1),
-        version(&x, (w.start - 2 * 3600) * sec, front, 9, false, 2),
-    ] {
-        store.insert_rows("trace_summaries", &[v]).await.unwrap();
+    // The tie edges. k: two 2-span versions, the newer ts inserted first: FINAL keeps the later
+    // insert (the older ts), the search the newer ts. y: two 2-span versions, the later insert
+    // two hours before the window: FINAL keeps it and omits y; the scan never reads it.
+    let (k, y) = (hex32(), hex32());
+    let k_v = [
+        version(&k, at(18, 11), ("frontend", "GET /k-new"), 10, false, 2),
+        version(
+            &k,
+            at(18, 12) - 5 * sec,
+            ("frontend", "GET /k-old"),
+            10,
+            false,
+            2,
+        ),
+    ];
+    let y_v = [
+        version(&y, at(22, 13), front, 11, false, 2),
+        version(&y, (w.start - 2 * 3600) * sec, front, 11, false, 2),
+    ];
+    for v in [&k_v[0], &y_v[0], &k_v[1], &y_v[1]] {
+        store
+            .insert_rows("trace_summaries", std::slice::from_ref(v))
+            .await
+            .unwrap();
     }
-    let far = (
+    let ties = (
         r.traces_search(&all).await,
         final_traces(&store, &all).await,
     );
@@ -2232,19 +2292,30 @@ async fn argmax_trace_search_equals_final_over_duplicates() {
             _ => assert!(!new.is_empty(), "{name}"),
         }
     }
-    // The documented difference: FINAL omits x (its newest version is outside the window); the
-    // scan never reads that version, so x is returned by its version inside the window.
-    let (new, old) = (far.0.unwrap(), far.1.unwrap());
-    assert!(!ids(&old).contains(&x));
-    let x_hit = new
-        .iter()
-        .find(|h| h.trace_id == x)
-        .expect("x by its in-window version");
-    assert_eq!((x_hit.ts_ns, x_hit.span_count), (at(8, 10), 1));
+    // x1 and x2 (versions further apart than the scan slack) equal FINAL above: the post-lookup
+    // drops their stale in-window rows.
+    // The tie edges, both directions; every other row still equals FINAL.
+    let (new, old) = (ties.0.unwrap(), ties.1.unwrap());
+    let hit = |v: &[TraceHitView], id: &str| v.iter().find(|h| h.trace_id == id).cloned();
+    let k_new = hit(&new, &k).expect("k by its newer ts");
+    let k_old = hit(&old, &k).expect("FINAL: k by its later insert");
     assert_eq!(
-        new.into_iter()
-            .filter(|h| h.trace_id != x)
-            .collect::<Vec<_>>(),
-        tie_sorted(old)
+        (k_new.ts_ns, k_new.endpoint_name.as_str()),
+        (at(18, 11), "GET /k-new")
     );
+    assert_eq!(
+        (k_old.ts_ns, k_old.endpoint_name.as_str()),
+        (at(18, 12) - 5 * sec, "GET /k-old")
+    );
+    assert!(
+        hit(&old, &y).is_none(),
+        "FINAL keeps y's version outside the window"
+    );
+    assert_eq!(hit(&new, &y).map(|h| h.ts_ns), Some(at(22, 13)));
+    let others = |v: Vec<TraceHitView>| {
+        v.into_iter()
+            .filter(|h| h.trace_id != k && h.trace_id != y)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(others(new), others(tie_sorted(old)));
 }
