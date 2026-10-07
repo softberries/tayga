@@ -4,9 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# wgpu compute backend for fingerprints (sub-project 4); off by default and in Docker images.
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
 [dependencies]
-tayga-analysis.workspace = true
+bytemuck = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
 rayon.workspace = true
+tayga-analysis.workspace = true
+wgpu = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion.workspace = true

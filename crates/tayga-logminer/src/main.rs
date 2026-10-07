@@ -83,7 +83,8 @@ struct LogminerSettings {
     baseline_mode: String,
     alerts_topic: String,
     metrics_addr: SocketAddr,
-    /// Fingerprint backend in front of Drain: `off`, `scalar` or `parallel`.
+    /// Fingerprint backend in front of Drain: `off`, `scalar`, `parallel` or `gpu` (`gpu` needs
+    /// a build with the `gpu` feature).
     fingerprinter: String,
 }
 
@@ -132,7 +133,7 @@ impl LogminerSettings {
         self.baseline_mode
             .parse::<BaselineMode>()
             .map_err(|e| anyhow::anyhow!("logminer.baseline_mode: {e}"))?;
-        self.backend()?;
+        self.backend()?.check_build()?;
         Ok(())
     }
 
@@ -1823,6 +1824,7 @@ mod tests {
         };
         assert!(with("off").validate().is_ok());
         assert!(with("parallel").validate().is_ok());
+        assert_eq!(with("gpu").validate().is_ok(), cfg!(feature = "gpu"));
         let e = with("simd").validate().unwrap_err().to_string();
         assert!(e.contains("logminer.fingerprinter"), "{e}");
     }

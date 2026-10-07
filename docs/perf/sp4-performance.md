@@ -109,16 +109,25 @@ Spike (spec §2.3): masking 70 %, tree 11 %. Masking dominates, as in the spike.
 
 ## Fingerprint backends
 
-| Batch | scalar | parallel | parallel / scalar |
-|---|---|---|---|
-| 5 | 2.38 µs (2.11 Melem/s) | 2.39 µs (2.09 Melem/s) | 0.99× |
-| 64 | 20.7 µs (3.09 Melem/s) | 20.6 µs (3.10 Melem/s) | 1.00× |
-| 512 | 179 µs (2.86 Melem/s) | 99.5 µs (5.15 Melem/s) | 1.80× |
-| 2,048 | 681 µs (3.01 Melem/s) | 158 µs (12.96 Melem/s) | 4.31× |
-| 5,000 | 1.68 ms (2.98 Melem/s) | 257 µs (19.44 Melem/s) | 6.52× |
-| 50,000 | 16.7 ms (2.99 Melem/s) | 1.74 ms (28.76 Melem/s) | 9.60× |
+| Batch | scalar | parallel | gpu | parallel / scalar | gpu / scalar | gpu time / parallel time |
+|---|---|---|---|---|---|---|
+| 5 | 2.44 µs (2.05 Melem/s) | 2.44 µs (2.05 Melem/s) | 2.43 µs (2.05 Melem/s), CPU path | 1.00× | 1.00× | 1.00 (both on the calling thread) |
+| 64 | 21.0 µs (3.05 Melem/s) | 20.9 µs (3.06 Melem/s) | 21.1 µs (3.03 Melem/s), CPU path | 1.00× | 0.99× | 1.01 (both on the calling thread) |
+| 512 | 184 µs (2.79 Melem/s) | 90.8 µs (5.64 Melem/s) | 182 µs (2.81 Melem/s), CPU path | 2.02× | 1.01× | 2.00: **gpu slower** |
+| 2,048 | 694 µs (2.95 Melem/s) | 144 µs (14.19 Melem/s) | 725 µs (2.82 Melem/s) | 4.80× | **0.96×** | 5.02: **gpu slower** |
+| 5,000 | 1.69 ms (2.96 Melem/s) | 252 µs (19.84 Melem/s) | 924 µs (5.41 Melem/s) | 6.71× | 1.83× | 3.67: **gpu slower** |
+| 50,000 | 16.6 ms (3.00 Melem/s) | 1.95 ms (25.66 Melem/s) | 3.10 ms (16.14 Melem/s) | 8.54× | 5.37× | 1.59: **gpu slower** |
 
-Criterion's median estimate of `cargo bench -p tayga-drain --bench mining -- fingerprint`, scalar and parallel from one run (a later run than the first scalar-only table: the machine was about 21 % slower on scalar, so compare ratios, not absolute times). Batches below 512 bodies run on the calling thread (`PAR_MIN_BATCH`), so 5 and 64 equal scalar. `parallel` equals `ScalarFingerprinter` on the corpus, on NUL and non-ASCII edge cases either side of 512, and on random batches (`tests/backends.rs`). Every ASCII body equals `reference_fingerprint` (`tests/fingerprint.rs`); non-ASCII bodies take the Drain path.
+Criterion's point estimate (the middle value of the confidence interval) of `cargo bench -p tayga-drain --bench mining --features gpu -- fingerprint`, all three backends from one run on 2026-10-07 (this run replaces the earlier scalar/parallel-only table; its scalar times were within 3 % of it). `gpu` is `GpuFingerprinter` on the M3 Max through Metal (wgpu 30.0.1).
+
+- **Below `GPU_MIN_BATCH` (2,048) the GPU backend runs scalar**, so 5, 64 and 512 equal scalar. Batches under 512 run on the calling thread for `parallel` too (`PAR_MIN_BATCH`).
+- **The GPU is slower than `parallel` at every size**: 5.0× slower at 2,048, 3.7× at 5,000, 1.6× at 50,000.
+- **Against one thread** the GPU is 4 % slower at 2,048 (its first GPU size), 1.83× faster at 5,000 and 5.37× faster at 50,000. The spike (spec §2.5) measured 5.6 and 15.6 M elem/s at 5,000 and 50,000; this run measured 5.41 and 16.14.
+- **Fixed dispatch cost: 279 µs** (criterion point estimate; interval 276–284 µs), from `fingerprint_gpu_dispatch`: 2,048 empty bodies, so the kernel does almost nothing and buffer creation, upload, dispatch and readback dominate. That is 40 % of the 725 µs at 2,048. A line through the 5,000 and 50,000 points has an intercept of about 680 µs, so the per-body cost is not linear at small batches; the 279 µs is the direct measurement.
+
+Correctness: `parallel` and `gpu` equal `ScalarFingerprinter` on the corpus (50,000 bodies), on NUL, non-ASCII and empty edge cases either side of their thresholds (for `gpu` also 2,048 + 1, + 63, + 64, + 65, which end inside, at and past a 64-invocation workgroup), and on random batches (`tests/backends.rs`; the GPU proptest has 32 cases of up to 3,000 bodies). `gpu::tests::the_kernel_equals_fingerprint_body_on_small_batches` runs the kernel itself, without the CPU threshold, on batches of 1, 2, 63, 64, 65 and 129 bodies; it fails when the kernel's NUL rule is removed (checked by mutation, then reverted). Every ASCII body equals `reference_fingerprint` (`tests/fingerprint.rs`); NUL and non-ASCII bodies take the Drain path.
+
+Reproduce (GPU rows need a build with the feature and an adapter): `cargo bench -p tayga-drain --bench mining --features gpu -- fingerprint` and `cargo test -p tayga-drain --features gpu --test backends`.
 
 ## Cache
 
@@ -149,4 +158,6 @@ Filled by Task 6/7.
 
 ## Decisions
 
-Filled by Task 7.
+- **Default backend: `scalar`.** The logminer's batch is one Kafka record, 5.2 logs on average (Live load above). At 5 bodies `parallel` and `gpu` both run on the calling thread and measure the same as scalar (2.44, 2.44 and 2.43 µs), so neither earns a default.
+- **GPU: kept behind the `gpu` feature, not recommended.** It is slower than `parallel` at every measured size and passes one thread only from about 5,000 bodies (4 % slower at 2,048), a batch the logminer never forms. It is not in the Docker images; `logminer.fingerprinter = "gpu"` in a build without the feature is a startup error.
+- **Arrow: not added** (spec §3.9).

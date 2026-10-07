@@ -49,11 +49,21 @@ fn stages(c: &mut Criterion) {
     });
     g.finish();
 }
+
 fn backends() -> Vec<Box<dyn BatchFingerprinter>> {
-    vec![
+    let cpu: Vec<Box<dyn BatchFingerprinter>> = vec![
         Box::new(ScalarFingerprinter),
         Box::new(ParallelFingerprinter),
-    ]
+    ];
+    #[cfg(feature = "gpu")]
+    let cpu = {
+        let mut v = cpu;
+        if let Some(g) = tayga_drain::gpu::GpuFingerprinter::new() {
+            v.push(Box::new(g));
+        }
+        v
+    };
+    cpu
 }
 
 /// Every backend at the batch sizes of spec §2.5.
@@ -106,5 +116,30 @@ fn cached(c: &mut Criterion) {
     g.finish();
 }
 
+/// The GPU's fixed cost: `GPU_MIN_BATCH` empty bodies (each one emits only `<empty>`), so
+/// upload, dispatch and readback dominate.
+#[cfg(feature = "gpu")]
+fn gpu_dispatch(c: &mut Criterion) {
+    use tayga_drain::gpu::{GPU_MIN_BATCH, GpuFingerprinter};
+    let Some(gpu) = GpuFingerprinter::new() else {
+        eprintln!("no GPU adapter: gpu_dispatch skipped");
+        return;
+    };
+    let mut batch = BodyBatch::new();
+    for _ in 0..GPU_MIN_BATCH {
+        assert!(batch.push(""));
+    }
+    let mut out = Vec::new();
+    c.bench_function("fingerprint_gpu_dispatch", |b| {
+        b.iter(|| {
+            gpu.fingerprint(&batch, true, &mut out);
+            black_box(&out);
+        })
+    });
+}
+
+#[cfg(feature = "gpu")]
+criterion_group!(benches, stages, fingerprint, cached, gpu_dispatch);
+#[cfg(not(feature = "gpu"))]
 criterion_group!(benches, stages, fingerprint, cached);
 criterion_main!(benches);
