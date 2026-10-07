@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC2015  # `test && test || die` is intended: die always exits.
 # Tayga installer: runs the standalone Docker Compose stack (Tayga, ClickHouse, Redpanda).
 #
 #   curl -fsSL https://raw.githubusercontent.com/softberries/tayga/master/scripts/install.sh | sh
