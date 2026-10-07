@@ -8,7 +8,7 @@ import { Picture } from 'astro:assets';
 import Default from '@astrojs/starlight/components/Hero.astro';
 import Icon from './landing/Icon.astro';
 import { GITHUB_URL, href } from '../lib/links';
-import storiesDark from '../assets/screens/stories-dark.png';
+import heroDark from '../assets/screens/hero-dark.png';
 
 const isLanding = Astro.locals.starlightRoute.id === '';
 ---
@@ -58,18 +58,18 @@ const isLanding = Astro.locals.starlightRoute.id === '';
 					<span />
 					<span />
 					<span />
-					<p>localhost:8090 · Stories</p>
+					<p>localhost:8090 · Story</p>
 				</div>
 				<Picture
-					src={storiesDark}
+					src={heroDark}
 					formats={['avif', 'webp']}
 					widths={[720, 1080, 1440, 2160]}
 					sizes="(min-width: 76rem) 70rem, 94vw"
 					loading="eager"
 					fetchpriority="high"
-					alt="The Tayga Stories page in dark theme: KPI tiles for error and slow stories, the story-groups table with trend sparklines, and an inspector showing the selected group's request path and root cause."
+					alt="A Tayga error story in dark theme: the summary &quot;payment charge failed&quot;, the root cause in the payment service's charge span, the request path from load-generator through checkout to payment, and the waterfall of the failing spans ending in the highlighted root-cause span."
 				/>
-				<figcaption class="sr-only">The Stories page of the Tayga web app, captured from a running stack with the OpenTelemetry demo.</figcaption>
+				<figcaption class="sr-only">An error story in the Tayga web app, captured from a running stack with the OpenTelemetry demo.</figcaption>
 			</figure>
 		</section>
 	) : (
