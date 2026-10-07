@@ -259,6 +259,42 @@ The integration test `argmax_baselines_equal_final_over_duplicates` (`crates/tay
 
 It also pins the documented difference: a newer version that moves a trace out of the window. `FINAL` drops that trace; the `argMax` dedup counts its in-window version.
 
+## Plan 10: trace search
+
+The trace search (`TRACE_SEARCH` in `crates/tayga-api/src/repo.rs`, `GET /api/v1/traces/search`) read `trace_summaries FINAL`: the whole table on every request, because the table is `ORDER BY trace_id` and the `ts` filter pruned nothing. Since `1681aee` it reads only the rows within 600 s (`TRACE_VERSION_SLACK_SECS`) of the window. It deduplicates them with `argMax(…, (span_count, ts)) GROUP BY trace_id`, then applies the filters a version can change (window, endpoint, duration, error flag) to the newest version, then `ORDER BY ts DESC, trace_id LIMIT`. The touched-service filter is the same for every version, so it runs before the dedup. The edges where the result can differ from `FINAL` are in the constant's doc comment.
+
+Sources, compared only within one source:
+- **live 10-06**: spec §2.7, the `system.query_log` hour of 2026-10-06 (old code, real UI use);
+- **isolated**: the old and the new SQL run back to back on 2026-10-07 at 09:48 UTC on the live `tayga` database, with `readonly=2`, `use_query_cache=0` and 3 runs each, read from `system.query_log`. The window was the default `1h` request: `[end - 3600, end + 60)` with `end` fixed at 09:43:28 UTC, so ingest could not move it. CPU is `ProfileEvents['OSCPUVirtualTimeMicroseconds']`, as the median (min to max) of 3 runs;
+- **deployed**: four `GET /api/v1/traces/search` requests at 09:48 UTC, after `make up`, read from `system.query_log`.
+
+| Request (isolated) | CPU ms, old | CPU ms, new | Rows read, old / new | Bytes read, old / new | Result rows |
+|---|---|---|---|---|---|
+| default (`1h`, limit 100) | 423 (392–464) | **72** (70–77) | 4.61 M / 0.30 M | 239.4 / **16.5 MiB** (14.5×) | 100, identical |
+| `service=frontend-web` | 404 | 70 | 4.61 M / 0.30 M | 243.7 / 16.5 MiB | 100, same set |
+| `service=cart&touched=1` | 395 | 28 | 4.65 M / 0.34 M | 240.6 / 17.7 MiB | 100, identical |
+| `endpoint=GET /api/cart` | 408 | 74 | 4.61 M / 0.30 M | 243.7 / 16.5 MiB | 100, identical |
+| `min_ms=1000` | 431 | 76 | 4.61 M / 0.30 M | 273.7 / 16.5 MiB | 100, identical |
+| `max_ms=5` | 428 | 75 | 4.61 M / 0.30 M | 273.7 / 16.5 MiB | 100, identical |
+| `errors=1` | 406 | 71 | 4.65 M / 0.30 M | 239.5 / 16.5 MiB | 17, identical |
+| `limit=500` | 390 | 75 | 4.61 M / 0.30 M | 239.4 / 16.5 MiB | 500, same set |
+
+- **Results.** Every request returned the same rows. Two came back in another order: `service=frontend-web` and `limit=500`. There, only rows with an equal `ts` swap places. `FINAL` left their order unspecified; the new query orders them by `trace_id`. The `ts` lists are identical, and so are the results once ties are sorted by `trace_id`.
+- **Before the change** (isolated, 09:26 UTC, old SQL only, window ending 09:21:48): the default request took 400 CPU ms (381–488), 4.53 M rows and 236.5 MiB. A draft of the new SQL, with the slack written inline instead of bound, ran on the same window 7 s later. It returned the same 100 rows from 0.27 M rows and 14.7 MiB.
+- **Deployed.** The four requests ran the new SQL with `max_execution_time` 15. They read 302,685 rows and 16.46 MiB and took 70.6 to 77.2 CPU ms each.
+- **Live 10-06 estimate.** At that hour's 172 runs, the isolated CPU means about 73 CPU s/h before and about 12 after. The live hour measured 147 CPU s/h for the old query.
+- **A live edge.** One `flagd` `EventStream` trace id has three versions, all of 2 spans: 2026-10-06 17:46 and 2026-10-07 05:32 and 06:32 UTC. For `service=payment` over 05:00 to 06:00, `FINAL` returns nothing, because the trace's newest version is at 06:32. The new query returns the 05:32 version, because the scan never reads the 06:32 one. This is the documented "versions more than the slack apart" edge. Span start times within one trace spread at most 52 s in the last hour measured.
+
+The IT `argmax_trace_search_equals_final_over_duplicates` (`crates/tayga-api/tests/repo_it.rs`) runs the old `FINAL` SQL, copied verbatim, against `ChRepo::traces_search` over deliberate duplicates in separate parts, for 14 filter and limit combinations. The duplicates are:
+- a version that changes the endpoint, the duration and the error flag;
+- moves into and out of the window across both edges;
+- an identical replay;
+- a span-count tie whose later insert has the later `ts`;
+- a version that clears the error flag;
+- five traces sharing one `ts`, cut by `LIMIT 3`.
+
+It also asserts the far-apart edge. It fails when `argMax` becomes `argMin`, and when the slack is 0.
+
 ## Decisions
 
 - **Default backend: `scalar`.** The logminer's batch is one Kafka record, 5.2 logs on average (Live load above). At 5 bodies `parallel` and `gpu` both run on the calling thread and measure the same as scalar (2.44, 2.44 and 2.43 µs), so neither earns a default.
