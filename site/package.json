@@ -9,7 +9,8 @@
     "preview": "astro preview",
     "astro": "astro",
     "check": "astro check",
-    "linkcheck": "node scripts/check-links.mjs"
+    "linkcheck": "node scripts/check-links.mjs",
+    "capture": "node scripts/capture.ts"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.42.5",
@@ -18,6 +19,7 @@
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.10",
+    "playwright": "^1.63.0",
     "starlight-links-validator": "^0.26.0",
     "typescript": "^6.0.3"
   }
