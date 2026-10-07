@@ -15,3 +15,7 @@ site/.astro/
 # macOS and local tool output
 .DS_Store
 .playwright-mcp/
+
+# Internal planning docs, kept locally only
+docs/superpowers/
+idea.txt
