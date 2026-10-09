@@ -8,7 +8,7 @@ COPY ui/ ./
 RUN npm run build
 
 # lukemathwalker/cargo-chef:latest-rust-1.98-trixie, pinned by digest on 2026-10-06.
-FROM lukemathwalker/cargo-chef:latest-rust-1.98-trixie@sha256:94a624f8475651c2b56281b29936cab5cbe21c431677880b6a98d47561fa3289 AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.99-trixie@sha256:c11fb4b1e7a7caf6ba0dfed8f059011bb2024465b8be5c4dfa330672698cca1a AS chef
 RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
