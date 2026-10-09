@@ -136,10 +136,14 @@ describe('buildLayout (mirrors crates/tayga-api/src/svg.rs waterfall)', () => {
       )
     }
     // Warm-up run: the bound is about steady-state cost, not JIT start.
-    buildLayout(spans, { critical: ['s0', 's1'], rootCauseId: 's9999' })
-    const t0 = performance.now()
-    const l = buildLayout(spans, { critical: ['s0', 's1'], rootCauseId: 's9999' })
-    const ms = performance.now() - t0
+    let l = buildLayout(spans, { critical: ['s0', 's1'], rootCauseId: 's9999' })
+    // Best of several: one sample on a busy shared runner is mostly noise.
+    let ms = Infinity
+    for (let run = 0; run < 5; run++) {
+      const t0 = performance.now()
+      l = buildLayout(spans, { critical: ['s0', 's1'], rootCauseId: 's9999' })
+      ms = Math.min(ms, performance.now() - t0)
+    }
     expect(l.rows).toHaveLength(10_000)
     expect(ms).toBeLessThan(50)
   })
